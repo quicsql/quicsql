@@ -18,7 +18,9 @@ func (b *memoryBackend) Open(ctx context.Context) (*sqlite.DB, error) {
 	if b.shared {
 		return sqlite.OpenShared(b.name)
 	}
-	return sqlite.OpenInMemory()
+	// Private :memory: is per-connection; pin the pool to ONE connection so every
+	// request sees the same database instead of a fresh empty one per pooled conn.
+	return sqlite.Open(sqlite.Config{Path: sqlite.InMemory, MaxOpenConns: 1})
 }
 
 func (b *memoryBackend) Kind() string {

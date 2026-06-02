@@ -85,3 +85,16 @@ func toArgs(vs []Value) []any {
 	}
 	return a
 }
+
+// size is an approximate serialized byte cost of a cell, used to bound a result
+// so a large read can't exhaust memory. Numbers count as 8.
+func (v Value) size() int64 {
+	switch v.Kind {
+	case KindText:
+		return int64(len(v.Text))
+	case KindBlob:
+		return int64(len(v.Blob))
+	default:
+		return 8
+	}
+}

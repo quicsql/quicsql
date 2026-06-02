@@ -8,8 +8,26 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"log/slog"
+	"fmt"
 )
+
+// DefaultMaxRows and DefaultMaxResultBytes bound a single result so a large
+// SELECT can't OOM the process. A zero/negative configured limit falls back to
+// these — a network-exposed result set is never unbounded.
+const (
+	DefaultMaxRows        = 100_000
+	DefaultMaxResultBytes = 64 << 20
+)
+
+// BatchError wraps the error from a failing batch statement with its index, so
+// the caller can tell the client which statement rolled the batch back.
+type BatchError struct {
+	Index int
+	Err   error
+}
+
+func (e *BatchError) Error() string { return fmt.Sprintf("batch statement %d: %v", e.Index, e.Err) }
+func (e *BatchError) Unwrap() error { return e.Err }
 
 // Queryer is the database/sql surface the engine needs; *sql.DB, *sql.Conn, and
 // *sql.Tx all satisfy it.
@@ -18,19 +36,23 @@ type Queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// Engine holds the row/byte caps and the log seam. Phase 7 adds the slow-log
-// (driver TraceProfile), limits, and cancellation wiring around these calls.
+// Engine holds the result caps. Phase 7 adds the slow-log (driver TraceProfile)
+// and the richer limits/cancellation wiring around these calls.
 type Engine struct {
-	maxRows int
-	log     *slog.Logger
+	maxRows  int
+	maxBytes int64
 }
 
-// New builds an Engine. maxRows <= 0 means unbounded (Phase 0 default).
-func New(maxRows int, log *slog.Logger) *Engine {
-	if log == nil {
-		log = slog.Default()
+// New builds an Engine. A non-positive limit falls back to the safe default, so
+// a result is always bounded.
+func New(maxRows int, maxResultBytes int64) *Engine {
+	if maxRows <= 0 {
+		maxRows = DefaultMaxRows
 	}
-	return &Engine{maxRows: maxRows, log: log}
+	if maxResultBytes <= 0 {
+		maxResultBytes = DefaultMaxResultBytes
+	}
+	return &Engine{maxRows: maxRows, maxBytes: maxResultBytes}
 }
 
 // Query runs a row-returning statement and scans the rows into a Result,
@@ -50,8 +72,9 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 	for i, c := range cols {
 		res.Columns[i] = Column{Name: c}
 	}
+	var bytes int64
 	for rows.Next() {
-		if e.maxRows > 0 && len(res.Rows) >= e.maxRows {
+		if len(res.Rows) >= e.maxRows {
 			res.Truncated = true
 			break
 		}
@@ -66,8 +89,13 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 		row := make([]Value, len(cols))
 		for i, v := range dest {
 			row[i] = fromAny(v)
+			bytes += row[i].size()
 		}
 		res.Rows = append(res.Rows, row)
+		if bytes >= e.maxBytes {
+			res.Truncated = true
+			break
+		}
 	}
 	return res, wrap(rows.Err())
 }
@@ -84,21 +112,22 @@ func (e *Engine) Exec(ctx context.Context, q Queryer, s Statement) (*Result, err
 	return res, nil
 }
 
-// Batch runs a set of mutation statements in a single transaction — the
-// autocommit-batch primitive. Interactive transactions (BEGIN…COMMIT spanning
-// requests on a pinned conn) arrive in Phase 2. A read-mixed batch and the
-// Hrana batch step-conditions are also Phase 2.
+// Batch runs a set of statements in ONE explicit transaction (BeginTx/Commit),
+// all-or-nothing. Each statement dispatches via Run, so reads return rows and
+// writes return affected/last-insert. A failure rolls the whole batch back and
+// returns a *BatchError carrying the failing index. Hrana batch step-conditions
+// and the interactive (pinned-conn) transactions arrive in Phase 2.
 func (e *Engine) Batch(ctx context.Context, db *sql.DB, stmts []Statement) ([]*Result, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, wrap(err)
 	}
 	out := make([]*Result, 0, len(stmts))
-	for _, s := range stmts {
-		res, err := e.Exec(ctx, tx, s)
+	for i, s := range stmts {
+		res, err := e.Run(ctx, tx, s)
 		if err != nil {
 			_ = tx.Rollback()
-			return nil, err
+			return nil, &BatchError{Index: i, Err: err}
 		}
 		out = append(out, res)
 	}

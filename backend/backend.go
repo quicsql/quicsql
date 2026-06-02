@@ -19,6 +19,11 @@ import (
 // Backend opens exactly one *sqlite.DB for a logical database. Open is called
 // once per process by the registry; a single Close on the returned handle tears
 // down the pool and any VFS the open registered.
+//
+// ctx is reserved: the upstream sqlite/vault Open calls are context-free, so it
+// cannot cancel the open itself today — the registry uses ctx to bound the wait
+// for a concurrent open (see registry.Get). It stays in the signature for a
+// future context-aware upstream open.
 type Backend interface {
 	Open(ctx context.Context) (*sqlite.DB, error)
 	Kind() string
@@ -95,9 +100,6 @@ func accessMode(mode string) sqlite.AccessMode {
 // keys fall through to Extra.
 func pragmas(db config.Database) sqlite.Pragmas {
 	p := sqlite.Pragmas{}
-	if db.Pool.BusyTimeout > 0 {
-		p.BusyTimeout = db.Pool.BusyTimeout
-	}
 	for k, v := range db.Pragmas {
 		s := fmt.Sprint(v)
 		switch k {
@@ -125,6 +127,12 @@ func pragmas(db config.Database) sqlite.Pragmas {
 			}
 			p.Extra[k] = s
 		}
+	}
+	// pool.busy_timeout is the typed, authoritative surface: it wins over a
+	// busy_timeout in the free-form pragmas map (avoids a silent unit-mismatched
+	// override between the two config surfaces).
+	if db.Pool.BusyTimeout > 0 {
+		p.BusyTimeout = db.Pool.BusyTimeout
 	}
 	return p
 }

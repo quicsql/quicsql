@@ -85,6 +85,22 @@ func TestRetryAfterFailedOpen(t *testing.T) {
 	}
 }
 
+// TestWarm regresses the eager fail-fast contract: Warm errors if any seed
+// can't open, and succeeds when all open.
+func TestWarm(t *testing.T) {
+	bad := registry.New(map[string]backend.Backend{"good": &fakeBackend{}, "bad": &fakeBackend{failN: 100}}, nil)
+	t.Cleanup(func() { _ = bad.Close() })
+	if err := bad.Warm(context.Background()); err == nil {
+		t.Fatal("Warm: want error for a failing seed, got nil")
+	}
+
+	ok := registry.New(map[string]backend.Backend{"a": &fakeBackend{}, "b": &fakeBackend{}}, nil)
+	t.Cleanup(func() { _ = ok.Close() })
+	if err := ok.Warm(context.Background()); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+}
+
 // TestReserveGuards covers the offline-op reservation guards.
 func TestReserveGuards(t *testing.T) {
 	be := &fakeBackend{}
@@ -125,7 +141,7 @@ func TestTimeRoundTrip(t *testing.T) {
 	}
 	reg := registry.New(map[string]backend.Backend{"d": be}, nil)
 	t.Cleanup(func() { _ = reg.Close() })
-	eng := engine.New(0, nil)
+	eng := engine.New(0, 0)
 	ctx := context.Background()
 
 	db, release, err := reg.Get(ctx, "d")

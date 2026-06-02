@@ -16,11 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
 	"gosqlite.org/server/backend"
 )
+
+// ErrUnknownDB is returned (wrapped) when a name has no configured backend.
+var ErrUnknownDB = errors.New("registry: unknown database")
 
 // ErrReserved is returned by Get while a database is held for an offline op.
 var ErrReserved = errors.New("registry: database reserved for an offline operation")
@@ -72,7 +76,7 @@ func (r *Registry) Get(ctx context.Context, name string) (*DB, func(), error) {
 		be := r.backends[name]
 		if be == nil {
 			r.mu.Unlock()
-			return nil, nil, fmt.Errorf("registry: unknown database %q", name)
+			return nil, nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
 		}
 		// We are the opener: pre-count a ref (for the handle we'll return) and
 		// mark opening so Reserve/Close see the in-flight open.
@@ -136,15 +140,37 @@ func (r *Registry) releaseFunc(e *entry) func() {
 	}
 }
 
+// Warm eagerly opens every configured database so a bad seed (missing file,
+// wrong key) fails at STARTUP rather than on a client's first request. Each
+// handle is released immediately (it stays open at ref 0). Returns the first
+// open error, honoring ctx.
+func (r *Registry) Warm(ctx context.Context) error {
+	r.mu.Lock()
+	names := make([]string, 0, len(r.backends))
+	for name := range r.backends {
+		names = append(names, name)
+	}
+	r.mu.Unlock()
+	sort.Strings(names)
+	for _, name := range names {
+		_, release, err := r.Get(ctx, name)
+		if err != nil {
+			return fmt.Errorf("registry: warm %q: %w", name, err)
+		}
+		release()
+	}
+	return nil
+}
+
 // Reserve takes exclusive ownership of name for an offline vault op, mirroring
-// vault's own reservePath: it fails (ErrBusy) if the handle is opening or has
-// active users, else drains and closes it and blocks new Gets until the returned
-// release runs.
+// vault's own reservePath: it fails (ErrBusy) if the handle is opening or still
+// has active users; otherwise it closes the idle handle and blocks new Gets
+// until the returned release runs. It does not drain active users — it refuses.
 func (r *Registry) Reserve(name string) (release func(), err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.backends[name] == nil {
-		return nil, fmt.Errorf("registry: unknown database %q", name)
+		return nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
 	}
 	if e := r.entries[name]; e != nil {
 		if e.opening || e.refs > 0 || e.reserved {

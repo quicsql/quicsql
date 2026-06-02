@@ -42,7 +42,7 @@ func TestPhase0_MultiplexAcrossBackends(t *testing.T) {
 
 	reg := registry.New(backends, nil)
 	t.Cleanup(func() { _ = reg.Close() })
-	eng := engine.New(0, nil)
+	eng := engine.New(0, 0)
 	ctx := context.Background()
 
 	for _, name := range []string{"plain", "cache", "vault"} {

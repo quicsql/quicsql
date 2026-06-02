@@ -54,7 +54,9 @@ type Credentials struct {
 }
 
 // Authenticator turns transport credentials into a Principal. Phase 4 supplies
-// implementations; the interface is fixed here so the handler can depend on it.
+// the implementations AND wires one into the handler (today the handler serves
+// every request). The interface is defined here so that wiring is a drop-in;
+// nothing consumes it yet.
 type Authenticator interface {
 	Authenticate(ctx context.Context, cr Credentials) (*Principal, error)
 }

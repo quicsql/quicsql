@@ -18,7 +18,14 @@ type Config struct {
 	Databases []Database     `yaml:"databases"`
 	Limits    Limits         `yaml:"limits"`
 	Logging   Logging        `yaml:"logging"`
+
+	warnings []string // config sections present but not yet consumed (logged at startup)
 }
+
+// Warnings returns human-readable notes about config that parsed but has no
+// effect yet (recognized-but-future sections, unknown keys), for the daemon to
+// log so a silently-inert section isn't mistaken for a working one.
+func (c *Config) Warnings() []string { return c.warnings }
 
 type Server struct {
 	DataDir   string    `yaml:"data_dir"`
@@ -129,6 +136,8 @@ type Grant struct {
 
 type Limits struct {
 	MaxRows               int           `yaml:"max_rows"`
+	MaxResultBytes        int64         `yaml:"max_result_bytes"`
+	MaxRequestBytes       int64         `yaml:"max_request_bytes"`
 	StatementTimeout      time.Duration `yaml:"statement_timeout"`
 	TxIdleTimeout         time.Duration `yaml:"tx_idle_timeout"`
 	MaxWriteSessionsPerDB int           `yaml:"max_write_sessions_per_db"`

@@ -20,7 +20,8 @@ type Session struct {
 }
 
 // Store issues and resumes sessions. Phase 2 provides the concrete baton store
-// and reaper; the interface is fixed here so the protocol layer can depend on it.
+// and reaper AND wires it into the protocol layer; the interface is defined here
+// so that wiring is a drop-in. Nothing depends on it yet.
 type Store interface {
 	// Open starts a new session on db and returns its baton.
 	Open(ctx context.Context, db *registry.DB) (baton string, s *Session, err error)
