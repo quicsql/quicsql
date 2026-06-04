@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -18,19 +19,21 @@ import (
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/registry"
+	"gosqlite.org/server/session"
 )
 
 const defaultMaxBody = 8 << 20 // 8 MiB request-body cap
 
-// Handler is the quicSQL HTTP handler. Auth is a Phase 4 seam; Phase 1 serves
+// Handler is the quicSQL HTTP handler. Auth is a Phase 4 seam; Phase 1/2 serve
 // every request (bind to localhost/UDS).
 type Handler struct {
-	reg     *registry.Registry
-	eng     *engine.Engine
-	route   config.Routing
-	maxBody int64
-	stmtTO  time.Duration // per-request statement timeout (0 = none)
-	log     *slog.Logger
+	reg      *registry.Registry
+	eng      *engine.Engine
+	route    config.Routing
+	maxBody  int64
+	stmtTO   time.Duration // per-request statement timeout (0 = none)
+	log      *slog.Logger
+	sessions *session.Store // Hrana interactive-transaction streams (nil = disabled)
 }
 
 // Option customizes a Handler.
@@ -57,6 +60,11 @@ func WithLogger(l *slog.Logger) Option {
 			h.log = l
 		}
 	}
+}
+
+// WithSessions enables the Hrana pipeline endpoints, backed by the given store.
+func WithSessions(s *session.Store) Option {
+	return func(h *Handler) { h.sessions = s }
 }
 
 // New builds the handler. When neither path nor host routing is configured, path
@@ -92,6 +100,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch endpoint {
 	case "/query":
 		h.handleQuery(w, r, db)
+	case "/v2/pipeline", "/v3/pipeline":
+		h.handlePipeline(w, r, db)
+	case "/v2", "/v3":
+		w.WriteHeader(http.StatusOK) // Hrana version-support probe
+	case "/v2/cursor", "/v3/cursor":
+		writeErr(w, http.StatusNotImplemented, "cursor requests are not implemented yet")
 	default:
 		writeErr(w, http.StatusNotFound, "unknown endpoint "+endpoint)
 	}
@@ -169,6 +183,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(append(buf, '\n'))
+}
+
+// readBody reads the request body under the configured size cap.
+func (h *Handler) readBody(r *http.Request) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r.Body, h.maxBody))
+}
+
+// withTimeout applies the per-statement timeout (if configured) to ctx.
+func (h *Handler) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if h.stmtTO > 0 {
+		return context.WithTimeout(ctx, h.stmtTO)
+	}
+	return ctx, func() {}
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {

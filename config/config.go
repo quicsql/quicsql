@@ -140,6 +140,7 @@ type Limits struct {
 	MaxRequestBytes       int64         `yaml:"max_request_bytes"`
 	StatementTimeout      time.Duration `yaml:"statement_timeout"`
 	TxIdleTimeout         time.Duration `yaml:"tx_idle_timeout"`
+	MaxTxLifetime         time.Duration `yaml:"max_tx_lifetime"`
 	MaxWriteSessionsPerDB int           `yaml:"max_write_sessions_per_db"`
 }
 

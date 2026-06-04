@@ -55,10 +55,23 @@ func New(maxRows int, maxResultBytes int64) *Engine {
 	return &Engine{maxRows: maxRows, maxBytes: maxResultBytes}
 }
 
+// bindArgs builds the database/sql argument list — sql.Named for named args,
+// positional otherwise.
+func (s Statement) bindArgs() []any {
+	if len(s.Named) > 0 {
+		a := make([]any, len(s.Named))
+		for i, n := range s.Named {
+			a[i] = sql.Named(n.Name, n.Value.arg())
+		}
+		return a
+	}
+	return toArgs(s.Args)
+}
+
 // Query runs a row-returning statement and scans the rows into a Result,
 // honoring the max-rows cap (setting Truncated when hit).
 func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, error) {
-	rows, err := q.QueryContext(ctx, s.SQL, toArgs(s.Args)...)
+	rows, err := q.QueryContext(ctx, s.SQL, s.bindArgs()...)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -102,7 +115,7 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 
 // Exec runs a mutation/DDL statement and reports affected rows + last insert id.
 func (e *Engine) Exec(ctx context.Context, q Queryer, s Statement) (*Result, error) {
-	r, err := q.ExecContext(ctx, s.SQL, toArgs(s.Args)...)
+	r, err := q.ExecContext(ctx, s.SQL, s.bindArgs()...)
 	if err != nil {
 		return nil, wrap(err)
 	}

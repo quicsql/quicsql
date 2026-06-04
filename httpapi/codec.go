@@ -16,6 +16,9 @@ import (
 // a blob boxed as {"base64": "..."} so it can't be confused with text. A
 // non-finite REAL (±Inf/NaN — which JSON numbers cannot represent) is emitted as
 // the string "Infinity"/"-Infinity"/"NaN" so the response stays encodable.
+//
+// Counterpart: hValue.MarshalJSON (hrana_types.go) is the Hrana tagged form.
+// Both switch on engine.Kind and must be updated together if a Kind is added.
 func encodeValue(v engine.Value) any {
 	switch v.Kind {
 	case engine.KindInt:

@@ -9,12 +9,40 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gosqlite.org"
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/secret"
 )
+
+// securityOnce guards the process-global authorizer registration.
+var securityOnce sync.Once
+
+// installSecurity registers a connection authorizer that denies ATTACH/DETACH on
+// every connection the driver opens. Unlike a leading-keyword check it fires at
+// statement-compile time, so it also catches ATTACH buried inside a
+// multi-statement `sequence`/script — closing the filesystem-escape the keyword
+// guard alone misses. Interim default-deny ahead of the Phase-4 per-principal
+// authorizer; ATTACH/DETACH are never needed by the server itself.
+func installSecurity() {
+	securityOnce.Do(func() {
+		sqlite.RegisterAutoHook(func(c *sqlite.Conn) error {
+			c.RegisterAuthorizer(denyAttachDetach)
+			return nil
+		})
+	})
+}
+
+func denyAttachDetach(op int, _, _, _, _ string) int {
+	switch op {
+	case sqlite.SQLITE_ATTACH, sqlite.SQLITE_DETACH:
+		return sqlite.SQLITE_DENY
+	default:
+		return sqlite.SQLITE_OK
+	}
+}
 
 // Backend opens exactly one *sqlite.DB for a logical database. Open is called
 // once per process by the registry; a single Close on the returned handle tears
@@ -32,6 +60,7 @@ type Backend interface {
 
 // For selects and constructs the backend for one database entry.
 func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
+	installSecurity() // register the ATTACH/DETACH deny before any connection opens
 	switch db.Backend {
 	case "file", "":
 		return &fileBackend{cfg: baseConfig(db, dataDir), ro: db.Mode == "ro"}, nil

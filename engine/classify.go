@@ -18,11 +18,12 @@ var ErrDenied = errors.New("statement not permitted by server policy")
 // / single-owner vault invariant. This is the interim default-deny ahead of the
 // full per-principal authorizer (Phase 4).
 //
-// The read/write split is a Phase-1 heuristic: the leading keyword plus a
-// RETURNING probe. It is cheap and covers the thin native endpoint; the Hrana
-// path (Phase 2) uses the driver's (*Stmt).Readonly instead. A misclassified
-// writing-CTE without RETURNING still EXECUTES correctly (QueryContext runs it);
-// only its rows_affected metadata goes unreported.
+// The read/write split is a heuristic — the leading keyword plus a RETURNING
+// probe — used on BOTH the native and Hrana paths (Hrana `describe` reports
+// is_readonly from IsReadOnly). Wiring the driver's (*Stmt).Readonly for exact
+// classification is a follow-up. A misclassified writing-CTE without RETURNING
+// still EXECUTES correctly (QueryContext runs it); only its rows_affected
+// metadata goes unreported.
 func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, error) {
 	switch strings.ToUpper(firstToken(s.SQL)) {
 	case "ATTACH", "DETACH":
@@ -33,6 +34,10 @@ func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, erro
 	}
 	return e.Exec(ctx, q, s)
 }
+
+// IsReadOnly reports whether a statement only reads (SELECT and friends, and not
+// a writing RETURNING). Used by Hrana `describe`. Phase-1-grade heuristic.
+func IsReadOnly(sql string) bool { return isReadOnly(sql) && !hasReturning(sql) }
 
 func isReadOnly(sql string) bool {
 	switch strings.ToUpper(firstToken(sql)) {

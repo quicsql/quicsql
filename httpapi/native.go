@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"gosqlite.org/server/engine"
@@ -54,13 +53,9 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 		writeErr(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
-	ctx := r.Context()
-	if h.stmtTO > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, h.stmtTO)
-		defer cancel()
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody))
+	ctx, cancel := h.withTimeout(r.Context())
+	defer cancel()
+	body, err := h.readBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read body")
 		return

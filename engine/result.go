@@ -1,9 +1,17 @@
 package engine
 
-// Statement is one SQL statement with its positional bind arguments.
+// Statement is one SQL statement with its bind arguments — positional (Args) or
+// named (Named), not both.
 type Statement struct {
-	SQL  string
-	Args []Value
+	SQL   string
+	Args  []Value
+	Named []NamedArg
+}
+
+// NamedArg binds a value to a named SQLite parameter (:name / @name / $name).
+type NamedArg struct {
+	Name  string
+	Value Value
 }
 
 // Column describes one result column.

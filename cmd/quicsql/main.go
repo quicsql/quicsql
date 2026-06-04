@@ -24,6 +24,7 @@ import (
 	"gosqlite.org/server/httpapi"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/secret"
+	"gosqlite.org/server/session"
 )
 
 const (
@@ -34,6 +35,8 @@ const (
 	shutdownGrace           = 10 * time.Second
 	warmTimeout             = 30 * time.Second
 	defaultStatementTimeout = 30 * time.Second
+	defaultTxIdleTimeout    = 30 * time.Second
+	reapInterval            = 15 * time.Second
 )
 
 func main() {
@@ -71,15 +74,29 @@ func main() {
 	}
 	warmCancel()
 
+	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	stmtTimeout := cfg.Limits.StatementTimeout
 	if stmtTimeout <= 0 {
 		stmtTimeout = defaultStatementTimeout
 	}
+	sessTTL := cfg.Limits.TxIdleTimeout
+	if sessTTL <= 0 {
+		sessTTL = defaultTxIdleTimeout
+	}
+	sessions, err := session.NewStore(sessTTL, cfg.Limits.MaxTxLifetime, cfg.Limits.MaxWriteSessionsPerDB)
+	if err != nil {
+		fatal(log, "init sessions", err)
+	}
+	sessions.StartReaper(appCtx, reapInterval)
+
 	eng := engine.New(cfg.Limits.MaxRows, cfg.Limits.MaxResultBytes)
 	handler := httpapi.New(reg, eng, cfg.Routing,
 		httpapi.WithLogger(log),
 		httpapi.WithMaxBody(cfg.Limits.MaxRequestBytes),
 		httpapi.WithStatementTimeout(stmtTimeout),
+		httpapi.WithSessions(sessions),
 	)
 
 	servers, err := serve(log, cfg, handler)
@@ -90,12 +107,10 @@ func main() {
 	}
 	log.Info("quicsql: ready", "databases", len(backends), "listeners", len(servers))
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	<-ctx.Done()
-
+	<-appCtx.Done()
 	log.Info("quicsql: shutting down")
 	shutdown(log, servers)
+	sessions.CloseAll()
 	if err := reg.Close(); err != nil {
 		log.Error("quicsql: registry close", "err", err)
 	}

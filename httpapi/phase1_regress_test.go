@@ -90,6 +90,17 @@ func TestAttachDeniedOverHTTP(t *testing.T) {
 	}
 }
 
+// TestNativeMultiStatementAttachDenied regresses the multi-statement ATTACH
+// bypass: a leading SELECT hides the ATTACH from a keyword check, but the
+// connection authorizer must still deny it at compile time.
+func TestNativeMultiStatementAttachDenied(t *testing.T) {
+	h := newHandlerDB(t, fileDB("app"))
+	rec := post(t, h, "/app/query", `{"sql":"SELECT 1; ATTACH DATABASE '/tmp/native_evil.db' AS e"}`)
+	if !strings.Contains(rec.Body.String(), `"error"`) {
+		t.Fatalf("multi-statement ATTACH must be denied: %d %s", rec.Code, rec.Body)
+	}
+}
+
 // TestMemoryPrivateSharesAcrossRequests regresses the private-:memory: footgun:
 // with the pool pinned to one conn, writes are visible to later reads.
 func TestMemoryPrivateSharesAcrossRequests(t *testing.T) {
