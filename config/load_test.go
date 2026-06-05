@@ -16,6 +16,31 @@ func TestValidateRejectsBadDatabaseNames(t *testing.T) {
 	}
 }
 
+func TestValidateTransportsAndTLS(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{"h2 without tls", &Config{Listeners: []Listener{{Name: "x", Transport: "h2"}}}, true},
+		{"h3 without tls", &Config{Listeners: []Listener{{Name: "x", Transport: "h3"}}}, true},
+		{"unknown transport", &Config{Listeners: []Listener{{Name: "x", Transport: "ws"}}}, true},
+		{"tls name missing", &Config{Listeners: []Listener{{Name: "x", Transport: "h2", TLS: "nope"}}}, true},
+		{"bad tls mode", &Config{TLS: map[string]TLSProfile{"p": {Mode: "weird"}}}, true},
+		{"bad min_version", &Config{TLS: map[string]TLSProfile{"p": {Mode: "self_signed", MinVersion: "1.4"}}}, true},
+		{"files without cert", &Config{TLS: map[string]TLSProfile{"p": {Mode: "files"}}}, true},
+		{"good", &Config{
+			TLS:       map[string]TLSProfile{"p": {Mode: "self_signed", MinVersion: "1.3"}},
+			Listeners: []Listener{{Name: "x", Transport: "h2", TLS: "p"}, {Name: "u", Transport: "unix"}},
+		}, false},
+	}
+	for _, c := range cases {
+		if err := c.cfg.Validate(); (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}
+
 func TestValidateRejectsBadModeAndTxLock(t *testing.T) {
 	c := &Config{Databases: []Database{{Name: "d", Backend: "file", Mode: "read-wryte"}}}
 	if err := c.Validate(); err == nil {

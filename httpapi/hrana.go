@@ -27,6 +27,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		return
 	}
 	ctx := r.Context() // per-statement timeouts are applied in execStmt / sequence
+	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read body")

@@ -10,14 +10,15 @@ import "time"
 // Config is the whole server configuration. Only the Phase 0 subset is wired to
 // behavior today; the remaining sections are parsed so the schema is stable.
 type Config struct {
-	Server    Server         `yaml:"server"`
-	Secrets   []SecretSource `yaml:"secrets"`
-	Routing   Routing        `yaml:"routing"`
-	Listeners []Listener     `yaml:"listeners"`
-	Auth      Auth           `yaml:"auth"`
-	Databases []Database     `yaml:"databases"`
-	Limits    Limits         `yaml:"limits"`
-	Logging   Logging        `yaml:"logging"`
+	Server    Server                `yaml:"server"`
+	Secrets   []SecretSource        `yaml:"secrets"`
+	Routing   Routing               `yaml:"routing"`
+	TLS       map[string]TLSProfile `yaml:"tls"`
+	Listeners []Listener            `yaml:"listeners"`
+	Auth      Auth                  `yaml:"auth"`
+	Databases []Database            `yaml:"databases"`
+	Limits    Limits                `yaml:"limits"`
+	Logging   Logging               `yaml:"logging"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
 }
@@ -61,9 +62,21 @@ type Listener struct {
 	Name       string   `yaml:"name"`
 	Transport  string   `yaml:"transport"` // h1 | h2 | h2c | h3 | unix
 	Address    string   `yaml:"address"`
-	TLS        string   `yaml:"tls"`
+	TLS        string   `yaml:"tls"` // name of a tls profile (required for h2/h3)
 	Auth       []string `yaml:"auth"`
 	SocketMode string   `yaml:"socket_mode"`
+}
+
+// TLSProfile describes how to obtain the TLS certificate for a listener.
+type TLSProfile struct {
+	Mode       string        `yaml:"mode"`        // files | self_signed | qip
+	Cert       string        `yaml:"cert"`        // files
+	Key        string        `yaml:"key"`         // files
+	ClientCA   string        `yaml:"client_ca"`   // mTLS (Phase 4)
+	MinVersion string        `yaml:"min_version"` // "1.2" | "1.3"
+	Hosts      []string      `yaml:"hosts"`       // self_signed SANs
+	Subdomain  string        `yaml:"subdomain"`   // qip
+	Refresh    time.Duration `yaml:"refresh"`     // qip reload interval
 }
 
 type Auth struct {

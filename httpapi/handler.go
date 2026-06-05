@@ -185,6 +185,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(append(buf, '\n'))
 }
 
+const bodyReadDeadline = 30 * time.Second
+
+// boundBodyRead sets a per-request read deadline so a slow-trickle body can't
+// hold a stream open indefinitely. This covers the h2/h2c/h3 case where a
+// connection-level ReadTimeout can't be used (it would kill legitimate
+// multiplexed streams); on h1 it complements the server ReadTimeout.
+func boundBodyRead(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadDeadline))
+}
+
 // readBody reads the request body under the configured size cap.
 func (h *Handler) readBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r.Body, h.maxBody))

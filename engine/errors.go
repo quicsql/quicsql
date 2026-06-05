@@ -51,8 +51,7 @@ func wrap(err error) error {
 	if err == nil {
 		return nil
 	}
-	var se *sqlite.Error
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*sqlite.Error](err); ok {
 		return &Error{Code: se.Code(), Extended: se.ExtendedCode(), Msg: se.Error()}
 	}
 	return err

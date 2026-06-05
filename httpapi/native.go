@@ -55,6 +55,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 	}
 	ctx, cancel := h.withTimeout(r.Context())
 	defer cancel()
+	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read body")
@@ -131,8 +132,7 @@ func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, dbh *regi
 			writeErr(w, http.StatusGatewayTimeout, "statement timed out")
 		default:
 			env := errorEnvelope{Error: toAPIError(err)}
-			var be *engine.BatchError
-			if errors.As(err, &be) {
+			if be, ok := errors.AsType[*engine.BatchError](err); ok {
 				env.FailedIndex = &be.Index
 			}
 			writeJSON(w, http.StatusOK, env)
@@ -173,8 +173,7 @@ func toResultJSON(r *engine.Result) resultJSON {
 // the client's own SQL) but reduces any other error to a generic message so a
 // filesystem path or driver internal never leaks to the client.
 func toAPIError(err error) apiError {
-	var e *engine.Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*engine.Error](err); ok {
 		return apiError{Message: e.Msg, Code: e.Code, ExtendedCode: e.Extended}
 	}
 	return apiError{Message: "internal error"}

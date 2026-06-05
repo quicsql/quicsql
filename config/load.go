@@ -56,15 +56,14 @@ func ValidDBName(s string) bool {
 // knownTopLevel are the config sections wired into behavior. inertTopLevel are
 // sections the plan defines but nothing consumes yet — their presence warns.
 var knownTopLevel = map[string]bool{
-	"server": true, "secrets": true, "routing": true, "listeners": true,
+	"server": true, "secrets": true, "routing": true, "tls": true, "listeners": true,
 	"auth": true, "databases": true, "limits": true, "logging": true,
 }
 
 var inertTopLevel = map[string]string{
 	"control_plane":    "runtime control plane (Phase 6)",
-	"wire_compression": "over-the-wire compression (Phase 3)",
+	"wire_compression": "over-the-wire compression (Phase 3.5)",
 	"observability":    "metrics / introspection (Phase 7)",
-	"tls":              "TLS profiles (Phase 3)",
 }
 
 // Load reads, parses, defaults, and validates a YAML config file.
@@ -157,6 +156,50 @@ func (c *Config) Validate() error {
 		case "", "deferred", "immediate", "exclusive":
 		default:
 			return fmt.Errorf("config: database %q invalid tx_lock %q (want deferred|immediate|exclusive)", db.Name, db.Pool.TxLock)
+		}
+	}
+	if err := c.validateTransports(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTransports fails fast on listener/TLS wiring errors at load rather than
+// deferring them to server startup.
+func (c *Config) validateTransports() error {
+	for _, lc := range c.Listeners {
+		switch lc.Transport {
+		case "h1", "h2", "h2c", "h3", "unix":
+		case "":
+			return fmt.Errorf("config: listener %q missing transport", lc.Name)
+		default:
+			return fmt.Errorf("config: listener %q unknown transport %q", lc.Name, lc.Transport)
+		}
+		if (lc.Transport == "h2" || lc.Transport == "h3") && lc.TLS == "" {
+			return fmt.Errorf("config: listener %q (%s) requires a tls profile", lc.Name, lc.Transport)
+		}
+		if lc.TLS != "" {
+			if _, ok := c.TLS[lc.TLS]; !ok {
+				return fmt.Errorf("config: listener %q references unknown tls profile %q", lc.Name, lc.TLS)
+			}
+		}
+	}
+	for name, p := range c.TLS {
+		switch p.Mode {
+		case "self_signed", "qip":
+		case "files":
+			if p.Cert == "" || p.Key == "" {
+				return fmt.Errorf("config: tls profile %q (files) needs cert and key", name)
+			}
+		case "":
+			return fmt.Errorf("config: tls profile %q missing mode (files|self_signed)", name)
+		default:
+			return fmt.Errorf("config: tls profile %q unknown mode %q", name, p.Mode)
+		}
+		switch p.MinVersion {
+		case "", "1.2", "1.3":
+		default:
+			return fmt.Errorf("config: tls profile %q invalid min_version %q (want 1.2 or 1.3)", name, p.MinVersion)
 		}
 	}
 	return nil
