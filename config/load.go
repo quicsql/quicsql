@@ -16,6 +16,7 @@ var Reserved = map[string]bool{
 	"_server":  true,
 	"_meta":    true,
 	"_admin":   true,
+	"_auth":    true,
 	"_health":  true,
 	"_metrics": true,
 }
@@ -33,6 +34,36 @@ var EndpointTokens = map[string]bool{
 // consulted by Validate (backend construction switches over the same set).
 var KnownBackends = map[string]bool{
 	"file": true, "memory": true, "memory-shared": true, "mvcc": true, "memdb": true, "vault": true,
+}
+
+// ListenerAuthMethods are the method names a listener may accept. `none` admits
+// unauthenticated requests as the anonymous principal; the rest each require a
+// matching principal credential. KnownAuthMethods drops `none` — it is the set a
+// principal may define a credential for.
+var (
+	ListenerAuthMethods = map[string]bool{
+		"none": true, "peercred": true, "bearer": true, "password": true, "mtls": true, "keyring": true,
+	}
+	KnownAuthMethods = map[string]bool{
+		"peercred": true, "bearer": true, "password": true, "mtls": true, "keyring": true,
+	}
+)
+
+// AuthConfigured reports whether the operator has configured any authentication
+// or authorization at all — a principal, or a grant on any database. When false,
+// the server runs in open mode (every request is an anonymous read-write
+// principal), preserving the pre-auth bind-to-localhost behavior; the first
+// principal or grant flips enforcement on.
+func (c *Config) AuthConfigured() bool {
+	if len(c.Auth.Principals) > 0 {
+		return true
+	}
+	for _, db := range c.Databases {
+		if len(db.Grants) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidDBName reports whether s is a usable database name: non-empty, not
@@ -160,6 +191,67 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateTransports(); err != nil {
 		return err
+	}
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// grantLevels is the set of valid `grants[].level` strings, kept beside the other
+// config vocabularies; package authz compiles the same strings into its Level.
+var grantLevels = map[string]bool{"none": true, "read-only": true, "read-write": true, "admin": true}
+
+// validateAuth checks the principal/capability wiring: known listener methods
+// (with transport constraints), unique named principals with known credential
+// methods, and grants that name a real principal (or the wildcard) with a valid
+// level. Deep credential-parameter checks (parsing a key, resolving a secret)
+// happen in package auth at load; here we catch the structural mistakes.
+func (c *Config) validateAuth() error {
+	for _, lc := range c.Listeners {
+		for _, m := range lc.Auth {
+			if !ListenerAuthMethods[m] {
+				return fmt.Errorf("config: listener %q unknown auth method %q", lc.Name, m)
+			}
+			if m == "peercred" && lc.Transport != "unix" {
+				return fmt.Errorf("config: listener %q: peercred auth is only valid on a unix socket", lc.Name)
+			}
+			if m == "mtls" && lc.TLS == "" {
+				return fmt.Errorf("config: listener %q: mtls auth requires a tls profile (with client_ca)", lc.Name)
+			}
+		}
+	}
+
+	principals := map[string]bool{}
+	for _, p := range c.Auth.Principals {
+		if p.Name == "" {
+			return fmt.Errorf("config: auth principal with empty name")
+		}
+		if principals[p.Name] {
+			return fmt.Errorf("config: duplicate auth principal %q", p.Name)
+		}
+		principals[p.Name] = true
+		for _, method := range p.Methods {
+			if len(method) != 1 {
+				return fmt.Errorf("config: principal %q: each method entry needs exactly one method name", p.Name)
+			}
+			for name := range method {
+				if !KnownAuthMethods[name] {
+					return fmt.Errorf("config: principal %q: unknown credential method %q", p.Name, name)
+				}
+			}
+		}
+	}
+
+	for _, db := range c.Databases {
+		for _, g := range db.Grants {
+			if !grantLevels[g.Level] {
+				return fmt.Errorf("config: database %q grant has invalid level %q", db.Name, g.Level)
+			}
+			if g.Principal != "*" && !principals[g.Principal] {
+				return fmt.Errorf("config: database %q grants to unknown principal %q", db.Name, g.Principal)
+			}
+		}
 	}
 	return nil
 }

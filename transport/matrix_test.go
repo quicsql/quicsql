@@ -102,7 +102,7 @@ func TestTransportMatrix(t *testing.T) {
 		},
 	}
 	quietLog := slog.New(slog.NewTextHandler(io.Discard, nil))
-	set, err := transport.Serve(quietLog, cfg, handler)
+	set, err := transport.Serve(quietLog, cfg, handler, transport.Options{})
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}

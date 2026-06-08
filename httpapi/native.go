@@ -7,8 +7,8 @@ import (
 	"errors"
 	"net/http"
 
+	"gosqlite.org/server/backend"
 	"gosqlite.org/server/engine"
-	"gosqlite.org/server/registry"
 )
 
 // queryRequest is the native-JSON request body: either a single `sql` (+ `args`)
@@ -53,6 +53,10 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 		writeErr(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
+	lvl, ok := h.authorize(w, r, db)
+	if !ok {
+		return
+	}
 	ctx, cancel := h.withTimeout(r.Context())
 	defer cancel()
 	boundBodyRead(w)
@@ -88,8 +92,31 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 	}
 	defer release()
 
+	// A read-write principal runs directly on the shared pool. A read-only
+	// principal runs on a single borrowed connection carrying the write-denying
+	// authorizer + query_only for the request's life (restored before it returns
+	// to the pool), so a write is refused at the connection.
+	var q engine.Queryer = dbh.Handle
+	var tb engine.TxBeginner = dbh.Handle.DB
+	if !lvl.CanWrite() {
+		conn, err := dbh.Handle.Conn(ctx)
+		if err != nil {
+			h.writeGetError(w, db, err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if err := backend.SetConnMode(ctx, conn, true); err != nil {
+			h.writeGetError(w, db, err)
+			return
+		}
+		// Restore on a background context so a timed-out/cancelled request still
+		// clears the read-only state before the conn returns to the pool.
+		defer func() { _ = backend.SetConnMode(context.Background(), conn, false) }()
+		q, tb = conn, conn
+	}
+
 	if len(req.Statements) > 0 {
-		h.runBatch(ctx, w, dbh, req.Statements)
+		h.runBatch(ctx, w, tb, req.Statements)
 		return
 	}
 
@@ -98,7 +125,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := h.eng.Run(ctx, dbh.Handle, engine.Statement{SQL: req.SQL, Args: args})
+	res, err := h.eng.Run(ctx, q, engine.Statement{SQL: req.SQL, Args: args})
 	if err != nil {
 		h.writeRunError(w, err)
 		return
@@ -108,8 +135,10 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 
 // runBatch executes the statements in one explicit transaction (reads return
 // rows, writes return affected); all-or-nothing. A SQL error rolls the whole
-// batch back and returns an error envelope carrying the failing index.
-func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, dbh *registry.DB, stmts []statementJSON) {
+// batch back and returns an error envelope carrying the failing index. It runs
+// on the caller's transaction beginner (the shared pool for a read-write
+// principal, or the guarded read-only connection for a read-only one).
+func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, tb engine.TxBeginner, stmts []statementJSON) {
 	es := make([]engine.Statement, len(stmts))
 	for i, s := range stmts {
 		if s.SQL == "" {
@@ -123,11 +152,13 @@ func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, dbh *regi
 		}
 		es[i] = engine.Statement{SQL: s.SQL, Args: args}
 	}
-	results, err := h.eng.Batch(ctx, dbh.Handle.DB, es)
+	results, err := h.eng.Batch(ctx, tb, es)
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrDenied):
 			writeErr(w, http.StatusForbidden, err.Error())
+		case engine.IsNotAuthorized(err):
+			writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			writeErr(w, http.StatusGatewayTimeout, "statement timed out")
 		default:

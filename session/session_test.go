@@ -48,19 +48,44 @@ func TestResumeConsumesBatonAndRejectsReplay(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {})
+	s, err := st.Open(context.Background(), db, func() {}, "", false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	b0 := st.Baton(s)
-	if _, err := st.Resume(b0); err != nil { // consumes b0, bumps gen
+	if _, err := st.Resume(b0, "d", ""); err != nil { // consumes b0, bumps gen
 		t.Fatalf("Resume: %v", err)
 	}
-	if _, err := st.Resume(b0); err != ErrBadBaton { // replay of consumed baton
+	if _, err := st.Resume(b0, "d", ""); err != ErrBadBaton { // replay of consumed baton
 		t.Fatalf("replay: want ErrBadBaton, got %v", err)
 	}
-	if _, err := st.Resume(st.Baton(s)); err != nil { // the rotated baton works
+	if _, err := st.Resume(st.Baton(s), "d", ""); err != nil { // the rotated baton works
 		t.Fatalf("rotated baton: %v", err)
+	}
+}
+
+// TestResumeBindingChecksDoNotConsume regresses the DoS where a wrong-principal
+// (or wrong-database) resume attempt burned the owner's live baton: the binding
+// checks must reject WITHOUT bumping the generation, so the owner's baton stays
+// valid.
+func TestResumeBindingChecksDoNotConsume(t *testing.T) {
+	db, cleanup := testDB(t)
+	defer cleanup()
+	st, _ := NewStore(time.Minute, time.Minute, 10)
+	s, err := st.Open(context.Background(), db, func() {}, "owner", false)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	b := st.Baton(s)
+	if _, err := st.Resume(b, "d", "intruder"); err != ErrPrincipalMismatch {
+		t.Fatalf("wrong principal: want ErrPrincipalMismatch, got %v", err)
+	}
+	if _, err := st.Resume(b, "other-db", "owner"); err != ErrBadBaton {
+		t.Fatalf("wrong database: want ErrBadBaton, got %v", err)
+	}
+	// The baton was NOT consumed by the rejected attempts — the owner can use it.
+	if _, err := st.Resume(b, "d", "owner"); err != nil {
+		t.Fatalf("owner baton should survive rejected attempts: %v", err)
 	}
 }
 
@@ -68,13 +93,13 @@ func TestResumeExpiry(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {})
+	s, err := st.Open(context.Background(), db, func() {}, "", false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	b0 := st.Baton(s)
 	time.Sleep(15 * time.Millisecond)
-	if _, err := st.Resume(b0); err != ErrBadBaton {
+	if _, err := st.Resume(b0, "d", ""); err != ErrBadBaton {
 		t.Fatalf("expired baton: want ErrBadBaton, got %v", err)
 	}
 }
@@ -84,7 +109,7 @@ func TestReaperRollsBackAndReleases(t *testing.T) {
 	defer cleanup()
 	released := make(chan struct{})
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() { close(released) })
+	s, err := st.Open(context.Background(), db, func() { close(released) }, "", false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -116,7 +141,7 @@ func TestReaperSkipsInFlightSession(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}) // busy=true (a request is "in flight")
+	s, err := st.Open(context.Background(), db, func() {}, "", false) // busy=true (a request is "in flight")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -143,10 +168,10 @@ func TestOpenTooMany(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 1)
-	if _, err := st.Open(context.Background(), db, func() {}); err != nil {
+	if _, err := st.Open(context.Background(), db, func() {}, "", false); err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	if _, err := st.Open(context.Background(), db, func() {}); err != ErrTooMany {
+	if _, err := st.Open(context.Background(), db, func() {}, "", false); err != ErrTooMany {
 		t.Fatalf("second Open: want ErrTooMany, got %v", err)
 	}
 }

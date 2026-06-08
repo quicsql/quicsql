@@ -36,6 +36,13 @@ type Queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// TxBeginner is the subset of database/sql that starts a transaction; both
+// *sql.DB and *sql.Conn satisfy it, so a batch can run on the shared pool or on
+// a single guarded (read-only) connection.
+type TxBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
 // Engine holds the result caps. Phase 7 adds the slow-log (driver TraceProfile)
 // and the richer limits/cancellation wiring around these calls.
 type Engine struct {
@@ -130,7 +137,7 @@ func (e *Engine) Exec(ctx context.Context, q Queryer, s Statement) (*Result, err
 // writes return affected/last-insert. A failure rolls the whole batch back and
 // returns a *BatchError carrying the failing index. Hrana batch step-conditions
 // and the interactive (pinned-conn) transactions arrive in Phase 2.
-func (e *Engine) Batch(ctx context.Context, db *sql.DB, stmts []Statement) ([]*Result, error) {
+func (e *Engine) Batch(ctx context.Context, db TxBeginner, stmts []Statement) ([]*Result, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, wrap(err)

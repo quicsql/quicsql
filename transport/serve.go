@@ -24,6 +24,16 @@ const (
 	idleTimeout       = 120 * time.Second
 )
 
+// Options carries the optional per-listener wiring the daemon supplies: Wrap
+// installs a listener's auth middleware around the shared handler, and
+// ConnContext stashes the accepted connection into the request context (so the
+// peercred method can read a Unix socket's peer credentials). Both are nil in
+// tests that exercise the raw transport.
+type Options struct {
+	Wrap        func(config.Listener, http.Handler) http.Handler
+	ConnContext func(context.Context, net.Conn) context.Context
+}
+
 // Set holds the started servers so they can be shut down together.
 type Set struct {
 	http []*http.Server
@@ -39,12 +49,12 @@ type h3Listener struct {
 }
 
 // Serve starts a server per configured listener across every transport, serving
-// the same handler. On a mid-startup failure it tears down what it started and
-// returns the error.
-func Serve(log *slog.Logger, cfg *config.Config, handler http.Handler) (*Set, error) {
+// the same handler (wrapped per-listener by opts.Wrap when set). On a mid-startup
+// failure it tears down what it started and returns the error.
+func Serve(log *slog.Logger, cfg *config.Config, handler http.Handler, opts Options) (*Set, error) {
 	set := &Set{}
 	for _, lc := range cfg.Listeners {
-		if err := set.start(log, cfg, lc, handler); err != nil {
+		if err := set.start(log, cfg, lc, handler, opts); err != nil {
 			set.Shutdown(context.Background())
 			return nil, fmt.Errorf("listener %s: %w", lc.Name, err)
 		}
@@ -52,7 +62,11 @@ func Serve(log *slog.Logger, cfg *config.Config, handler http.Handler) (*Set, er
 	return set, nil
 }
 
-func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, handler http.Handler) error {
+func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, handler http.Handler, opts Options) error {
+	// Apply this listener's auth middleware around the shared handler.
+	if opts.Wrap != nil {
+		handler = opts.Wrap(lc, handler)
+	}
 	switch lc.Transport {
 	case "unix":
 		_ = os.Remove(lc.Address)
@@ -71,7 +85,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 				return fmt.Errorf("chmod socket: %w", err)
 			}
 		}
-		s.serveHTTP(log, lc.Name, "unix", ln, h1Server(handler))
+		s.serveHTTP(log, lc.Name, "unix", ln, h1Server(handler, opts.ConnContext))
 		return nil
 
 	case "h1":
@@ -79,7 +93,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 		if err != nil {
 			return err
 		}
-		s.serveHTTP(log, lc.Name, "h1", ln, h1Server(handler))
+		s.serveHTTP(log, lc.Name, "h1", ln, h1Server(handler, opts.ConnContext))
 		return nil
 
 	case "h2c":
@@ -89,7 +103,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 		}
 		// Cleartext HTTP/2 (and HTTP/1.1) on the same socket, via the stdlib's
 		// native unencrypted-HTTP/2 support (Go 1.26+).
-		srv := h2Server(handler)
+		srv := h2Server(handler, opts.ConnContext)
 		var protos http.Protocols
 		protos.SetHTTP1(true)
 		protos.SetUnencryptedHTTP2(true)
@@ -108,7 +122,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 		if err != nil {
 			return err
 		}
-		srv := h2Server(handler)
+		srv := h2Server(handler, opts.ConnContext)
 		srv.TLSConfig = tc
 		s.http = append(s.http, srv)
 		go func() {
@@ -154,8 +168,17 @@ func (s *Set) tlsFor(cfg *config.Config, lc config.Listener) (*tls.Config, confi
 	if !ok {
 		return nil, config.TLSProfile{}, fmt.Errorf("unknown tls profile %q", lc.TLS)
 	}
-	tc, err := buildTLS(p, lc.Transport == "h3")
+	// A client cert is REQUIRED only when mtls is the listener's sole auth method;
+	// alongside other methods it is optional (VerifyClientCertIfGiven) so bearer /
+	// keyring clients can still connect.
+	tc, err := buildTLS(p, lc.Transport == "h3", onlyAuthMethod(lc, "mtls"))
 	return tc, p, err
+}
+
+// onlyAuthMethod reports whether method is the single auth method a listener
+// accepts.
+func onlyAuthMethod(lc config.Listener, method string) bool {
+	return len(lc.Auth) == 1 && lc.Auth[0] == method
 }
 
 func warnSelfSigned(log *slog.Logger, name string, p config.TLSProfile) {
@@ -174,10 +197,12 @@ func (s *Set) serveHTTP(log *slog.Logger, name, transport string, ln net.Listene
 	}()
 }
 
-// h1Server bounds a whole HTTP/1.1 connection (slowloris protection).
-func h1Server(h http.Handler) *http.Server {
+// h1Server bounds a whole HTTP/1.1 connection (slowloris protection). connCtx,
+// when set, stashes the accepted conn into the request context for peercred.
+func h1Server(h http.Handler, connCtx func(context.Context, net.Conn) context.Context) *http.Server {
 	return &http.Server{
 		Handler:           h,
+		ConnContext:       connCtx,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -188,8 +213,8 @@ func h1Server(h http.Handler) *http.Server {
 // h2Server omits the connection-level read/write timeouts (they would kill a
 // long-lived multiplexed HTTP/2 connection); per-request bounds come from the
 // statement timeout and result caps.
-func h2Server(h http.Handler) *http.Server {
-	return &http.Server{Handler: h, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
+func h2Server(h http.Handler, connCtx func(context.Context, net.Conn) context.Context) *http.Server {
+	return &http.Server{Handler: h, ConnContext: connCtx, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
 }
 
 // Shutdown gracefully stops every server: HTTP servers drain, and each h3

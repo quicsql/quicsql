@@ -10,11 +10,15 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"gosqlite.org/server/auth"
+	"gosqlite.org/server/authz"
 	"gosqlite.org/server/backend"
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
@@ -85,15 +89,36 @@ func main() {
 	}
 	sessions.StartReaper(appCtx, reapInterval)
 
+	// Authentication (per-listener methods) and authorization (per-database
+	// grants). With nothing configured the policy runs in open mode — every
+	// request is an anonymous read-write principal, the pre-auth behavior.
+	authn, err := auth.New(cfg, sec, log)
+	if err != nil {
+		fatal(log, "init auth", err)
+	}
+	policy := buildPolicy(cfg)
+	if policy.Open() {
+		log.Warn("quicsql: no auth configured — every database is publicly read-write (open mode)")
+	}
+
 	eng := engine.New(cfg.Limits.MaxRows, cfg.Limits.MaxResultBytes)
 	handler := httpapi.New(reg, eng, cfg.Routing,
 		httpapi.WithLogger(log),
 		httpapi.WithMaxBody(cfg.Limits.MaxRequestBytes),
 		httpapi.WithStatementTimeout(stmtTimeout),
 		httpapi.WithSessions(sessions),
+		httpapi.WithPolicy(policy),
 	)
 
-	servers, err := transport.Serve(log, cfg, handler)
+	opts := transport.Options{
+		Wrap: func(lc config.Listener, h http.Handler) http.Handler {
+			return authn.Middleware(lc, log).Wrap(h)
+		},
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return auth.NewConnContext(ctx, c)
+		},
+	}
+	servers, err := transport.Serve(log, cfg, handler, opts)
 	if err != nil {
 		log.Error("quicsql: start listeners", "err", err)
 		_ = reg.Close() // orderly close (WAL checkpoint / vault teardown) before exit
@@ -110,6 +135,20 @@ func main() {
 	if err := reg.Close(); err != nil {
 		log.Error("quicsql: registry close", "err", err)
 	}
+}
+
+// buildPolicy compiles the per-database grants into the authz policy. Open mode
+// (no principals and no grants anywhere) makes every principal read-write.
+func buildPolicy(cfg *config.Config) *authz.Policy {
+	pol := authz.NewPolicy(!cfg.AuthConfigured())
+	for _, db := range cfg.Databases {
+		for _, g := range db.Grants {
+			if lvl, ok := authz.ParseLevel(g.Level); ok {
+				pol.Grant(db.Name, g.Principal, lvl)
+			}
+		}
+	}
+	return pol
 }
 
 func fatal(log *slog.Logger, msg string, err error) {

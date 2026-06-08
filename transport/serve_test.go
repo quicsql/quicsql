@@ -28,7 +28,7 @@ func TestH3ShutdownReleasesPort(t *testing.T) {
 		TLS:       map[string]config.TLSProfile{"dev": {Mode: "self_signed"}},
 		Listeners: []config.Listener{{Name: "h3", Transport: "h3", Address: addr, TLS: "dev"}},
 	}
-	set, err := transport.Serve(quiet(), cfg, dummy())
+	set, err := transport.Serve(quiet(), cfg, dummy(), transport.Options{})
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestServeRejectsEmptyTLSMode(t *testing.T) {
 		TLS:       map[string]config.TLSProfile{"bad": {Mode: ""}},
 		Listeners: []config.Listener{{Name: "h2", Transport: "h2", Address: freeTCP(t), TLS: "bad"}},
 	}
-	if _, err := transport.Serve(quiet(), cfg, dummy()); err == nil {
+	if _, err := transport.Serve(quiet(), cfg, dummy(), transport.Options{}); err == nil {
 		t.Fatal("empty tls mode should be rejected")
 	}
 }
@@ -59,7 +59,7 @@ func TestUnixSocketMode(t *testing.T) {
 	cfg := &config.Config{
 		Listeners: []config.Listener{{Name: "u", Transport: "unix", Address: sock, SocketMode: "0600"}},
 	}
-	set, err := transport.Serve(quiet(), cfg, dummy())
+	set, err := transport.Serve(quiet(), cfg, dummy(), transport.Options{})
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}

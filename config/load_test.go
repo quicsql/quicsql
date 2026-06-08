@@ -41,6 +41,54 @@ func TestValidateTransportsAndTLS(t *testing.T) {
 	}
 }
 
+func TestValidateAuth(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{"unknown listener method", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"magic"}}}}, true},
+		{"peercred off unix", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"peercred"}}}}, true},
+		{"mtls without tls", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"mtls"}}}}, true},
+		{"duplicate principal", &Config{Auth: Auth{Principals: []Principal{{Name: "a"}, {Name: "a"}}}}, true},
+		{"empty principal name", &Config{Auth: Auth{Principals: []Principal{{Name: ""}}}}, true},
+		{"unknown credential method", &Config{Auth: Auth{Principals: []Principal{
+			{Name: "a", Methods: []map[string]any{{"none": map[string]any{}}}}}}}, true},
+		{"multi-key method", &Config{Auth: Auth{Principals: []Principal{
+			{Name: "a", Methods: []map[string]any{{"bearer": nil, "mtls": nil}}}}}}, true},
+		{"grant to unknown principal", &Config{Databases: []Database{
+			{Name: "d", Backend: "file", Grants: []Grant{{Principal: "ghost", Level: "read-only"}}}}}, true},
+		{"grant bad level", &Config{
+			Auth:      Auth{Principals: []Principal{{Name: "a"}}},
+			Databases: []Database{{Name: "d", Backend: "file", Grants: []Grant{{Principal: "a", Level: "root"}}}}}, true},
+		{"good", &Config{
+			Auth: Auth{Principals: []Principal{{Name: "app", Methods: []map[string]any{{"bearer": map[string]any{"token_hash": "abc"}}}}}},
+			Databases: []Database{{Name: "d", Backend: "file", Mode: "rw",
+				Grants: []Grant{{Principal: "app", Level: "read-write"}, {Principal: "*", Level: "read-only"}}}},
+			Listeners: []Listener{{Name: "l", Transport: "unix", Auth: []string{"peercred", "none"}}},
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.cfg.Validate(); (err != nil) != c.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthConfigured(t *testing.T) {
+	if (&Config{}).AuthConfigured() {
+		t.Error("empty config should be unconfigured (open mode)")
+	}
+	if !(&Config{Auth: Auth{Principals: []Principal{{Name: "a"}}}}).AuthConfigured() {
+		t.Error("a principal means auth configured")
+	}
+	if !(&Config{Databases: []Database{{Name: "d", Grants: []Grant{{Principal: "*", Level: "read-only"}}}}}).AuthConfigured() {
+		t.Error("a grant means auth configured")
+	}
+}
+
 func TestValidateRejectsBadModeAndTxLock(t *testing.T) {
 	c := &Config{Databases: []Database{{Name: "d", Backend: "file", Mode: "read-wryte"}}}
 	if err := c.Validate(); err == nil {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"gosqlite.org/server/authz"
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/registry"
@@ -24,12 +25,14 @@ import (
 
 const defaultMaxBody = 8 << 20 // 8 MiB request-body cap
 
-// Handler is the quicSQL HTTP handler. Auth is a Phase 4 seam; Phase 1/2 serve
-// every request (bind to localhost/UDS).
+// Handler is the quicSQL HTTP handler. The auth middleware (package auth) has
+// already attached the request's principal to the context by the time a request
+// reaches here; the handler enforces the per-database capability via policy.
 type Handler struct {
 	reg      *registry.Registry
 	eng      *engine.Engine
 	route    config.Routing
+	policy   *authz.Policy
 	maxBody  int64
 	stmtTO   time.Duration // per-request statement timeout (0 = none)
 	log      *slog.Logger
@@ -67,10 +70,21 @@ func WithSessions(s *session.Store) Option {
 	return func(h *Handler) { h.sessions = s }
 }
 
+// WithPolicy sets the authorization policy. Without it the handler defaults to
+// open mode (every principal is read-write on every database), preserving the
+// pre-auth behavior for tests and no-auth deployments.
+func WithPolicy(p *authz.Policy) Option {
+	return func(h *Handler) {
+		if p != nil {
+			h.policy = p
+		}
+	}
+}
+
 // New builds the handler. When neither path nor host routing is configured, path
 // routing is enabled by default.
 func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts ...Option) *Handler {
-	h := &Handler{reg: reg, eng: eng, route: route, maxBody: defaultMaxBody, log: slog.Default()}
+	h := &Handler{reg: reg, eng: eng, route: route, policy: authz.NewPolicy(true), maxBody: defaultMaxBody, log: slog.Default()}
 	if !h.route.ByPath && !h.route.ByHost {
 		h.route.ByPath = true
 	}
@@ -78,6 +92,19 @@ func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts 
 		o(h)
 	}
 	return h
+}
+
+// authorize resolves the caller's capability on db. It returns the level and
+// true when the principal may at least read; otherwise it writes a 403 and
+// returns false. A caller that needs write capability checks level.CanWrite.
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, db string) (authz.Level, bool) {
+	p := authz.FromContext(r.Context())
+	lvl := h.policy.Level(p, db)
+	if !lvl.CanRead() {
+		writeErr(w, http.StatusForbidden, "forbidden: no access to this database")
+		return authz.None, false
+	}
+	return lvl, true
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -240,6 +267,8 @@ func (h *Handler) writeRunError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, engine.ErrDenied):
 		writeErr(w, http.StatusForbidden, err.Error())
+	case engine.IsNotAuthorized(err):
+		writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		writeErr(w, http.StatusGatewayTimeout, "statement timed out")
 	default:

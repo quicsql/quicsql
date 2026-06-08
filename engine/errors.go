@@ -17,6 +17,21 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Msg }
 
+// sqliteAuth is SQLITE_AUTH — the code SQLite returns when an authorizer denies a
+// statement at compile time.
+const sqliteAuth = 23
+
+// IsNotAuthorized reports whether err is a statement rejected by the connection
+// authorizer (SQLITE_AUTH) — a read-only principal attempting a write, or an
+// ATTACH/DETACH buried in a script. Callers map it to a policy denial (403)
+// rather than a plain SQL error envelope.
+func IsNotAuthorized(err error) bool {
+	if e, ok := errors.AsType[*Error](err); ok {
+		return e.Code == sqliteAuth
+	}
+	return false
+}
+
 // CodeName maps a primary SQLite result code to its symbolic name, for the Hrana
 // error `code` field (clients match on e.g. SQLITE_CONSTRAINT). Unknown codes
 // fall back to SQLITE_ERROR.

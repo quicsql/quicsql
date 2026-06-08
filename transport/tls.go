@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"time"
 
 	"gosqlite.org/server/config"
@@ -26,8 +27,11 @@ const devCertValidity = 365 * 24 * time.Hour
 // buildTLS returns a *tls.Config for a profile. forH3 forces TLS 1.3 (HTTP/3
 // mandates it; quic-go also enforces this internally, so this is defense in
 // depth). The mode is required — an empty mode is an error, so a profile that
-// forgot to set it never silently falls back to a throwaway dev cert.
-func buildTLS(p config.TLSProfile, forH3 bool) (*tls.Config, error) {
+// forgot to set it never silently falls back to a throwaway dev cert. A
+// client_ca on the profile enables mTLS: requireClient selects whether a client
+// certificate is mandatory (mtls is the only auth method) or optional (it sits
+// alongside other methods).
+func buildTLS(p config.TLSProfile, forH3, requireClient bool) (*tls.Config, error) {
 	min, err := tlsMinVersion(p.MinVersion)
 	if err != nil {
 		return nil, err
@@ -56,7 +60,33 @@ func buildTLS(p config.TLSProfile, forH3 bool) (*tls.Config, error) {
 	default:
 		return nil, fmt.Errorf("unknown tls mode %q", p.Mode)
 	}
+	if p.ClientCA != "" {
+		pool, err := clientCAPool(p.ClientCA)
+		if err != nil {
+			return nil, err
+		}
+		cfg.ClientCAs = pool
+		if requireClient {
+			cfg.ClientAuth = tls.RequireAndVerifyClientCert
+		} else {
+			cfg.ClientAuth = tls.VerifyClientCertIfGiven
+		}
+	}
 	return cfg, nil
+}
+
+// clientCAPool loads a PEM bundle of trusted client-certificate authorities for
+// mTLS verification.
+func clientCAPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("tls client_ca: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("tls client_ca %q: no certificates found", path)
+	}
+	return pool, nil
 }
 
 // tlsMinVersion maps the config string to a TLS version, rejecting typos so a

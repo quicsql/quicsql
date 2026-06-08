@@ -5,6 +5,7 @@ package backend
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -42,6 +43,74 @@ func denyAttachDetach(op int, _, _, _, _ string) int {
 	default:
 		return sqlite.SQLITE_OK
 	}
+}
+
+// writeActions are the authorizer action codes for statements that modify the
+// database. A read-only principal's connection denies these at statement-compile
+// time — the enforcement layer that catches a write buried in a multi-statement
+// script (which a leading-keyword classifier misses), exactly as the ATTACH deny
+// does. Read/select/function/transaction/savepoint/pragma/recursive are absent,
+// so ordinary reads still compile.
+var writeActions = map[int]bool{
+	sqlite.SQLITE_INSERT: true, sqlite.SQLITE_UPDATE: true, sqlite.SQLITE_DELETE: true,
+	sqlite.SQLITE_CREATE_INDEX: true, sqlite.SQLITE_CREATE_TABLE: true, sqlite.SQLITE_CREATE_TRIGGER: true,
+	sqlite.SQLITE_CREATE_VIEW: true, sqlite.SQLITE_CREATE_VTABLE: true,
+	sqlite.SQLITE_CREATE_TEMP_INDEX: true, sqlite.SQLITE_CREATE_TEMP_TABLE: true,
+	sqlite.SQLITE_CREATE_TEMP_TRIGGER: true, sqlite.SQLITE_CREATE_TEMP_VIEW: true,
+	sqlite.SQLITE_DROP_INDEX: true, sqlite.SQLITE_DROP_TABLE: true, sqlite.SQLITE_DROP_TRIGGER: true,
+	sqlite.SQLITE_DROP_VIEW: true, sqlite.SQLITE_DROP_VTABLE: true,
+	sqlite.SQLITE_DROP_TEMP_INDEX: true, sqlite.SQLITE_DROP_TEMP_TABLE: true,
+	sqlite.SQLITE_DROP_TEMP_TRIGGER: true, sqlite.SQLITE_DROP_TEMP_VIEW: true,
+	sqlite.SQLITE_ALTER_TABLE: true, sqlite.SQLITE_REINDEX: true, sqlite.SQLITE_ANALYZE: true,
+}
+
+// denyWrites is the read-only authorizer: it denies ATTACH/DETACH (like the base
+// authorizer) and every write action, so a read-only connection rejects writes
+// at compile time with SQLITE_AUTH.
+func denyWrites(op int, _, _, _, _ string) int {
+	switch {
+	case op == sqlite.SQLITE_ATTACH || op == sqlite.SQLITE_DETACH:
+		return sqlite.SQLITE_DENY
+	case writeActions[op]:
+		return sqlite.SQLITE_DENY
+	default:
+		return sqlite.SQLITE_OK
+	}
+}
+
+// SetConnMode puts the sqlite connection underlying sc into read-only mode (or
+// restores the base mode). It is the connection-level layer of read-only
+// enforcement, beneath the capability check in the handler; the caller MUST
+// restore the base mode (SetConnMode(ctx, sc, false)) before the connection
+// returns to the pool, or a later borrower would inherit read-only state.
+//
+// Two mechanisms, together comprehensive: the denyWrites authorizer rejects
+// DML/DDL at statement-compile time (a clean SQLITE_AUTH, so a write hidden in a
+// multi-statement script is caught), and PRAGMA query_only blocks every write to
+// the database file at run time — including a header-writing PRAGMA like
+// user_version that the action-code authorizer never sees — so enforcement does
+// not depend on enumerating every write action.
+func SetConnMode(ctx context.Context, sc *sql.Conn, readOnly bool) error {
+	if err := sc.Raw(func(dc any) error {
+		c, ok := dc.(*sqlite.Conn)
+		if !ok {
+			return fmt.Errorf("backend: connection is not a *sqlite.Conn (%T)", dc)
+		}
+		if readOnly {
+			c.RegisterAuthorizer(denyWrites)
+		} else {
+			c.RegisterAuthorizer(denyAttachDetach)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	pragma := "PRAGMA query_only = OFF"
+	if readOnly {
+		pragma = "PRAGMA query_only = ON"
+	}
+	_, err := sc.ExecContext(ctx, pragma)
+	return err
 }
 
 // Backend opens exactly one *sqlite.DB for a logical database. Open is called

@@ -20,6 +20,14 @@ import (
 // ErrNotImplemented marks a resolver path a later phase fills in.
 var ErrNotImplemented = errors.New("secret: not implemented in this phase")
 
+// ErrMalformedRef and ErrUnknownSource let a caller tell "this string is not a
+// secret reference" (so it can fall back to treating it as a literal value) from
+// "this reference names a source that does not exist / could not be read".
+var (
+	ErrMalformedRef  = errors.New("secret: malformed reference (want source:name)")
+	ErrUnknownSource = errors.New("secret: unknown source")
+)
+
 // Resolver turns a "source:name" reference into concrete key material.
 type Resolver interface {
 	// Bytes returns raw key bytes (e.g. a vault raw cipher key).
@@ -80,15 +88,17 @@ func (r *mapResolver) Recipient(ref string) (keyring.Recipient, error) {
 	return nil, fmt.Errorf("secret: Recipient(%q): %w", ref, ErrNotImplemented)
 }
 
-// lookup splits a "source:name" ref and finds its declared source.
+// lookup splits a "source:name" ref and finds its declared source. A ref with no
+// colon is ErrMalformedRef and an undeclared source is ErrUnknownSource, so a
+// caller can distinguish "not a reference" from "a broken reference".
 func (r *mapResolver) lookup(ref string) (config.SecretSource, string, error) {
 	src, name, ok := strings.Cut(ref, ":")
 	if !ok {
-		return config.SecretSource{}, "", fmt.Errorf("secret: malformed ref %q (want source:name)", ref)
+		return config.SecretSource{}, "", fmt.Errorf("%w: %q", ErrMalformedRef, ref)
 	}
 	s, ok := r.sources[src]
 	if !ok {
-		return config.SecretSource{}, "", fmt.Errorf("secret: unknown source %q in ref %q", src, ref)
+		return config.SecretSource{}, "", fmt.Errorf("%w %q in ref %q", ErrUnknownSource, src, ref)
 	}
 	return s, name, nil
 }

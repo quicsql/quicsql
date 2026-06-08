@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"gosqlite.org/server/backend"
 	"gosqlite.org/server/registry"
 )
 
@@ -29,6 +30,9 @@ var (
 	ErrBadBaton = errors.New("session: invalid or expired baton")
 	// ErrTooMany is returned when a database's concurrent-session cap is reached.
 	ErrTooMany = errors.New("session: too many open sessions for this database")
+	// ErrPrincipalMismatch is returned when a baton is resumed by a different
+	// principal than the one that opened the session — a stolen/misused baton.
+	ErrPrincipalMismatch = errors.New("session: baton belongs to a different principal")
 )
 
 const (
@@ -41,15 +45,17 @@ const (
 // rotation in the Store), so its fields need no per-session lock; busy marks
 // that in-flight request so the reaper won't close the conn under it.
 type Session struct {
-	id       [idLen]byte
-	gen      uint64
-	conn     *sql.Conn
-	release  func() // returns the registry handle ref held for this session
-	dbName   string
-	created  time.Time
-	lastUsed time.Time
-	busy     bool
-	sql      map[int32]string // store_sql cache
+	id        [idLen]byte
+	gen       uint64
+	conn      *sql.Conn
+	release   func() // returns the registry handle ref held for this session
+	dbName    string
+	principal string // the principal that opened the stream (baton is bound to it)
+	readOnly  bool   // pinned conn carries the write-denying authorizer
+	created   time.Time
+	lastUsed  time.Time
+	busy      bool
+	sql       map[int32]string // store_sql cache
 }
 
 // Conn returns the pinned connection the engine runs statements on.
@@ -57,6 +63,9 @@ func (s *Session) Conn() *sql.Conn { return s.conn }
 
 // DBName is the database this session is bound to.
 func (s *Session) DBName() string { return s.dbName }
+
+// Principal is the name of the principal that opened this session.
+func (s *Session) Principal() string { return s.principal }
 
 // StoreSQL / LookupSQL / DropSQL back Hrana's store_sql / sql_id / close_sql.
 func (s *Session) StoreSQL(id int32, sql string) { s.sql[id] = sql }
@@ -102,9 +111,12 @@ func NewStore(ttl, maxLife time.Duration, max int) (*Store, error) {
 // ref for db, owned by the session and dropped on Close/reap (after the pinned
 // conn) so the database can't be closed while a session holds a connection into
 // it. The per-db cap is reserved BEFORE pinning a pool connection, so the cap —
-// not the pool — is the first limit to bite. The returned session is marked busy
-// (a request is about to run on it); the caller clears that via Baton/Close.
-func (st *Store) Open(ctx context.Context, db *registry.DB, release func()) (*Session, error) {
+// not the pool — is the first limit to bite. principal binds the baton to its
+// owner; readOnly puts the pinned connection in read-only mode for the stream's
+// life (a read-only principal's interactive transaction cannot write). The
+// returned session is marked busy (a request is about to run on it); the caller
+// clears that via Baton/Close.
+func (st *Store) Open(ctx context.Context, db *registry.DB, release func(), principal string, readOnly bool) (*Session, error) {
 	st.mu.Lock()
 	if st.perDB[db.Name] >= st.max {
 		st.mu.Unlock()
@@ -118,6 +130,13 @@ func (st *Store) Open(ctx context.Context, db *registry.DB, release func()) (*Se
 		st.releaseSlot(db.Name)
 		return nil, err
 	}
+	if readOnly {
+		if err := backend.SetConnMode(ctx, conn, true); err != nil {
+			_ = conn.Close()
+			st.releaseSlot(db.Name)
+			return nil, err
+		}
+	}
 
 	st.mu.Lock()
 	var id [idLen]byte
@@ -130,6 +149,7 @@ func (st *Store) Open(ctx context.Context, db *registry.DB, release func()) (*Se
 	now := time.Now()
 	s := &Session{
 		id: id, gen: 1, conn: conn, release: release, dbName: db.Name,
+		principal: principal, readOnly: readOnly,
 		created: now, lastUsed: now, busy: true, sql: map[int32]string{},
 	}
 	st.sessions[id] = s
@@ -149,7 +169,12 @@ func (st *Store) releaseSlot(db string) {
 // baton (bumping the generation) so an old baton — a replay or a concurrent
 // second request — is rejected with ErrBadBaton. The session is marked busy for
 // the duration of the request the caller is about to run.
-func (st *Store) Resume(baton string) (*Session, error) {
+//
+// The database and principal bindings are checked BEFORE the generation is
+// bumped: a baton presented for the wrong database or by a different principal
+// is rejected WITHOUT consuming it, so such a request can't burn (invalidate)
+// the legitimate owner's live baton.
+func (st *Store) Resume(baton, dbName, principal string) (*Session, error) {
 	id, gen, err := st.verify(baton)
 	if err != nil {
 		return nil, err
@@ -163,6 +188,12 @@ func (st *Store) Resume(baton string) (*Session, error) {
 	if st.reapable(s) {
 		st.closeLocked(id)
 		return nil, ErrBadBaton
+	}
+	if s.dbName != dbName {
+		return nil, ErrBadBaton // a baton is bound to the database it was minted for
+	}
+	if s.principal != principal {
+		return nil, ErrPrincipalMismatch // a baton is bound to the principal that minted it
 	}
 	s.gen++
 	s.busy = true
@@ -206,17 +237,22 @@ func (st *Store) closeLocked(id [idLen]byte) {
 	if st.perDB[s.dbName] > 0 {
 		st.perDB[s.dbName]--
 	}
-	// Roll back any open interactive transaction, return the conn to the pool,
-	// then drop the registry ref. All best-effort (no-tx ROLLBACK just errors).
-	go func(c *sql.Conn, release func()) {
+	// Roll back any open interactive transaction, restore the base authorizer on a
+	// read-only conn (so the next pool borrower isn't left in read-only mode),
+	// return the conn to the pool, then drop the registry ref. All best-effort (a
+	// no-tx ROLLBACK just errors).
+	go func(c *sql.Conn, release func(), readOnly bool) {
 		ctx, cancel := context.WithTimeout(context.Background(), closeRollbackTimeout)
 		defer cancel()
 		_, _ = c.ExecContext(ctx, "ROLLBACK")
+		if readOnly {
+			_ = backend.SetConnMode(ctx, c, false)
+		}
 		_ = c.Close()
 		if release != nil {
 			release()
 		}
-	}(s.conn, s.release)
+	}(s.conn, s.release, s.readOnly)
 }
 
 // StartReaper runs a background loop that closes idle / over-lifetime sessions

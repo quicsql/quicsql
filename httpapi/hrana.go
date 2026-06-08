@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"gosqlite.org"
+	"gosqlite.org/server/authz"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/session"
 )
@@ -26,6 +27,10 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		writeErr(w, http.StatusNotImplemented, "sessions not enabled")
 		return
 	}
+	level, ok := h.authorize(w, r, dbName)
+	if !ok {
+		return
+	}
 	ctx := r.Context() // per-statement timeouts are applied in execStmt / sequence
 	boundBodyRead(w)
 	body, err := h.readBody(r)
@@ -39,11 +44,13 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		return
 	}
 
-	sess, err := h.stream(ctx, dbName, req.Baton)
+	sess, err := h.stream(ctx, dbName, req.Baton, level)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrBadBaton):
 			writeErr(w, http.StatusBadRequest, "invalid or expired baton")
+		case errors.Is(err, session.ErrPrincipalMismatch):
+			writeErr(w, http.StatusForbidden, "baton belongs to a different principal")
 		case errors.Is(err, session.ErrTooMany):
 			writeErr(w, http.StatusServiceUnavailable, "too many open sessions")
 		default:
@@ -75,25 +82,23 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 }
 
 // stream resolves the session for a pipeline request: resume an existing one
-// (validating the baton and the bound database), or open a new one.
-func (h *Handler) stream(ctx context.Context, dbName string, baton *string) (*session.Session, error) {
+// (validating the baton, the bound database, and the resuming principal), or
+// open a new one bound to the caller's principal and capability.
+func (h *Handler) stream(ctx context.Context, dbName string, baton *string, level authz.Level) (*session.Session, error) {
+	principal := authz.FromContext(ctx)
 	if baton != nil && *baton != "" {
-		s, err := h.sessions.Resume(*baton)
-		if err != nil {
-			return nil, err
-		}
-		if s.DBName() != dbName {
-			return nil, session.ErrBadBaton // a baton is bound to the database it was minted for
-		}
-		return s, nil
+		// Resume checks the database + principal binding before consuming the
+		// baton, so a wrong-principal request can't invalidate the owner's baton.
+		return h.sessions.Resume(*baton, dbName, principal.Name)
 	}
 	dbh, release, err := h.reg.Get(ctx, dbName)
 	if err != nil {
 		return nil, err
 	}
 	// The session owns the registry ref for the stream's life (Open drops it,
-	// after the pinned conn, on Close/reap).
-	s, err := h.sessions.Open(ctx, dbh, release)
+	// after the pinned conn, on Close/reap). A principal that cannot write gets a
+	// read-only pinned connection.
+	s, err := h.sessions.Open(ctx, dbh, release, principal.Name, !level.CanWrite())
 	if err != nil {
 		release()
 		return nil, err
