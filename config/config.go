@@ -10,17 +10,28 @@ import "time"
 // Config is the whole server configuration. Only the Phase 0 subset is wired to
 // behavior today; the remaining sections are parsed so the schema is stable.
 type Config struct {
-	Server    Server                `yaml:"server"`
-	Secrets   []SecretSource        `yaml:"secrets"`
-	Routing   Routing               `yaml:"routing"`
-	TLS       map[string]TLSProfile `yaml:"tls"`
-	Listeners []Listener            `yaml:"listeners"`
-	Auth      Auth                  `yaml:"auth"`
-	Databases []Database            `yaml:"databases"`
-	Limits    Limits                `yaml:"limits"`
-	Logging   Logging               `yaml:"logging"`
+	Server       Server                `yaml:"server"`
+	Secrets      []SecretSource        `yaml:"secrets"`
+	Routing      Routing               `yaml:"routing"`
+	TLS          map[string]TLSProfile `yaml:"tls"`
+	Listeners    []Listener            `yaml:"listeners"`
+	Auth         Auth                  `yaml:"auth"`
+	Databases    []Database            `yaml:"databases"`
+	ControlPlane ControlPlane          `yaml:"control_plane"`
+	Limits       Limits                `yaml:"limits"`
+	Logging      Logging               `yaml:"logging"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
+}
+
+// ControlPlane enables the runtime admin API under /_admin: create/detach
+// databases and vault maintenance. Admins names the server-admin principals —
+// the only ones (besides open mode) allowed to create/detach and to run
+// maintenance on any database; a principal holding an `admin` grant on one
+// database may run maintenance on that database only.
+type ControlPlane struct {
+	Enabled bool     `yaml:"enabled"`
+	Admins  []string `yaml:"admins"`
 }
 
 // Warnings returns human-readable notes about config that parsed but has no
@@ -34,11 +45,14 @@ type Server struct {
 }
 
 // MetaStore is the server-owned runtime registry + audit + idempotency state.
-// It is a vault by default so it is encrypted at rest; its key must come from a
-// non-meta secret source (chicken-and-egg — see the plan).
+// It is a vault by default; set Key (a secret reference) to encrypt it at rest —
+// the key must come from a non-meta secret source (chicken-and-egg — see the
+// plan). A vault meta store without a key is a plain (unencrypted) container,
+// warned at startup.
 type MetaStore struct {
 	Backend string `yaml:"backend"` // vault (default) | file
 	Path    string `yaml:"path"`
+	Key     string `yaml:"key"` // secret ref for the vault backend (raw cipher key)
 }
 
 // SecretSource declares one place key material can be read from. Every source

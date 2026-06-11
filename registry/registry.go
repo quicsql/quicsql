@@ -32,6 +32,9 @@ var ErrReserved = errors.New("registry: database reserved for an offline operati
 // ErrBusy is returned by Reserve when the handle is opening or still has users.
 var ErrBusy = errors.New("registry: database busy (opening or has active users)")
 
+// ErrExists is returned by Add when the name is already registered.
+var ErrExists = errors.New("registry: database already exists")
+
 // Registry is the process-wide database registry.
 type Registry struct {
 	mu       sync.Mutex
@@ -172,14 +175,8 @@ func (r *Registry) Reserve(name string) (release func(), err error) {
 	if r.backends[name] == nil {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
 	}
-	if e := r.entries[name]; e != nil {
-		if e.opening || e.refs > 0 || e.reserved {
-			return nil, ErrBusy
-		}
-		if e.db != nil {
-			_ = e.db.Handle.Close()
-		}
-		delete(r.entries, name)
+	if err := r.dropIdleEntryLocked(name); err != nil {
+		return nil, err
 	}
 	ph := &entry{name: name, reserved: true, ready: make(chan struct{})}
 	close(ph.ready)
@@ -189,6 +186,61 @@ func (r *Registry) Reserve(name string) (release func(), err error) {
 		delete(r.entries, name)
 		r.mu.Unlock()
 	}, nil
+}
+
+// dropIdleEntryLocked closes and forgets name's open handle IF it is idle, or
+// returns ErrBusy if it is opening / has active users / is reserved. It is the
+// shared teardown of Reserve and Remove; the caller must hold r.mu, and a name
+// with no live entry is a no-op success.
+func (r *Registry) dropIdleEntryLocked(name string) error {
+	e := r.entries[name]
+	if e == nil {
+		return nil
+	}
+	if e.opening || e.refs > 0 || e.reserved {
+		return ErrBusy
+	}
+	if e.db != nil {
+		_ = e.db.Handle.Close()
+	}
+	delete(r.entries, name)
+	return nil
+}
+
+// Add registers a new database at runtime (the control-plane create/attach op).
+// The handle opens lazily on first Get, exactly like a seed entry.
+func (r *Registry) Add(name string, be backend.Backend) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.backends[name] != nil {
+		return fmt.Errorf("%w: %q", ErrExists, name)
+	}
+	r.backends[name] = be
+	return nil
+}
+
+// Remove detaches a database at runtime: it refuses (ErrBusy) while the handle
+// is opening, has active users, or is reserved; otherwise it closes any idle
+// handle and forgets the backend. The database file itself is untouched.
+func (r *Registry) Remove(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.backends[name] == nil {
+		return fmt.Errorf("%w: %q", ErrUnknownDB, name)
+	}
+	if err := r.dropIdleEntryLocked(name); err != nil {
+		return err
+	}
+	delete(r.backends, name)
+	return nil
+}
+
+// Backend returns the backend registered under name (nil if unknown), for the
+// control plane's maintenance ops.
+func (r *Registry) Backend(name string) backend.Backend {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.backends[name]
 }
 
 // List snapshots the registry for the _server introspection interface.

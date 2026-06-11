@@ -17,12 +17,14 @@ import (
 	"syscall"
 	"time"
 
+	"gosqlite.org/server/admin"
 	"gosqlite.org/server/auth"
 	"gosqlite.org/server/authz"
 	"gosqlite.org/server/backend"
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/httpapi"
+	"gosqlite.org/server/meta"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/secret"
 	"gosqlite.org/server/session"
@@ -51,7 +53,22 @@ func main() {
 	if err != nil {
 		fatal(log, "init secrets", err)
 	}
-	backends, err := backend.All(cfg, sec)
+
+	// The meta store records databases created at runtime; reconcile config ∪ meta
+	// (the file seeds; meta is the running truth for runtime-created entries, so it
+	// wins on a name conflict).
+	var store *meta.Store
+	if cfg.ControlPlane.Enabled {
+		store, err = meta.Open(cfg.Server.MetaStore, sec, cfg.Server.DataDir, log)
+		if err != nil {
+			fatal(log, "open meta store", err)
+		}
+	}
+	dbs, err := reconcile(cfg.Databases, store, log)
+	if err != nil {
+		fatal(log, "reconcile databases", err)
+	}
+	backends, err := backend.All(dbs, sec, cfg.Server.DataDir)
 	if err != nil {
 		fatal(log, "build backends", err)
 	}
@@ -96,19 +113,25 @@ func main() {
 	if err != nil {
 		fatal(log, "init auth", err)
 	}
-	policy := buildPolicy(cfg)
+	policy := buildPolicy(cfg, dbs)
 	if policy.Open() {
 		log.Warn("quicsql: no auth configured — every database is publicly read-write (open mode)")
 	}
 
 	eng := engine.New(cfg.Limits.MaxRows, cfg.Limits.MaxResultBytes)
-	handler := httpapi.New(reg, eng, cfg.Routing,
+	handlerOpts := []httpapi.Option{
 		httpapi.WithLogger(log),
 		httpapi.WithMaxBody(cfg.Limits.MaxRequestBytes),
 		httpapi.WithStatementTimeout(stmtTimeout),
 		httpapi.WithSessions(sessions),
 		httpapi.WithPolicy(policy),
-	)
+	}
+	if cfg.ControlPlane.Enabled {
+		adminH := admin.New(reg, policy, store, sec, cfg.Server.DataDir, cfg.ControlPlane.Admins, log)
+		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
+		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))
+	}
+	handler := httpapi.New(reg, eng, cfg.Routing, handlerOpts...)
 
 	opts := transport.Options{
 		Wrap: func(lc config.Listener, h http.Handler) http.Handler {
@@ -135,13 +158,20 @@ func main() {
 	if err := reg.Close(); err != nil {
 		log.Error("quicsql: registry close", "err", err)
 	}
+	if store != nil {
+		if err := store.Close(); err != nil {
+			log.Error("quicsql: meta store close", "err", err)
+		}
+	}
 }
 
-// buildPolicy compiles the per-database grants into the authz policy. Open mode
-// (no principals and no grants anywhere) makes every principal read-write.
-func buildPolicy(cfg *config.Config) *authz.Policy {
-	pol := authz.NewPolicy(!cfg.AuthConfigured())
-	for _, db := range cfg.Databases {
+// buildPolicy compiles the reconciled databases' grants into the authz policy.
+// Open mode (no principals and no grants anywhere, config or meta store) makes
+// every principal read-write.
+func buildPolicy(cfg *config.Config, dbs []config.Database) *authz.Policy {
+	configured := len(cfg.Auth.Principals) > 0 || config.AnyGrants(dbs)
+	pol := authz.NewPolicy(!configured)
+	for _, db := range dbs {
 		for _, g := range db.Grants {
 			if lvl, ok := authz.ParseLevel(g.Level); ok {
 				pol.Grant(db.Name, g.Principal, lvl)
@@ -149,6 +179,49 @@ func buildPolicy(cfg *config.Config) *authz.Policy {
 		}
 	}
 	return pol
+}
+
+// reconcile merges the config seed databases with the meta store's
+// runtime-created ones. A meta entry wins on a name conflict (it is the running
+// truth for what the control plane created); a store-less run just returns the
+// config seeds.
+func reconcile(seeds []config.Database, store *meta.Store, log *slog.Logger) ([]config.Database, error) {
+	if store == nil {
+		return seeds, nil
+	}
+	created, err := store.Databases()
+	if err != nil {
+		return nil, err
+	}
+	byName := map[string]config.Database{}
+	order := []string{}
+	add := func(db config.Database) {
+		if _, seen := byName[db.Name]; !seen {
+			order = append(order, db.Name)
+		}
+		byName[db.Name] = db
+	}
+	for _, db := range seeds {
+		add(db)
+	}
+	for _, db := range created { // meta wins on conflict
+		// Re-validate every meta-store spec: the meta store (a plain container by
+		// default) is a trust root, so a tampered/stale entry must not inject a
+		// database that never passed config validation (bad name, unknown backend).
+		if !config.ValidDBName(db.Name) || !config.KnownBackends[db.Backend] {
+			log.Warn("quicsql: skipping invalid meta-store database entry", "db", db.Name, "backend", db.Backend)
+			continue
+		}
+		if _, seen := byName[db.Name]; seen {
+			log.Warn("quicsql: meta-store database shadows a config seed", "db", db.Name)
+		}
+		add(db)
+	}
+	out := make([]config.Database, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out, nil
 }
 
 func fatal(log *slog.Logger, msg string, err error) {

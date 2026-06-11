@@ -16,7 +16,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,6 +28,7 @@ import (
 	"gosqlite.org/crypto/keyring"
 	"gosqlite.org/server/authz"
 	"gosqlite.org/server/config"
+	"gosqlite.org/server/internal/httpjson"
 	"gosqlite.org/server/secret"
 )
 
@@ -401,9 +401,7 @@ func (m *Middleware) serveChallenge(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"challenge": c})
+	httpjson.Write(w, http.StatusOK, map[string]string{"challenge": c})
 }
 
 func (m *Middleware) deny(w http.ResponseWriter, err error) {
@@ -412,19 +410,8 @@ func (m *Middleware) deny(w http.ResponseWriter, err error) {
 	writeJSONError(w, http.StatusUnauthorized, "authentication required")
 }
 
-// writeJSONError writes the same {"error":{"message":…}} envelope the HTTP API
-// uses, so an auth failure is shaped like every other error a client sees. Like
-// httpapi.writeJSON it marshals into a buffer BEFORE writing the status, so an
-// encoding failure can't commit a 200 with a truncated body.
+// writeJSONError writes the standard {"error":{"message":…}} envelope so an auth
+// failure is shaped like every other error a client sees.
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	buf, err := json.Marshal(map[string]any{"error": map[string]string{"message": msg}})
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"message":"internal: response encoding failed"}}` + "\n"))
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(append(buf, '\n'))
+	httpjson.Error(w, status, msg)
 }

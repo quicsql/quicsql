@@ -104,6 +104,26 @@ func TestValidateVault(t *testing.T) {
 	}
 }
 
+func TestValidateControlPlaneAdmins(t *testing.T) {
+	// An admin that names no configured principal is rejected.
+	bad := &Config{ControlPlane: ControlPlane{Enabled: true, Admins: []string{"ghost"}}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("control_plane admin naming an unknown principal must be rejected")
+	}
+	// Enabling the control plane with no admins is refused (no open-mode fallback).
+	empty := &Config{ControlPlane: ControlPlane{Enabled: true}}
+	if err := empty.Validate(); err == nil {
+		t.Fatal("control_plane.enabled with no admins must be rejected")
+	}
+	good := &Config{
+		Auth:         Auth{Principals: []Principal{{Name: "root"}}},
+		ControlPlane: ControlPlane{Enabled: true, Admins: []string{"root"}},
+	}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid control_plane rejected: %v", err)
+	}
+}
+
 func TestAuthConfigured(t *testing.T) {
 	if (&Config{}).AuthConfigured() {
 		t.Error("empty config should be unconfigured (open mode)")

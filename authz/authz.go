@@ -6,7 +6,10 @@
 // only on this package, never on each other.
 package authz
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // Level is a principal's capability on one database. The zero value (None) is
 // "no access", so an unset grant fails closed.
@@ -82,7 +85,11 @@ const Wildcard = "*"
 // any wildcard (`*`) grant. In open mode (no auth configured anywhere) every
 // principal gets ReadWrite on every database, preserving the pre-auth
 // bind-to-localhost behavior until the operator configures grants.
+//
+// Policy is safe for concurrent use: requests read levels while the control
+// plane grants for a runtime-created database.
 type Policy struct {
+	mu     sync.RWMutex
 	grants map[string]map[string]Level
 	open   bool
 }
@@ -98,6 +105,8 @@ func (p *Policy) Open() bool { return p.open }
 // Grant records that principal (a name or Wildcard) has at least level on db.
 // Re-granting keeps the highest level.
 func (p *Policy) Grant(db, principal string, level Level) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	m := p.grants[db]
 	if m == nil {
 		m = map[string]Level{}
@@ -113,6 +122,8 @@ func (p *Policy) Level(pr *Principal, db string) Level {
 	if p.open {
 		return ReadWrite
 	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	m := p.grants[db]
 	if m == nil {
 		return None

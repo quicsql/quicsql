@@ -55,10 +55,15 @@ var (
 // principal), preserving the pre-auth bind-to-localhost behavior; the first
 // principal or grant flips enforcement on.
 func (c *Config) AuthConfigured() bool {
-	if len(c.Auth.Principals) > 0 {
-		return true
-	}
-	for _, db := range c.Databases {
+	return len(c.Auth.Principals) > 0 || AnyGrants(c.Databases)
+}
+
+// AnyGrants reports whether any database in the set carries a grant. It is the
+// shared predicate behind open-mode detection — the daemon evaluates it over the
+// reconciled (config ∪ meta-store) set, config.AuthConfigured over the config
+// seeds — so the two agree on what "auth is configured" means.
+func AnyGrants(dbs []Database) bool {
+	for _, db := range dbs {
 		if len(db.Grants) > 0 {
 			return true
 		}
@@ -88,11 +93,10 @@ func ValidDBName(s string) bool {
 // sections the plan defines but nothing consumes yet — their presence warns.
 var knownTopLevel = map[string]bool{
 	"server": true, "secrets": true, "routing": true, "tls": true, "listeners": true,
-	"auth": true, "databases": true, "limits": true, "logging": true,
+	"auth": true, "databases": true, "control_plane": true, "limits": true, "logging": true,
 }
 
 var inertTopLevel = map[string]string{
-	"control_plane":    "runtime control plane (Phase 6)",
 	"wire_compression": "over-the-wire compression (Phase 3.5)",
 	"observability":    "metrics / introspection (Phase 7)",
 }
@@ -287,6 +291,17 @@ func (c *Config) validateAuth() error {
 			if g.Principal != "*" && !principals[g.Principal] {
 				return fmt.Errorf("config: database %q grants to unknown principal %q", db.Name, g.Principal)
 			}
+		}
+	}
+	if c.ControlPlane.Enabled && len(c.ControlPlane.Admins) == 0 {
+		// The control plane's capabilities are too powerful to expose without a
+		// named admin — refuse to enable it wide open (there is no open-mode
+		// fallback for /_admin).
+		return fmt.Errorf("config: control_plane.enabled requires at least one control_plane.admins entry")
+	}
+	for _, a := range c.ControlPlane.Admins {
+		if !principals[a] {
+			return fmt.Errorf("config: control_plane admin %q is not a configured principal", a)
 		}
 	}
 	return nil

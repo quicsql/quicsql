@@ -27,6 +27,27 @@ func (b *vaultBackend) Open(ctx context.Context) (*sqlite.DB, error) {
 func (b *vaultBackend) Kind() string   { return "vault" }
 func (b *vaultBackend) ReadOnly() bool { return b.ro }
 
+// Path is the resolved container path (backend.Pather), addressed by the
+// control plane's maintenance ops.
+func (b *vaultBackend) Path() string { return b.cfg.Path }
+
+// CompactOffline rewrites the closed container densely with its configured
+// options — identities-only preserves the keyslot verbatim (backend.OfflineCompacter).
+// The registry must hold the path reservation (handle closed) while this runs.
+func (b *vaultBackend) CompactOffline() error { return vault.Compact(b.cfg, b.opts) }
+
+// CompactOnline returns freed container blocks to the OS on the live handle
+// (backend.OnlineReclaimer). maxBytes<=0 reclaims as much as possible.
+func (b *vaultBackend) CompactOnline(maxBytes int64) (int64, error) {
+	return vault.CompactOnline(b.cfg.Path, maxBytes, nil)
+}
+
+// Trim releases the trailing free run of the live container to the OS
+// (backend.OnlineReclaimer). maxBytes<=0 releases the whole trailing run.
+func (b *vaultBackend) Trim(maxBytes int64) (int64, error) {
+	return vault.Trim(b.cfg.Path, maxBytes)
+}
+
 // newVault resolves the vault.Options for a database. The option surface splits
 // by role (see the plan): raw key, compression, cipher, authenticate, and anchor
 // apply to both create and open; the rest is chosen by whether the container

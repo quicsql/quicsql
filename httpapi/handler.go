@@ -8,7 +8,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,6 +18,7 @@ import (
 	"gosqlite.org/server/authz"
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
+	"gosqlite.org/server/internal/httpjson"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/session"
 )
@@ -33,6 +33,7 @@ type Handler struct {
 	eng      *engine.Engine
 	route    config.Routing
 	policy   *authz.Policy
+	admin    http.Handler // control plane at /_admin (nil = disabled)
 	maxBody  int64
 	stmtTO   time.Duration // per-request statement timeout (0 = none)
 	log      *slog.Logger
@@ -81,6 +82,12 @@ func WithPolicy(p *authz.Policy) Option {
 	}
 }
 
+// WithAdmin mounts the control-plane handler at /_admin. Nil (the default)
+// leaves the control plane disabled — /_admin then 404s like any reserved path.
+func WithAdmin(a http.Handler) Option {
+	return func(h *Handler) { h.admin = a }
+}
+
 // New builds the handler. When neither path nor host routing is configured, path
 // routing is enabled by default.
 func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts ...Option) *Handler {
@@ -113,8 +120,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/_health":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
+	case r.URL.Path == "/_admin" || strings.HasPrefix(r.URL.Path, "/_admin/"):
+		if h.admin == nil {
+			writeErr(w, http.StatusNotFound, "control plane not enabled")
+			return
+		}
+		h.admin.ServeHTTP(w, r)
+		return
 	case strings.HasPrefix(r.URL.Path, "/_"):
-		// _metrics / _admin / _server arrive in later phases.
+		// _metrics / _server arrive in later phases.
 		writeErr(w, http.StatusNotFound, "reserved path not available in this phase")
 		return
 	}
@@ -196,21 +210,10 @@ func hostname(h string) string {
 	return host
 }
 
-// writeJSON marshals into a buffer BEFORE writing the status line, so a marshal
-// failure becomes a clean 500 error envelope instead of a committed 200 with a
-// truncated/empty body.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	buf, err := json.Marshal(v)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"message":"internal: response encoding failed"}}` + "\n"))
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(append(buf, '\n'))
-}
+// writeJSON marshals into a buffer BEFORE writing the status line (via the shared
+// httpjson helper), so a marshal failure becomes a clean 500 error envelope
+// instead of a committed 200 with a truncated/empty body.
+func writeJSON(w http.ResponseWriter, status int, v any) { httpjson.Write(w, status, v) }
 
 const bodyReadDeadline = 30 * time.Second
 

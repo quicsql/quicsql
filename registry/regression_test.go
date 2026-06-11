@@ -168,3 +168,42 @@ func TestTimeRoundTrip(t *testing.T) {
 		t.Fatalf("time round-trip corrupted: %+v", got)
 	}
 }
+
+// TestAddRemoveRuntime covers the control-plane lifecycle: Add registers a new
+// backend that opens lazily, Remove refuses while busy and succeeds when idle.
+func TestAddRemoveRuntime(t *testing.T) {
+	reg := registry.New(map[string]backend.Backend{}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+
+	be := &fakeBackend{}
+	if err := reg.Add("d", be); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := reg.Add("d", be); !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate Add: want ErrExists, got %v", err)
+	}
+	if reg.Backend("d") == nil {
+		t.Fatal("Backend(d) nil after Add")
+	}
+
+	// Busy Remove is refused.
+	_, release, err := reg.Get(context.Background(), "d")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := reg.Remove("d"); err != registry.ErrBusy {
+		t.Fatalf("busy Remove: want ErrBusy, got %v", err)
+	}
+	release()
+
+	// Idle Remove succeeds and forgets the backend.
+	if err := reg.Remove("d"); err != nil {
+		t.Fatalf("idle Remove: %v", err)
+	}
+	if reg.Backend("d") != nil {
+		t.Fatal("Backend(d) not nil after Remove")
+	}
+	if _, _, err := reg.Get(context.Background(), "d"); err == nil {
+		t.Fatal("Get on removed database should fail")
+	}
+}

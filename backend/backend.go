@@ -127,6 +127,26 @@ type Backend interface {
 	ReadOnly() bool
 }
 
+// Pather is implemented by on-disk backends (file, vault); Path is the resolved
+// container/database path the control plane's maintenance ops address.
+type Pather interface {
+	Path() string
+}
+
+// OfflineCompacter is implemented by the vault backend: CompactOffline rewrites
+// the (closed, registry-reserved) container densely, preserving its keyslot.
+type OfflineCompacter interface {
+	CompactOffline() error
+}
+
+// OnlineReclaimer is implemented by the vault backend: the ops that run against
+// the LIVE container (the handle must be open in this process) to return freed
+// space to the OS without unmounting. Bytes reclaimed is reported.
+type OnlineReclaimer interface {
+	CompactOnline(maxBytes int64) (int64, error)
+	Trim(maxBytes int64) (int64, error)
+}
+
 // For selects and constructs the backend for one database entry.
 func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
 	installSecurity() // register the ATTACH/DETACH deny before any connection opens
@@ -146,11 +166,12 @@ func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, erro
 	}
 }
 
-// All builds the name→Backend map for the whole config.
-func All(cfg *config.Config, sec secret.Resolver) (map[string]Backend, error) {
-	m := make(map[string]Backend, len(cfg.Databases))
-	for _, db := range cfg.Databases {
-		be, err := For(db, sec, cfg.Server.DataDir)
+// All builds the name→Backend map for a database set (the config seeds, plus any
+// meta-store entries the daemon reconciles in).
+func All(dbs []config.Database, sec secret.Resolver, dataDir string) (map[string]Backend, error) {
+	m := make(map[string]Backend, len(dbs))
+	for _, db := range dbs {
+		be, err := For(db, sec, dataDir)
 		if err != nil {
 			return nil, fmt.Errorf("backend: database %q: %w", db.Name, err)
 		}

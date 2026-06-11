@@ -178,6 +178,29 @@ func TestSharedMemoryAcrossSessions(t *testing.T) {
 	}
 }
 
+func TestAdminMountAndGating(t *testing.T) {
+	sec, _ := secret.New(nil)
+	be, _ := backend.For(config.Database{Name: "app", Backend: "memory-shared"}, sec, "")
+	reg := registry.New(map[string]backend.Backend{"app": be}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+
+	// Without WithAdmin, /_admin is not available.
+	off := httpapi.New(reg, engine.New(0, 0), config.Routing{ByPath: true})
+	if rec := do(t, off, http.MethodGet, "/_admin/databases", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("disabled control plane: got %d, want 404", rec.Code)
+	}
+
+	// With WithAdmin, /_admin routes to the mounted handler.
+	sentinel := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("admin:" + r.URL.Path))
+	})
+	on := httpapi.New(reg, engine.New(0, 0), config.Routing{ByPath: true}, httpapi.WithAdmin(sentinel))
+	rec := do(t, on, http.MethodGet, "/_admin/databases", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "admin:/_admin/databases") {
+		t.Fatalf("admin mount: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestOpenModeStillServes(t *testing.T) {
 	// A handler with no explicit policy defaults to open mode: an anonymous
 	// request is read-write, preserving the pre-auth behavior.
