@@ -188,6 +188,9 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("config: database %q invalid tx_lock %q (want deferred|immediate|exclusive)", db.Name, db.Pool.TxLock)
 		}
+		if err := validateVault(db); err != nil {
+			return err
+		}
 	}
 	if err := c.validateTransports(); err != nil {
 		return err
@@ -201,6 +204,39 @@ func (c *Config) Validate() error {
 // grantLevels is the set of valid `grants[].level` strings, kept beside the other
 // config vocabularies; package authz compiles the same strings into its Level.
 var grantLevels = map[string]bool{"none": true, "read-only": true, "read-write": true, "admin": true}
+
+var (
+	vaultCompression = map[string]bool{"": true, "none": true, "fastest": true, "fast": true, "default": true, "better": true, "best": true}
+	vaultCiphers     = map[string]bool{"": true, "adiantum": true, "aes-xts": true}
+	vaultAnchors     = map[string]bool{"": true, "file": true, "tpm": true, "kms": true}
+)
+
+// validateVault checks a database's vault block: the compression/cipher/anchor
+// vocabularies, that raw-key and recipient modes aren't mixed, and that a vault
+// block isn't attached to a non-vault backend. Secret resolution and the
+// create-vs-open decision happen later in package backend.
+func validateVault(db Database) error {
+	if db.Vault == nil {
+		return nil
+	}
+	if db.Backend != "vault" {
+		return fmt.Errorf("config: database %q has a vault block but backend is %q", db.Name, db.Backend)
+	}
+	vc := db.Vault
+	if !vaultCompression[vc.Compression] {
+		return fmt.Errorf("config: database %q invalid vault.compression %q", db.Name, vc.Compression)
+	}
+	if !vaultCiphers[vc.Cipher] {
+		return fmt.Errorf("config: database %q invalid vault.cipher %q (want adiantum|aes-xts)", db.Name, vc.Cipher)
+	}
+	if vc.Anchor != nil && !vaultAnchors[vc.Anchor.Type] {
+		return fmt.Errorf("config: database %q invalid vault.anchor.type %q", db.Name, vc.Anchor.Type)
+	}
+	if vc.Key != "" && len(vc.Identities) > 0 {
+		return fmt.Errorf("config: database %q vault sets both key (raw-key mode) and identities (recipient mode)", db.Name)
+	}
+	return nil
+}
 
 // validateAuth checks the principal/capability wiring: known listener methods
 // (with transport constraints), unique named principals with known credential

@@ -77,6 +77,33 @@ func TestValidateAuth(t *testing.T) {
 	}
 }
 
+func TestValidateVault(t *testing.T) {
+	vdb := func(v *VaultConfig) *Config {
+		return &Config{Databases: []Database{{Name: "d", Backend: "vault", Mode: "rwc", Vault: v}}}
+	}
+	cases := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{"bad compression", vdb(&VaultConfig{Compression: "turbo"}), true},
+		{"bad cipher", vdb(&VaultConfig{Cipher: "rot13"}), true},
+		{"bad anchor", vdb(&VaultConfig{Anchor: &Anchor{Type: "magic"}}), true},
+		{"key and identities", vdb(&VaultConfig{Key: "f:k", Identities: []string{"f:id"}}), true},
+		{"vault block on non-vault backend", &Config{Databases: []Database{
+			{Name: "d", Backend: "file", Vault: &VaultConfig{}}}}, true},
+		{"good raw key", vdb(&VaultConfig{Cipher: "aes-xts", Compression: "best", Key: "f:k"}), false},
+		{"good recipient", vdb(&VaultConfig{Identities: []string{"f:id"}, Anchor: &Anchor{Type: "file", Path: "a"}}), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.cfg.Validate(); (err != nil) != c.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestAuthConfigured(t *testing.T) {
 	if (&Config{}).AuthConfigured() {
 		t.Error("empty config should be unconfigured (open mode)")

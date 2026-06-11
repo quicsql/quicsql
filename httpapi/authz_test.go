@@ -152,6 +152,32 @@ func TestBatonBoundToPrincipal(t *testing.T) {
 	}
 }
 
+// TestSharedMemoryAcrossSessions exercises the plan's exit criterion: rows written
+// by one client session are visible to another, over a shared in-memory backend.
+func TestSharedMemoryAcrossSessions(t *testing.T) {
+	sec, _ := secret.New(nil)
+	be, err := backend.For(config.Database{Name: "cache", Backend: "memory-shared", Pool: config.Pool{MaxOpen: 4}}, sec, "")
+	if err != nil {
+		t.Fatalf("backend.For: %v", err)
+	}
+	reg := registry.New(map[string]backend.Backend{"cache": be}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+	h := httpapi.New(reg, engine.New(0, 0), config.Routing{ByPath: true})
+
+	// Session 1 writes.
+	if rec := postAs(t, h, "", "/cache/query", `{"sql":"CREATE TABLE t(x)"}`); rec.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	if rec := postAs(t, h, "", "/cache/query", `{"sql":"INSERT INTO t VALUES(1)"}`); rec.Code != http.StatusOK {
+		t.Fatalf("insert: %d %s", rec.Code, rec.Body)
+	}
+	// Session 2 reads — sees the row.
+	rec := postAs(t, h, "", "/cache/query", `{"sql":"SELECT count(*) FROM t"}`)
+	if !strings.Contains(rec.Body.String(), "[[1]]") {
+		t.Fatalf("shared memory not visible across sessions: %s", rec.Body)
+	}
+}
+
 func TestOpenModeStillServes(t *testing.T) {
 	// A handler with no explicit policy defaults to open mode: an anonymous
 	// request is read-write, preserving the pre-auth behavior.

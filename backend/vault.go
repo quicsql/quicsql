@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"gosqlite.org"
 	"gosqlite.org/server/config"
@@ -26,9 +27,15 @@ func (b *vaultBackend) Open(ctx context.Context) (*sqlite.DB, error) {
 func (b *vaultBackend) Kind() string   { return "vault" }
 func (b *vaultBackend) ReadOnly() bool { return b.ro }
 
-// newVault resolves the OPEN-time options (compression, cipher, raw key,
-// identities, authenticate, anchor). Write-signing (write_as/masters) and the
-// create-only provisioning block are seams filled in Phase 5.
+// newVault resolves the vault.Options for a database. The option surface splits
+// by role (see the plan): raw key, compression, cipher, authenticate, and anchor
+// apply to both create and open; the rest is chosen by whether the container
+// file already exists. An existing file is OPENED with the runtime credentials
+// (identities to unwrap, masters to trust, write_as to sign commits — omit it
+// for a read-only-at-rest handle). A missing file with a `create:` block is
+// PROVISIONED with recipients/masters/writers/sign_with and the geometry; the
+// creating handle also takes write_as so it can write in authenticated-writer
+// mode. All secret material is resolved eagerly here so a bad key fails at load.
 func newVault(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
 	be := &vaultBackend{cfg: baseConfig(db, dataDir), ro: db.Mode == "ro"}
 	vc := db.Vault
@@ -42,31 +49,116 @@ func newVault(db config.Database, sec secret.Resolver, dataDir string) (Backend,
 	}
 	be.opts.Level = lvl
 	be.opts.Cipher = cipher(vc.Cipher)
-
-	if vc.Key != "" {
-		if be.opts.Key, err = sec.Bytes(vc.Key); err != nil {
-			return nil, fmt.Errorf("vault %q key: %w", db.Name, err)
-		}
-	}
-	for _, ref := range vc.Identities {
-		id, err := sec.Identity(ref)
-		if err != nil {
-			return nil, fmt.Errorf("vault %q identity: %w", db.Name, err)
-		}
-		be.opts.Identities = append(be.opts.Identities, id)
-	}
 	be.opts.Authenticate = vc.Authenticate
+
 	if vc.Anchor != nil {
 		switch vc.Anchor.Type {
 		case "file":
 			be.opts.Anchor = vault.FileAnchor(resolvePath(vc.Anchor.Path, dataDir))
 		case "tpm", "kms":
-			return nil, fmt.Errorf("vault %q anchor %q: wired in Phase 5", db.Name, vc.Anchor.Type)
+			return nil, fmt.Errorf("vault %q anchor %q: not yet supported (use a file anchor)", db.Name, vc.Anchor.Type)
 		default:
 			return nil, fmt.Errorf("vault %q unknown anchor type %q", db.Name, vc.Anchor.Type)
 		}
 	}
+
+	// Raw cipher key (raw-key mode) — applies to both create and open.
+	if vc.Key != "" {
+		if be.opts.Key, err = sec.Bytes(vc.Key); err != nil {
+			return nil, fmt.Errorf("vault %q key: %w", db.Name, err)
+		}
+	}
+
+	if fileExists(be.cfg.Path) {
+		err = openVaultOptions(&be.opts, db.Name, vc, sec)
+	} else if vc.Create != nil {
+		err = createVaultOptions(&be.opts, db.Name, vc, sec)
+	}
+	if err != nil {
+		return nil, err
+	}
 	return be, nil
+}
+
+// openVaultOptions fills the runtime credentials used to OPEN an existing
+// container: identities that unwrap a keyslot, masters to trust as membership
+// signers, and (optionally) the writer identity to sign commits.
+func openVaultOptions(o *vault.Options, name string, vc *config.VaultConfig, sec secret.Resolver) error {
+	for _, ref := range vc.Identities {
+		id, err := sec.Identity(ref)
+		if err != nil {
+			return fmt.Errorf("vault %q identity: %w", name, err)
+		}
+		o.Identities = append(o.Identities, id)
+	}
+	for _, ref := range vc.Masters {
+		mr, err := sec.MasterRecipient(ref)
+		if err != nil {
+			return fmt.Errorf("vault %q master: %w", name, err)
+		}
+		o.Masters = append(o.Masters, mr)
+	}
+	if vc.WriteAs != "" {
+		wi, err := sec.MasterIdentity(vc.WriteAs)
+		if err != nil {
+			return fmt.Errorf("vault %q write_as: %w", name, err)
+		}
+		o.WriteAs = wi
+	}
+	return nil
+}
+
+// createVaultOptions fills the create-only provisioning options for a NEW
+// container: the recipient/master/writer keyslot membership, the signing master,
+// and the on-disk geometry. write_as is honored here too so the creating handle
+// can write in authenticated-writer mode.
+func createVaultOptions(o *vault.Options, name string, vc *config.VaultConfig, sec secret.Resolver) error {
+	cr := vc.Create
+	for _, ref := range cr.Recipients {
+		r, err := sec.Recipient(ref)
+		if err != nil {
+			return fmt.Errorf("vault %q recipient: %w", name, err)
+		}
+		o.Recipients = append(o.Recipients, r)
+	}
+	for _, ref := range cr.Masters {
+		mr, err := sec.MasterRecipient(ref)
+		if err != nil {
+			return fmt.Errorf("vault %q create master: %w", name, err)
+		}
+		o.Masters = append(o.Masters, mr)
+	}
+	for _, ref := range cr.Writers {
+		wr, err := sec.MasterRecipient(ref) // WriterRecipient is an ed25519 recipient
+		if err != nil {
+			return fmt.Errorf("vault %q writer: %w", name, err)
+		}
+		o.Writers = append(o.Writers, wr)
+	}
+	if cr.SignWith != "" {
+		mi, err := sec.MasterIdentity(cr.SignWith)
+		if err != nil {
+			return fmt.Errorf("vault %q sign_with: %w", name, err)
+		}
+		o.SignWith = mi
+	}
+	if vc.WriteAs != "" {
+		wi, err := sec.MasterIdentity(vc.WriteAs)
+		if err != nil {
+			return fmt.Errorf("vault %q write_as: %w", name, err)
+		}
+		o.WriteAs = wi
+	}
+	o.PageSize = cr.PageSize
+	o.BlockSize = cr.BlockSize
+	o.DirSegmentPages = cr.DirSegmentPages
+	return nil
+}
+
+// fileExists reports whether path names an existing file (a vault container).
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // compressionLevel maps the config tier to vault.Compression. The names ARE the

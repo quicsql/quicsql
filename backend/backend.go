@@ -140,8 +140,7 @@ func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, erro
 	case "vault":
 		return newVault(db, sec, dataDir)
 	case "mvcc", "memdb":
-		// Registered-VFS in-memory modes — wired in Phase 5.
-		return nil, fmt.Errorf("backend: %q not wired until Phase 5", db.Backend)
+		return newVFSBackend(db), nil
 	default:
 		return nil, fmt.Errorf("backend: unknown backend %q", db.Backend)
 	}

@@ -128,18 +128,24 @@ type VaultConfig struct {
 	Create       *VaultCreate `yaml:"create"` // honored only when provisioning a new container
 }
 
+// Anchor configures the optional rollback-resistance anchor (an external
+// monotonic counter). Only the file type is wired; tpm/kms are seams.
 type Anchor struct {
 	Type string `yaml:"type"` // file | tpm | kms
 	Path string `yaml:"path"`
 }
 
+// VaultCreate is the create-only provisioning block, honored only when a new
+// container is minted: it defines the initial keyslot membership (recipients,
+// masters, writers, the signing master) and the on-disk geometry.
 type VaultCreate struct {
-	Recipients []string `yaml:"recipients"`
-	Masters    []string `yaml:"masters"`
-	SignWith   string   `yaml:"sign_with"`
-	Writers    []string `yaml:"writers"`
-	PageSize   int      `yaml:"page_size"`
-	BlockSize  int      `yaml:"block_size"`
+	Recipients      []string `yaml:"recipients"`
+	Masters         []string `yaml:"masters"`
+	SignWith        string   `yaml:"sign_with"`
+	Writers         []string `yaml:"writers"`
+	PageSize        int      `yaml:"page_size"`
+	BlockSize       int      `yaml:"block_size"`
+	DirSegmentPages int      `yaml:"dir_segment_pages"`
 }
 
 type Grant struct {

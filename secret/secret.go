@@ -2,11 +2,17 @@
 // are unattended and resolved eagerly at config-load — there is no interactive
 // unlock, so the daemon starts without human interaction.
 //
-// Phase 0 wires the env and file sources for raw key bytes; the kms source and
-// the keyring Identity/Recipient resolvers are seams filled in Phase 4/5.
+// A reference resolves to raw bytes (env value or file contents); the keyring
+// resolvers interpret those bytes by shape: a PEM private key (leading
+// "-----BEGIN") becomes an SSH identity, an authorized_keys line (leading
+// "ssh-", "ecdsa-", or "sk-") an SSH recipient, and anything else a passphrase
+// identity/recipient. The master/writer variants require an ed25519 SSH key (the
+// only keyring signer). A misclassified value fails to parse (fail closed) — it
+// never opens the wrong door. The kms source is a later seam.
 package secret
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -32,10 +38,16 @@ var (
 type Resolver interface {
 	// Bytes returns raw key bytes (e.g. a vault raw cipher key).
 	Bytes(ref string) ([]byte, error)
-	// Identity returns a keyring identity for recipient-mode vault opens.
+	// Identity returns a keyring identity for recipient-mode vault opens (an SSH
+	// private key, else a passphrase).
 	Identity(ref string) (keyring.Identity, error)
-	// Recipient returns a keyring recipient for create-time provisioning.
+	// Recipient returns a keyring recipient for create-time provisioning (an SSH
+	// authorized_keys line, else a passphrase).
 	Recipient(ref string) (keyring.Recipient, error)
+	// MasterIdentity returns an ed25519 master/writer identity (SignWith / WriteAs).
+	MasterIdentity(ref string) (keyring.MasterIdentity, error)
+	// MasterRecipient returns an ed25519 master/writer recipient (Masters / Writers).
+	MasterRecipient(ref string) (keyring.MasterRecipient, error)
 }
 
 type mapResolver struct {
@@ -80,12 +92,64 @@ func (r *mapResolver) Bytes(ref string) ([]byte, error) {
 	}
 }
 
+// Identity interprets the referenced bytes as an SSH private key (OpenSSH PEM),
+// falling back to a passphrase identity.
 func (r *mapResolver) Identity(ref string) (keyring.Identity, error) {
-	return nil, fmt.Errorf("secret: Identity(%q): %w", ref, ErrNotImplemented)
+	b, err := r.Bytes(ref)
+	if err != nil {
+		return nil, err
+	}
+	if isPrivateKeyPEM(b) {
+		return keyring.SSHIdentity(b, nil)
+	}
+	return keyring.PassphraseIdentity(bytes.TrimSpace(b))
 }
 
+// Recipient interprets the referenced bytes as an SSH authorized_keys line,
+// falling back to a passphrase recipient.
 func (r *mapResolver) Recipient(ref string) (keyring.Recipient, error) {
-	return nil, fmt.Errorf("secret: Recipient(%q): %w", ref, ErrNotImplemented)
+	b, err := r.Bytes(ref)
+	if err != nil {
+		return nil, err
+	}
+	if isAuthorizedKeyLine(b) {
+		return keyring.SSHRecipient(b)
+	}
+	return keyring.PassphraseRecipient(bytes.TrimSpace(b))
+}
+
+// MasterIdentity interprets the referenced bytes as an ed25519 SSH private key —
+// the only signer keyring accepts as a master or writer.
+func (r *mapResolver) MasterIdentity(ref string) (keyring.MasterIdentity, error) {
+	b, err := r.Bytes(ref)
+	if err != nil {
+		return nil, err
+	}
+	return keyring.SSHMasterIdentity(b, nil)
+}
+
+// MasterRecipient interprets the referenced bytes as an ssh-ed25519
+// authorized_keys line — a master or writer public key.
+func (r *mapResolver) MasterRecipient(ref string) (keyring.MasterRecipient, error) {
+	b, err := r.Bytes(ref)
+	if err != nil {
+		return nil, err
+	}
+	return keyring.SSHMasterRecipient(b)
+}
+
+// isPrivateKeyPEM reports whether b is a PEM block (a private key), matched on
+// the "-----BEGIN" armor rather than a substring so a passphrase that merely
+// contains "PRIVATE KEY" isn't misrouted.
+func isPrivateKeyPEM(b []byte) bool {
+	return bytes.HasPrefix(bytes.TrimSpace(b), []byte("-----BEGIN"))
+}
+
+// isAuthorizedKeyLine reports whether b looks like an authorized_keys public-key
+// line (its leading key-type token).
+func isAuthorizedKeyLine(b []byte) bool {
+	t := bytes.TrimSpace(b)
+	return bytes.HasPrefix(t, []byte("ssh-")) || bytes.HasPrefix(t, []byte("ecdsa-")) || bytes.HasPrefix(t, []byte("sk-"))
 }
 
 // lookup splits a "source:name" ref and finds its declared source. A ref with no
