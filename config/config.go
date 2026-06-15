@@ -175,9 +175,20 @@ type Limits struct {
 	TxIdleTimeout         time.Duration `yaml:"tx_idle_timeout"`
 	MaxTxLifetime         time.Duration `yaml:"max_tx_lifetime"`
 	MaxWriteSessionsPerDB int           `yaml:"max_write_sessions_per_db"`
+	MaxConcurrentPerDB    int           `yaml:"max_concurrent_per_db"` // admission cap per db (0 = unlimited)
+	Rate                  Rate          `yaml:"rate"`
+}
+
+// Rate configures per-principal request rate limiting.
+type Rate struct {
+	PerPrincipalRPS float64 `yaml:"per_principal_rps"` // token-bucket refill rate (0 = unlimited)
 }
 
 type Logging struct {
-	Format       string `yaml:"format"` // json | text
-	RedactParams bool   `yaml:"redact_params"`
+	Format string `yaml:"format"` // json | text
+	// ExpandParams opts INTO logging bound-parameter values (expanded SQL). The
+	// zero value redacts — params are logged as `?` placeholders — so redaction is
+	// the safe default even when the section is omitted.
+	ExpandParams  bool          `yaml:"expand_params"`
+	SlowThreshold time.Duration `yaml:"slow_threshold"` // >0 enables the slow-query log at this duration
 }

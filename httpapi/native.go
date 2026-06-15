@@ -57,6 +57,11 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 	if !ok {
 		return
 	}
+	done, ok := h.meter(w, r, db)
+	if !ok {
+		return
+	}
+	defer done()
 	ctx, cancel := h.withTimeout(r.Context())
 	defer cancel()
 	boundBodyRead(w)

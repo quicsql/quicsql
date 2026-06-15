@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gosqlite.org/server/admin"
 	"gosqlite.org/server/authz"
@@ -17,6 +18,7 @@ import (
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/secret"
+	"gosqlite.org/server/session"
 )
 
 func newAdmin(t *testing.T, admins []string, open bool, seed map[string]backend.Backend, sec secret.Resolver, dataDir string) (*admin.Handler, *registry.Registry, *authz.Policy) {
@@ -30,7 +32,7 @@ func newAdmin(t *testing.T, admins []string, open bool, seed map[string]backend.
 	if sec == nil {
 		sec, _ = secret.New(nil)
 	}
-	return admin.New(reg, pol, nil, sec, dataDir, admins, nil), reg, pol
+	return admin.New(reg, pol, nil, nil, sec, dataDir, admins, time.Now(), nil), reg, pol
 }
 
 func as(t *testing.T, h http.Handler, name, method, target, body string) *httptest.ResponseRecorder {
@@ -220,6 +222,91 @@ func TestSnapshot(t *testing.T) {
 	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"s","op":"snapshot","dest":"`+dest+`"}`); rec.Code != http.StatusConflict {
 		t.Fatalf("clobber dest: got %d, want 409", rec.Code)
 	}
+}
+
+func TestIntrospectionSessionsAndKill(t *testing.T) {
+	sec, _ := secret.New(nil)
+	be, _ := backend.For(config.Database{Name: "app", Backend: "memory-shared"}, sec, "")
+	reg := registry.New(map[string]backend.Backend{"app": be}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+	store, err := session.NewStore(time.Minute, time.Minute, 16)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	pol := authz.NewPolicy(false)
+	h := admin.New(reg, pol, nil, store, sec, "", []string{"root"}, time.Now(), nil)
+
+	// Open a live session on "app" and clear its in-flight flag so it is killable.
+	dbh, release, err := reg.Get(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	s, err := store.Open(context.Background(), dbh, release, "user", false)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	store.Baton(s) // clears busy
+
+	// /info requires server-admin.
+	if rec := as(t, h, "nobody", http.MethodGet, "/_admin/info", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("info non-admin: got %d, want 403", rec.Code)
+	}
+	info := as(t, h, "root", http.MethodGet, "/_admin/info", "")
+	if info.Code != http.StatusOK || !strings.Contains(info.Body.String(), `"active_sessions":1`) {
+		t.Fatalf("info: %d %s", info.Code, info.Body)
+	}
+
+	// /sessions lists the live session.
+	rec := as(t, h, "root", http.MethodGet, "/_admin/sessions", "")
+	var resp struct {
+		Sessions []struct {
+			ID       string `json:"id"`
+			Database string `json:"database"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode sessions: %v (%s)", err, rec.Body)
+	}
+	if len(resp.Sessions) != 1 || resp.Sessions[0].Database != "app" {
+		t.Fatalf("want 1 session on app, got %s", rec.Body)
+	}
+	id := resp.Sessions[0].ID
+
+	// /kill closes it.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/kill", `{"session":"`+id+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("kill: got %d (%s)", rec.Code, rec.Body)
+	}
+	// It is gone.
+	rec = as(t, h, "root", http.MethodGet, "/_admin/sessions", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Sessions) != 0 {
+		t.Fatalf("session should be gone after kill: %s", rec.Body)
+	}
+	// Killing an unknown session is 404.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/kill", `{"session":"AAAAAAAAAAAAAAAAAAAAAA"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("kill unknown: got %d, want 404", rec.Code)
+	}
+}
+
+func TestKillBusySessionRefused(t *testing.T) {
+	sec, _ := secret.New(nil)
+	be, _ := backend.For(config.Database{Name: "app", Backend: "memory-shared"}, sec, "")
+	reg := registry.New(map[string]backend.Backend{"app": be}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+	store, _ := session.NewStore(time.Minute, time.Minute, 16)
+	h := admin.New(reg, authz.NewPolicy(false), nil, store, sec, "", []string{"root"}, time.Now(), nil)
+
+	dbh, release, _ := reg.Get(context.Background(), "app")
+	s, _ := store.Open(context.Background(), dbh, release, "user", false) // busy=true (not cleared)
+	list := store.List(nil)
+	if len(list) != 1 {
+		t.Fatalf("want 1 session, got %d", len(list))
+	}
+	// A busy session is refused (409) — bounded by the statement timeout instead.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/kill", `{"session":"`+list[0].ID+`"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("kill busy: got %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	store.Close(s) // cleanup
 }
 
 func TestControlPlaneRequiresNamedAdmin(t *testing.T) {

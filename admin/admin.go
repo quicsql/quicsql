@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gosqlite.org/server/authz"
 	"gosqlite.org/server/backend"
@@ -22,24 +23,28 @@ import (
 	"gosqlite.org/server/meta"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/secret"
+	"gosqlite.org/server/session"
 )
 
 // Handler serves /_admin/*. It is nil-safe to construct without a meta store
 // (Store may be nil for a stateless deployment): create/detach then don't
 // persist across restart, and audit records are dropped.
 type Handler struct {
-	reg     *registry.Registry
-	pol     *authz.Policy
-	store   *meta.Store
-	sec     secret.Resolver
-	dataDir string
-	admins  map[string]bool // server-admin principal names
-	log     *slog.Logger
+	reg      *registry.Registry
+	pol      *authz.Policy
+	store    *meta.Store
+	sessions *session.Store // live sessions, for introspection + KILL (may be nil)
+	sec      secret.Resolver
+	dataDir  string
+	admins   map[string]bool // server-admin principal names
+	started  time.Time
+	log      *slog.Logger
 }
 
 // New builds the admin handler. admins are the server-admin principal names from
-// control_plane.admins.
-func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sec secret.Resolver, dataDir string, admins []string, log *slog.Logger) *Handler {
+// control_plane.admins; sessions (may be nil) backs the sessions/kill endpoints;
+// started is used for the uptime report.
+func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sessions *session.Store, sec secret.Resolver, dataDir string, admins []string, started time.Time, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -47,7 +52,7 @@ func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sec secre
 	for _, a := range admins {
 		set[a] = true
 	}
-	return &Handler{reg: reg, pol: pol, store: store, sec: sec, dataDir: dataDir, admins: set, log: log}
+	return &Handler{reg: reg, pol: pol, store: store, sessions: sessions, sec: sec, dataDir: dataDir, admins: set, started: started, log: log}
 }
 
 // ServeHTTP routes the /_admin/* endpoints. The prefix is already matched by the
@@ -55,7 +60,7 @@ func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sec secre
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub := strings.TrimPrefix(r.URL.Path, "/_admin")
 	switch sub {
-	case "/databases":
+	case "/databases", "/stats":
 		h.handleDatabases(w, r)
 	case "/create":
 		h.handleCreate(w, r)
@@ -63,6 +68,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleDetach(w, r)
 	case "/maintenance":
 		h.handleMaintenance(w, r)
+	case "/info":
+		h.handleInfo(w, r)
+	case "/sessions":
+		h.handleSessions(w, r)
+	case "/kill":
+		h.handleKill(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "unknown admin endpoint")
 	}
@@ -78,10 +89,19 @@ func (h *Handler) isServerAdmin(r *http.Request) bool {
 	return h.admins[authz.FromContext(r.Context()).Name]
 }
 
-// canAdminDB reports whether the principal may run maintenance on db: a
-// server-admin, or a holder of an `admin` grant on that database.
+// adminFilter returns the per-database "may administer" predicate for a request:
+// a server-admin administers every database; otherwise a holder of an `admin`
+// grant administers that database. It is the single source for the authz-filtered
+// list (databases/stats/sessions) and the per-op check (canAdminDB).
+func (h *Handler) adminFilter(r *http.Request) func(db string) bool {
+	admin := h.isServerAdmin(r)
+	p := authz.FromContext(r.Context())
+	return func(db string) bool { return admin || h.pol.Level(p, db).CanAdmin() }
+}
+
+// canAdminDB reports whether the principal may run maintenance on db.
 func (h *Handler) canAdminDB(r *http.Request, db string) bool {
-	return h.isServerAdmin(r) || h.pol.Level(authz.FromContext(r.Context()), db).CanAdmin()
+	return h.adminFilter(r)(db)
 }
 
 func (h *Handler) principal(r *http.Request) string {
@@ -118,10 +138,10 @@ func (h *Handler) handleDatabases(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "use GET")
 		return
 	}
-	admin := h.isServerAdmin(r)
+	allow := h.adminFilter(r)
 	out := make([]map[string]any, 0)
 	for _, info := range h.reg.List() {
-		if !admin && !h.pol.Level(authz.FromContext(r.Context()), info.Name).CanAdmin() {
+		if !allow(info.Name) {
 			continue
 		}
 		out = append(out, map[string]any{

@@ -24,7 +24,9 @@ import (
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/httpapi"
+	"gosqlite.org/server/limits"
 	"gosqlite.org/server/meta"
+	"gosqlite.org/server/obs"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/secret"
 	"gosqlite.org/server/session"
@@ -44,6 +46,7 @@ func main() {
 	flag.Parse()
 
 	log := slog.Default()
+	started := time.Now()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -52,6 +55,12 @@ func main() {
 	sec, err := secret.New(cfg.Secrets) // eager: all key material resolved at load
 	if err != nil {
 		fatal(log, "init secrets", err)
+	}
+
+	// The slow-query log installs a per-connection profile trace; it must be armed
+	// before any database opens.
+	if cfg.Logging.SlowThreshold > 0 {
+		backend.InstallSlowLog(cfg.Logging.SlowThreshold, !cfg.Logging.ExpandParams, log)
 	}
 
 	// The meta store records databases created at runtime; reconcile config ∪ meta
@@ -118,6 +127,12 @@ func main() {
 		log.Warn("quicsql: no auth configured — every database is publicly read-write (open mode)")
 	}
 
+	// Metrics registry with live gauges, and the admission limiter.
+	metrics := obs.NewRegistry()
+	metrics.SetGauge("quicsql_active_sessions", func() int64 { return int64(sessions.Count()) })
+	metrics.SetGauge("quicsql_databases", func() int64 { return int64(len(backends)) })
+	limiter := limits.New(cfg.Limits.Rate.PerPrincipalRPS, cfg.Limits.MaxConcurrentPerDB)
+
 	eng := engine.New(cfg.Limits.MaxRows, cfg.Limits.MaxResultBytes)
 	handlerOpts := []httpapi.Option{
 		httpapi.WithLogger(log),
@@ -125,9 +140,11 @@ func main() {
 		httpapi.WithStatementTimeout(stmtTimeout),
 		httpapi.WithSessions(sessions),
 		httpapi.WithPolicy(policy),
+		httpapi.WithMetrics(metrics),
+		httpapi.WithLimiter(limiter),
 	}
 	if cfg.ControlPlane.Enabled {
-		adminH := admin.New(reg, policy, store, sec, cfg.Server.DataDir, cfg.ControlPlane.Admins, log)
+		adminH := admin.New(reg, policy, store, sessions, sec, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
 		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))
 	}

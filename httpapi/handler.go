@@ -19,6 +19,8 @@ import (
 	"gosqlite.org/server/config"
 	"gosqlite.org/server/engine"
 	"gosqlite.org/server/internal/httpjson"
+	"gosqlite.org/server/limits"
+	"gosqlite.org/server/obs"
 	"gosqlite.org/server/registry"
 	"gosqlite.org/server/session"
 )
@@ -34,6 +36,8 @@ type Handler struct {
 	route    config.Routing
 	policy   *authz.Policy
 	admin    http.Handler // control plane at /_admin (nil = disabled)
+	metrics  obs.Metrics  // request counters/latency (nil = disabled)
+	limiter  *limits.Limiter
 	maxBody  int64
 	stmtTO   time.Duration // per-request statement timeout (0 = none)
 	log      *slog.Logger
@@ -88,6 +92,18 @@ func WithAdmin(a http.Handler) Option {
 	return func(h *Handler) { h.admin = a }
 }
 
+// WithMetrics sets the metrics sink; when it also implements obs.Exposer, the
+// /_metrics endpoint renders it.
+func WithMetrics(m obs.Metrics) Option {
+	return func(h *Handler) { h.metrics = m }
+}
+
+// WithLimiter sets the admission-control limiter (per-principal rate + per-db
+// concurrency). Nil admits every request.
+func WithLimiter(l *limits.Limiter) Option {
+	return func(h *Handler) { h.limiter = l }
+}
+
 // New builds the handler. When neither path nor host routing is configured, path
 // routing is enabled by default.
 func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts ...Option) *Handler {
@@ -99,6 +115,58 @@ func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts 
 		o(h)
 	}
 	return h
+}
+
+// handleMetrics renders the metrics registry in OpenMetrics/Prometheus text. It
+// exposes only aggregate counts (and database names as labels), no secrets.
+// Unlike /_health it is NOT whitelisted by the auth middleware, so it is subject
+// to the listener's auth — scrape it on a none/localhost listener, and keep it
+// off a public listener if database names are sensitive.
+func (h *Handler) handleMetrics(w http.ResponseWriter) {
+	e, ok := h.metrics.(obs.Exposer)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "metrics not enabled")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.WriteHeader(http.StatusOK)
+	e.WriteOpenMetrics(w)
+}
+
+// meter applies the admission limiter and, for an admitted request, counts it and
+// times it. It returns a release func (always deferred by the caller) and
+// ok=false after writing a rejection (429 rate / 503 concurrency). A rejected
+// request is NOT counted or timed — quicsql_requests_total is served requests,
+// not arrivals. It runs after authorize, so only admitted-by-capability requests
+// are metered.
+func (h *Handler) meter(w http.ResponseWriter, r *http.Request, db string) (func(), bool) {
+	p := authz.FromContext(r.Context())
+	var release func()
+	if h.limiter != nil {
+		var ok bool
+		var reason string
+		release, ok, reason = h.limiter.Allow(p.Name, db)
+		if !ok {
+			if reason == "rate" {
+				writeErr(w, http.StatusTooManyRequests, "rate limit exceeded")
+			} else {
+				writeErr(w, http.StatusServiceUnavailable, "database busy: too many concurrent requests")
+			}
+			return nil, false
+		}
+	}
+	if h.metrics != nil {
+		h.metrics.IncRequests(db, p.Name)
+	}
+	start := time.Now()
+	return func() {
+		if release != nil {
+			release()
+		}
+		if h.metrics != nil {
+			h.metrics.ObserveLatency(db, time.Since(start))
+		}
+	}, true
 }
 
 // authorize resolves the caller's capability on db. It returns the level and
@@ -120,6 +188,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/_health":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
+	case r.URL.Path == "/_metrics":
+		h.handleMetrics(w)
+		return
 	case r.URL.Path == "/_admin" || strings.HasPrefix(r.URL.Path, "/_admin/"):
 		if h.admin == nil {
 			writeErr(w, http.StatusNotFound, "control plane not enabled")
@@ -128,8 +199,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.admin.ServeHTTP(w, r)
 		return
 	case strings.HasPrefix(r.URL.Path, "/_"):
-		// _metrics / _server arrive in later phases.
-		writeErr(w, http.StatusNotFound, "reserved path not available in this phase")
+		// _health, _metrics, _admin, and _auth are handled above; the queryable
+		// _server introspection database is a later phase.
+		writeErr(w, http.StatusNotFound, "reserved path not available")
 		return
 	}
 

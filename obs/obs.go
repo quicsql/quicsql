@@ -1,10 +1,14 @@
-// Package obs is the observability seam: the structured log channels and the
-// metrics interface. Phase 7 routes each channel to its own sink (stderr, file,
-// per-database file, syslog), adds the slow-query log (driver TraceProfile), the
-// audit log (to the vault meta store), and the live MONITOR tail.
+// Package obs is the observability seam. Live today: the Metrics interface with
+// an OpenMetrics Registry (served at /_metrics), alongside the slow-query log
+// (driver TraceProfile — see backend.InstallSlowLog) and the admin audit log
+// (meta store). The Channels type below is a seam for later work: routing each
+// structured channel to its own sink (file, per-database file, syslog) and the
+// live MONITOR tail are not yet wired — every channel currently fans to the
+// default logger.
 package obs
 
 import (
+	"io"
 	"log/slog"
 	"time"
 )
@@ -38,3 +42,9 @@ type Nop struct{}
 
 func (Nop) IncRequests(string, string)           {}
 func (Nop) ObserveLatency(string, time.Duration) {}
+
+// Exposer is implemented by a Metrics sink that can render itself as
+// OpenMetrics/Prometheus text (the /_metrics endpoint checks for it).
+type Exposer interface {
+	WriteOpenMetrics(w io.Writer)
+}

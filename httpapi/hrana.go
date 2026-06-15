@@ -31,6 +31,11 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 	if !ok {
 		return
 	}
+	done, ok := h.meter(w, r, dbName)
+	if !ok {
+		return
+	}
+	defer done()
 	ctx := r.Context() // per-statement timeouts are applied in execStmt / sequence
 	boundBodyRead(w)
 	body, err := h.readBody(r)

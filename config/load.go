@@ -71,9 +71,13 @@ func AnyGrants(dbs []Database) bool {
 	return false
 }
 
-// ValidDBName reports whether s is a usable database name: non-empty, not
-// reserved or an endpoint token, not path-shaped. Used by both config
-// validation and the HTTP router (defense in depth), so the two can't diverge.
+// ValidDBName reports whether s is a usable database name: a plain identifier
+// (ASCII letters, digits, and `-`/`.`/`_`, first char not `_`), non-empty, not
+// reserved or an endpoint token, not `.`/`..`. The identifier charset (no path
+// separators, quotes, whitespace, or control characters) keeps a name safe to use
+// unquoted as a URL segment, a metrics label, and a path component. Used by both
+// config validation and the HTTP router (defense in depth), so the two can't
+// diverge.
 func ValidDBName(s string) bool {
 	switch {
 	case s == "" || s == "." || s == "..":
@@ -82,11 +86,16 @@ func ValidDBName(s string) bool {
 		return false
 	case EndpointTokens[s]:
 		return false
-	case strings.ContainsAny(s, `/\`):
-		return false
-	default:
-		return true
 	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '.' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // knownTopLevel are the config sections wired into behavior. inertTopLevel are

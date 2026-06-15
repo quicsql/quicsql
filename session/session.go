@@ -84,6 +84,7 @@ type Store struct {
 	ttl      time.Duration  // idle timeout
 	maxLife  time.Duration  // absolute session lifetime (caps a kept-alive open tx)
 	max      int            // per-database session cap
+	closing  sync.WaitGroup // in-flight conn-teardown goroutines (CloseAll waits)
 }
 
 // NewStore builds a session store with a random baton-signing key. ttl is the
@@ -219,13 +220,95 @@ func (st *Store) Close(s *Session) {
 	st.mu.Unlock()
 }
 
-// CloseAll tears down every session (server shutdown).
+// Info is a point-in-time snapshot of one live session for introspection.
+type Info struct {
+	ID        string
+	DBName    string
+	Principal string
+	ReadOnly  bool
+	Busy      bool
+	Age       time.Duration
+	IdleFor   time.Duration
+}
+
+// List snapshots the live sessions. If dbFilter is non-nil, only sessions on a
+// database for which it returns true are included (the authz view predicate).
+func (st *Store) List(dbFilter func(db string) bool) []Info {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	now := time.Now()
+	out := make([]Info, 0, len(st.sessions))
+	for id, s := range st.sessions {
+		if dbFilter != nil && !dbFilter(s.dbName) {
+			continue
+		}
+		out = append(out, Info{
+			ID:        base64.RawURLEncoding.EncodeToString(id[:]),
+			DBName:    s.dbName,
+			Principal: s.principal,
+			ReadOnly:  s.readOnly,
+			Busy:      s.busy,
+			Age:       now.Sub(s.created),
+			IdleFor:   now.Sub(s.lastUsed),
+		})
+	}
+	return out
+}
+
+// Count returns the number of live sessions (for the metrics gauge).
+func (st *Store) Count() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.sessions)
+}
+
+// KillResult reports the outcome of a Kill.
+type KillResult int
+
+const (
+	KillNotFound KillResult = iota // no session with that id
+	KillBusy                       // a request is in flight; refused (bounded by the statement timeout)
+	Killed                         // rolled back and closed
+)
+
+// Kill closes the session with the given (base64url) id — the admin KILL: it
+// rolls back any open transaction and returns the pinned connection to the pool,
+// making the baton unresumable. It REFUSES a session with a request in flight
+// (KillBusy): tearing down a connection under an in-flight statement would misuse
+// database/sql, and a runaway statement is already bounded by the per-statement
+// timeout, after which the session becomes killable (or the reaper takes it).
+func (st *Store) Kill(idStr string) KillResult {
+	raw, err := base64.RawURLEncoding.DecodeString(idStr)
+	if err != nil || len(raw) != idLen {
+		return KillNotFound
+	}
+	var id [idLen]byte
+	copy(id[:], raw)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.sessions[id]
+	if s == nil {
+		return KillNotFound
+	}
+	if s.busy {
+		return KillBusy
+	}
+	st.closeLocked(id)
+	return Killed
+}
+
+// CloseAll tears down every session and WAITS for the connections to be rolled
+// back and returned to their pools. The wait matters at shutdown: the caller
+// closes the registry (which closes the pools, checkpointing WAL) right after, so
+// the pinned connections must be back before that — otherwise the pool would be
+// closed out from under an in-flight ROLLBACK.
 func (st *Store) CloseAll() {
 	st.mu.Lock()
 	for id := range st.sessions {
 		st.closeLocked(id)
 	}
 	st.mu.Unlock()
+	st.closing.Wait()
 }
 
 func (st *Store) closeLocked(id [idLen]byte) {
@@ -240,8 +323,10 @@ func (st *Store) closeLocked(id [idLen]byte) {
 	// Roll back any open interactive transaction, restore the base authorizer on a
 	// read-only conn (so the next pool borrower isn't left in read-only mode),
 	// return the conn to the pool, then drop the registry ref. All best-effort (a
-	// no-tx ROLLBACK just errors).
+	// no-tx ROLLBACK just errors). Tracked by st.closing so CloseAll can wait.
+	st.closing.Add(1)
 	go func(c *sql.Conn, release func(), readOnly bool) {
+		defer st.closing.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), closeRollbackTimeout)
 		defer cancel()
 		_, _ = c.ExecContext(ctx, "ROLLBACK")
