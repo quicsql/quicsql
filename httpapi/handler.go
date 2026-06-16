@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"gosqlite.org/server/authz"
@@ -25,7 +26,10 @@ import (
 	"gosqlite.org/server/session"
 )
 
-const defaultMaxBody = 8 << 20 // 8 MiB request-body cap
+const (
+	defaultMaxBody = 8 << 20 // 8 MiB request-body cap (query/pipeline/changeset)
+	defaultMaxBlob = 1 << 30 // 1 GiB cap for a single streamed large object
+)
 
 // Handler is the quicSQL HTTP handler. The auth middleware (package auth) has
 // already attached the request's principal to the context by the time a request
@@ -39,9 +43,15 @@ type Handler struct {
 	metrics  obs.Metrics  // request counters/latency (nil = disabled)
 	limiter  *limits.Limiter
 	maxBody  int64
+	maxBlob  int64         // cap for a single streamed large object (blob write)
 	stmtTO   time.Duration // per-request statement timeout (0 = none)
 	log      *slog.Logger
 	sessions *session.Store // Hrana interactive-transaction streams (nil = disabled)
+	// blobStores caches an opened *blobstore.Store per (db handle, name) so blob
+	// ops don't re-open (and re-run the idempotent CREATE TABLE) per request, and
+	// so a provisioned store's options survive across ops. Keyed like the local
+	// lob cache (by db handle), so a reopened database gets a fresh entry.
+	blobStores sync.Map
 }
 
 // Option customizes a Handler.
@@ -52,6 +62,17 @@ func WithMaxBody(n int64) Option {
 	return func(h *Handler) {
 		if n > 0 {
 			h.maxBody = n
+		}
+	}
+}
+
+// WithMaxBlob caps a single streamed large object (blob write). Non-positive
+// keeps the default. Unlike WithMaxBody this bounds a streamed body, not a
+// buffered one, so it can be large without a matching memory cost.
+func WithMaxBlob(n int64) Option {
+	return func(h *Handler) {
+		if n > 0 {
+			h.maxBlob = n
 		}
 	}
 }
@@ -107,7 +128,7 @@ func WithLimiter(l *limits.Limiter) Option {
 // New builds the handler. When neither path nor host routing is configured, path
 // routing is enabled by default.
 func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts ...Option) *Handler {
-	h := &Handler{reg: reg, eng: eng, route: route, policy: authz.NewPolicy(true), maxBody: defaultMaxBody, log: slog.Default()}
+	h := &Handler{reg: reg, eng: eng, route: route, policy: authz.NewPolicy(true), maxBody: defaultMaxBody, maxBlob: defaultMaxBlob, log: slog.Default()}
 	if !h.route.ByPath && !h.route.ByHost {
 		h.route.ByPath = true
 	}
@@ -213,6 +234,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch endpoint {
 	case "/query":
 		h.handleQuery(w, r, db)
+	case "/export":
+		h.handleExport(w, r, db)
+	case "/changeset/apply":
+		h.handleChangesetApply(w, r, db)
+	case "/changeset/invert":
+		h.handleChangesetInvert(w, r, db)
+	case "/changeset/concat":
+		h.handleChangesetConcat(w, r, db)
+	case "/blob/provision", "/blob/create", "/blob/write", "/blob/read", "/blob/size", "/blob/delete":
+		h.handleBlob(w, r, db, endpoint)
 	case "/v2/pipeline", "/v3/pipeline":
 		h.handlePipeline(w, r, db)
 	case "/v2", "/v3":
@@ -297,9 +328,33 @@ func boundBodyRead(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadDeadline))
 }
 
-// readBody reads the request body under the configured size cap.
+// errBodyTooLarge is returned by readBody when the request body exceeds the
+// configured cap. Handlers surface it as 413, rather than silently truncating.
+var errBodyTooLarge = errors.New("request body exceeds the maximum allowed size")
+
+// readBody reads the request body under the configured size cap. It reads one
+// byte past the cap so an over-cap body is rejected (errBodyTooLarge) instead of
+// silently truncated — otherwise a blob write or changeset larger than the cap
+// would be stored/applied truncated and reported as success.
 func (h *Handler) readBody(r *http.Request) ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r.Body, h.maxBody))
+	b, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > h.maxBody {
+		return nil, errBodyTooLarge
+	}
+	return b, nil
+}
+
+// writeReadBodyErr maps a readBody error to a status: 413 for an over-cap body,
+// 400 otherwise. Used by the endpoints that accept large payloads.
+func writeReadBodyErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBodyTooLarge) {
+		writeErr(w, http.StatusRequestEntityTooLarge, "request body exceeds the maximum allowed size")
+		return
+	}
+	writeErr(w, http.StatusBadRequest, "read body")
 }
 
 // withTimeout applies the per-statement timeout (if configured) to ctx.

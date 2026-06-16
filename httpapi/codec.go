@@ -14,8 +14,9 @@ import (
 
 // encodeValue maps a cell to its native-JSON form: null/number/string bare, and
 // a blob boxed as {"base64": "..."} so it can't be confused with text. A
-// non-finite REAL (±Inf/NaN — which JSON numbers cannot represent) is emitted as
-// the string "Infinity"/"-Infinity"/"NaN" so the response stays encodable.
+// non-finite REAL (±Inf/NaN, which JSON numbers cannot represent) is emitted as
+// null — the same choice the Hrana tagged form makes, so the two transports agree
+// (a string would reach a REAL cell as text and fail a float scan).
 //
 // Counterpart: hValue.MarshalJSON (hrana_types.go) is the Hrana tagged form.
 // Both switch on engine.Kind and must be updated together if a Kind is added.
@@ -25,7 +26,7 @@ func encodeValue(v engine.Value) any {
 		return v.Int
 	case engine.KindFloat:
 		if math.IsInf(v.Float, 0) || math.IsNaN(v.Float) {
-			return nonFiniteString(v.Float)
+			return nil // JSON can't carry ±Inf/NaN; emit null, matching the Hrana path
 		}
 		return v.Float
 	case engine.KindText:
@@ -34,17 +35,6 @@ func encodeValue(v engine.Value) any {
 		return map[string]string{"base64": base64.StdEncoding.EncodeToString(v.Blob)}
 	default:
 		return nil
-	}
-}
-
-func nonFiniteString(f float64) string {
-	switch {
-	case math.IsNaN(f):
-		return "NaN"
-	case f > 0:
-		return "Infinity"
-	default:
-		return "-Infinity"
 	}
 }
 

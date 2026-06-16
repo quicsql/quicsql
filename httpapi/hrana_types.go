@@ -91,13 +91,24 @@ type pipelineReq struct {
 	Requests []streamRequest `json:"requests"`
 }
 
-// streamRequest is the union of every request kind, discriminated by Type.
+// streamRequest is the union of every request kind, discriminated by Type. The
+// session_start / session_changeset kinds are quicSQL extensions (not libSQL
+// Hrana): they capture a SQLite SESSION changeset on the stream's pinned
+// connection — see runStreamRequest.
 type streamRequest struct {
-	Type  string  `json:"type"`
-	Stmt  *hStmt  `json:"stmt"`
-	Batch *hBatch `json:"batch"`
-	SQL   *string `json:"sql"`
-	SQLID *int32  `json:"sql_id"`
+	Type   string   `json:"type"`
+	Stmt   *hStmt   `json:"stmt"`
+	Batch  *hBatch  `json:"batch"`
+	SQL    *string  `json:"sql"`
+	SQLID  *int32   `json:"sql_id"`
+	Tables []string `json:"tables"` // session_start: tables to track (empty = all)
+}
+
+// changesetResp carries a captured changeset (base64) for a session_changeset
+// request.
+type changesetResp struct {
+	Type      string `json:"type"`
+	Changeset string `json:"changeset"`
 }
 
 type pipelineResp struct {
@@ -160,6 +171,9 @@ type hStmtResult struct {
 	Rows             [][]hValue `json:"rows"`
 	AffectedRowCount uint64     `json:"affected_row_count"`
 	LastInsertRowid  *string    `json:"last_insert_rowid"`
+	// Truncated reports that the row set was capped by the max-rows limit. It is a
+	// quicSQL extension to the Hrana result (the spec has no such field).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // --- batch ---

@@ -25,9 +25,12 @@ var Reserved = map[string]bool{
 // a database. A user database may not take one of these names (it would be
 // unreachable via URL-path routing). The HTTP router uses the same set.
 var EndpointTokens = map[string]bool{
-	"query": true,
-	"v2":    true,
-	"v3":    true,
+	"query":     true,
+	"v2":        true,
+	"v3":        true,
+	"export":    true,
+	"changeset": true, // /<db>/changeset/{apply,invert,concat}
+	"blob":      true, // /<db>/blob/{create,write,read,size,delete}
 }
 
 // KnownBackends is the single source of truth for valid `backend:` values,
@@ -200,6 +203,11 @@ func (c *Config) Validate() error {
 		case "", "deferred", "immediate", "exclusive":
 		default:
 			return fmt.Errorf("config: database %q invalid tx_lock %q (want deferred|immediate|exclusive)", db.Name, db.Pool.TxLock)
+		}
+		switch db.PragmasPreset {
+		case "", "recommended":
+		default:
+			return fmt.Errorf("config: database %q invalid pragmas_preset %q (want recommended)", db.Name, db.PragmasPreset)
 		}
 		if err := validateVault(db); err != nil {
 			return err

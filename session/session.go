@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	sqlite "gosqlite.org"
 	"gosqlite.org/server/backend"
 	"gosqlite.org/server/registry"
 )
@@ -56,10 +57,45 @@ type Session struct {
 	lastUsed  time.Time
 	busy      bool
 	sql       map[int32]string // store_sql cache
+	// capture is an attached SESSION for changeset capture, if any. Unlike the
+	// other fields it is touched by two goroutines — the request path
+	// (SetCapture/TakeCapture) and the teardown goroutine (TakeCapture in
+	// closeLocked, which runs on shutdown even for a busy session) — so its access
+	// is guarded by captureMu, and TakeCapture ensures exactly one owner closes it.
+	captureMu sync.Mutex
+	capture   *sqlite.Session
 }
 
 // Conn returns the pinned connection the engine runs statements on.
 func (s *Session) Conn() *sql.Conn { return s.conn }
+
+// SetCapture attaches (or clears) a SESSION handle used to capture a changeset on
+// this stream's pinned connection. The Store closes it (via TakeCapture) when the
+// stream ends, so a stream that starts a capture and never fetches the changeset
+// does not leak it.
+func (s *Session) SetCapture(c *sqlite.Session) {
+	s.captureMu.Lock()
+	s.capture = c
+	s.captureMu.Unlock()
+}
+
+// Capture reports whether a capture is attached (for the "already open" guard).
+func (s *Session) Capture() *sqlite.Session {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	return s.capture
+}
+
+// TakeCapture atomically clears and returns the attached SESSION handle, so
+// exactly one caller — the request path (session_changeset) or teardown
+// (closeLocked) — owns and closes it, even if shutdown races an in-flight capture.
+func (s *Session) TakeCapture() *sqlite.Session {
+	s.captureMu.Lock()
+	c := s.capture
+	s.capture = nil
+	s.captureMu.Unlock()
+	return c
+}
 
 // DBName is the database this session is bound to.
 func (s *Session) DBName() string { return s.dbName }
@@ -325,10 +361,13 @@ func (st *Store) closeLocked(id [idLen]byte) {
 	// return the conn to the pool, then drop the registry ref. All best-effort (a
 	// no-tx ROLLBACK just errors). Tracked by st.closing so CloseAll can wait.
 	st.closing.Add(1)
-	go func(c *sql.Conn, release func(), readOnly bool) {
+	go func(c *sql.Conn, release func(), readOnly bool, capture *sqlite.Session) {
 		defer st.closing.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), closeRollbackTimeout)
 		defer cancel()
+		if capture != nil {
+			_ = capture.Close() // close the SESSION handle before its connection
+		}
 		_, _ = c.ExecContext(ctx, "ROLLBACK")
 		if readOnly {
 			_ = backend.SetConnMode(ctx, c, false)
@@ -337,7 +376,7 @@ func (st *Store) closeLocked(id [idLen]byte) {
 		if release != nil {
 			release()
 		}
-	}(s.conn, s.release, s.readOnly)
+	}(s.conn, s.release, s.readOnly, s.TakeCapture())
 }
 
 // StartReaper runs a background loop that closes idle / over-lifetime sessions

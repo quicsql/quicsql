@@ -47,12 +47,13 @@ func TestVaultOverHTTP(t *testing.T) {
 }
 
 // TestNonFiniteFloat regresses the silent empty-200 blocker: a non-finite REAL
-// must serialize (as a string) rather than abort the response.
+// must serialize (JSON can't carry ±Inf/NaN, so it becomes null — the same choice
+// the Hrana path makes) rather than abort the response.
 func TestNonFiniteFloat(t *testing.T) {
 	h := newHandlerDB(t, fileDB("app"))
 	rec := mustOK(t, h, "/app/query", `{"sql":"SELECT 1e308*10 AS inf"}`)
-	if body := strings.TrimSpace(rec.Body.String()); body == "" || !strings.Contains(body, "Infinity") {
-		t.Fatalf("want a non-empty body containing Infinity, got %q", rec.Body.String())
+	if body := strings.TrimSpace(rec.Body.String()); body == "" || !strings.Contains(body, `[[null]]`) {
+		t.Fatalf("want a non-empty body with a null cell for the non-finite REAL, got %q", rec.Body.String())
 	}
 }
 

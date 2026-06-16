@@ -48,6 +48,44 @@ bench *FLAGS:
 run *ARGS:
     go run ./cmd/quicsql {{ARGS}}
 
+# Run the self-contained example: databases across every transport, real-life
+# operations, and a per-protocol throughput benchmark. Usage: just demo -dur 5s -workers 64
+demo *ARGS:
+    go run ./examples/demo {{ARGS}}
+
+# Run the auth/authz matrix demo: every authentication method and authorization
+# level, with success and denial paths (exits non-zero if any expectation fails).
+auth-demo:
+    go run ./examples/auth
+
+# Same matrix, but the credential methods (bearer/password/keyring) ride over a
+# server-authenticated TLS h2 listener instead of cleartext — the deployed shape.
+auth-demo-tls:
+    go run ./examples/auth -tls
+
+# Two-module showcase, run locally as a smoke test: start the fully-charged server
+# (encryption+compression, all auth/transports, extensions, a custom function),
+# run the remote tour against it over TLS+mTLS, then stop the server. In a real
+# deployment the server runs on another host — see examples/quicsql-charged-server.
+showcase:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'kill "${srv:-0}" 2>/dev/null || true; rm -rf "$dir"' EXIT
+    (cd ../examples/quicsql-charged-server && go build -o "$dir/charged" .)
+    "$dir/charged" -data "$dir/data" -hosts localhost,127.0.0.1 >"$dir/server.log" 2>&1 &
+    srv=$!
+    for _ in $(seq 1 40); do curl -sf http://127.0.0.1:7775/_health >/dev/null 2>&1 && break; sleep 0.25; done
+    (cd ../examples/quicsql-remote-tour && go run . -addr localhost:7777)
+
+# LiteORM Studio (browser DB admin GUI) driving a REMOTE quicSQL database: starts
+# an in-process quicSQL server, seeds it, and serves the studio at
+# http://localhost:8088/studio/ (dev basic-auth admin/studio). Everything the
+# studio does travels over the wire to quicSQL. `just studio -smoke` self-tests
+# the API round trip and exits instead of serving.
+studio *ARGS:
+    cd ../examples/quicsql-studio && go run . {{ARGS}}
+
 # Lint: fmt-check + vet + staticcheck + golangci-lint + modernize (matches CI).
 # fmt-check runs first — cheapest, and the most common local-only-push CI failure.
 lint: fmt-check vet staticcheck golangci modernize

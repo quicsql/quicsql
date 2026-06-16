@@ -217,7 +217,9 @@ func accessMode(mode string) sqlite.AccessMode {
 // Extra would both miss vault's WAL path and lock the wrong page size. Unknown
 // keys fall through to Extra.
 func pragmas(db config.Database) sqlite.Pragmas {
-	p := sqlite.Pragmas{}
+	// A named preset seeds the baseline; explicit pragmas below override it. The
+	// server owns this — clients cannot set connection configuration.
+	p := presetPragmas(db.PragmasPreset)
 	for k, v := range db.Pragmas {
 		s := fmt.Sprint(v)
 		switch k {
@@ -253,6 +255,17 @@ func pragmas(db config.Database) sqlite.Pragmas {
 		p.BusyTimeout = db.Pool.BusyTimeout
 	}
 	return p
+}
+
+// presetPragmas returns the baseline pragmas for a named preset. "recommended"
+// is gosqlite's production preset (WAL + busy_timeout + foreign_keys); the empty
+// preset is bare SQLite. Unknown presets are rejected at config-validation time,
+// so anything unrecognized here is treated as bare.
+func presetPragmas(preset string) sqlite.Pragmas {
+	if preset == "recommended" {
+		return sqlite.RecommendedPragmas()
+	}
+	return sqlite.Pragmas{}
 }
 
 func truthy(s string) bool {

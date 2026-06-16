@@ -1,0 +1,67 @@
+# quicsql.demo.yaml — a runnable config for the standalone `quicsql` binary,
+# mirroring what `go run ./examples/demo` builds in-process. The demo program is
+# the zero-setup path (temp dirs, free ports, self-signed cert, all automatic);
+# this file is the equivalent you would hand-write for the real daemon.
+#
+# Run it:
+#   mkdir -p ./data/keys
+#   head -c 32 /dev/urandom > ./data/keys/orders     # raw 32-byte vault key (Adiantum)
+#   quicsql --config quicsql.demo.yaml
+#
+# Then, e.g.:
+#   curl -s http://127.0.0.1:7775/users/query -d '{"sql":"SELECT 1"}'
+#   curl -sk https://127.0.0.1:7777/users/query -d '{"sql":"SELECT 1"}'   # HTTP/2 (TLS)
+
+server:
+  data_dir: ./data                       # base for relative db paths, sockets, keys
+
+secrets:
+  - {name: keys, type: file, dir: ./data/keys}   # !secret keys:<name> reads ./data/keys/<name>
+
+tls:
+  dev: {mode: self_signed, hosts: [localhost, 127.0.0.1]}   # dev-only; use mode: files in production
+
+# One listener per transport. h2 (tcp) + h3 (udp) can share a port like 443 does;
+# here they are distinct for clarity. No auth ⇒ open mode (loopback, trusted).
+listeners:
+  - {name: h1,   transport: h1,   address: 127.0.0.1:7775}
+  - {name: h2c,  transport: h2c,  address: 127.0.0.1:7776}
+  - {name: h2,   transport: h2,   address: 127.0.0.1:7777, tls: dev}
+  - {name: h3,   transport: h3,   address: 127.0.0.1:7778, tls: dev}
+  - {name: unix, transport: unix, address: ./data/quicsql.sock, socket_mode: "0600"}
+
+databases:
+  - name: users                          # plain file, production pragma preset
+    backend: file
+    path: users.db
+    mode: rwc
+    pragmas_preset: recommended          # WAL + busy_timeout + foreign_keys (server-side)
+    # pragmas: {foreign_keys: false}     # explicit keys override the preset
+
+  - name: orders                         # vault: encrypted + compressed at rest
+    backend: vault
+    path: orders.vault
+    mode: rwc
+    vault:
+      compression: default               # zstd; none/fastest/fast/default/better/best
+      cipher: adiantum                   # 32-byte key (aes-xts needs 64)
+      key: keys:orders                   # raw-key mode (see the setup note above)
+
+  - name: cache                          # shared in-memory, visible across sessions
+    backend: memory-shared
+
+limits:
+  statement_timeout: 30s
+  max_concurrent_per_db: 512             # admission cap; one hot db can't starve others
+  rate: {per_principal_rps: 0}           # 0 = unlimited (set e.g. 500 to rate-limit)
+
+logging:
+  expand_params: false                   # redact bound params in the slow log (default)
+  slow_threshold: 200ms                  # log statements slower than this
+
+# To require auth instead of open mode, add a principal + a bearer token and grant it:
+#   auth:
+#     principals:
+#       - {name: app, methods: [{bearer: {token_hash: "<sha256-hex-of-token>"}}]}
+#   databases[].grants: [{principal: app, level: read-write}]
+#   listeners[].auth: [bearer]           # then send: Authorization: Bearer <token>

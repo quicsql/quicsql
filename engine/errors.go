@@ -32,6 +32,28 @@ func IsNotAuthorized(err error) bool {
 	return false
 }
 
+// ExtendedCodeName maps an extended SQLite result code to its symbolic name for
+// the Hrana error `code` field, preserving the constraint subtype (UNIQUE vs
+// FOREIGNKEY vs NOTNULL vs CHECK) that the primary code alone collapses to a bare
+// SQLITE_CONSTRAINT. A client (e.g. an ORM error-mapper) needs the subtype to
+// classify a violation, so the tx path must carry it. Codes outside the
+// semantically-meaningful set fall back to the primary code's name.
+func ExtendedCodeName(extended int) string {
+	switch extended {
+	case 2067:
+		return "SQLITE_CONSTRAINT_UNIQUE"
+	case 1555:
+		return "SQLITE_CONSTRAINT_PRIMARYKEY"
+	case 787:
+		return "SQLITE_CONSTRAINT_FOREIGNKEY"
+	case 1299:
+		return "SQLITE_CONSTRAINT_NOTNULL"
+	case 275:
+		return "SQLITE_CONSTRAINT_CHECK"
+	}
+	return CodeName(extended & 0xff)
+}
+
 // CodeName maps a primary SQLite result code to its symbolic name, for the Hrana
 // error `code` field (clients match on e.g. SQLITE_CONSTRAINT). Unknown codes
 // fall back to SQLITE_ERROR.

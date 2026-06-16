@@ -9,6 +9,7 @@ require (
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.46.0
 	gosqlite.org v0.12.0
+	gosqlite.org/blobstore v0.0.0-00010101000000-000000000000
 	gosqlite.org/crypto/keyring v0.12.0
 	gosqlite.org/vfs/crypto v0.12.0
 	gosqlite.org/vfs/vault v0.12.0
@@ -18,9 +19,11 @@ require (
 	filippo.io/age v1.3.1 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	filippo.io/hpke v0.4.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-again/az v0.2.0 // indirect
+	github.com/go-again/az v0.4.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
@@ -28,6 +31,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/text v0.38.0 // indirect
 	lukechampine.com/adiantum v1.1.1 // indirect
+	lukechampine.com/blake3 v1.4.1 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
@@ -43,3 +47,5 @@ replace gosqlite.org/vfs/vault => ../vfs/vault
 replace gosqlite.org/vfs/crypto => ../vfs/crypto
 
 replace gosqlite.org/crypto/keyring => ../crypto/keyring
+
+replace gosqlite.org/blobstore => ../blobstore

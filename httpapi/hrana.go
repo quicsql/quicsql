@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -169,12 +171,72 @@ func (h *Handler) runStreamRequest(ctx context.Context, sess *session.Session, s
 	case "get_autocommit":
 		return okStream(getAutocommitResp{Type: "get_autocommit", IsAutocommit: autocommit(sess.Conn())}), false
 
+	case "session_start":
+		if err := h.startCapture(sess, sr.Tables); err != nil {
+			return streamResult{Type: "error", Error: hErrorFrom(err)}, false
+		}
+		return okStream(simpleResp{Type: "session_start"}), false
+
+	case "session_changeset":
+		cs, err := captureChangeset(sess)
+		if err != nil {
+			return streamResult{Type: "error", Error: hErrorFrom(err)}, false
+		}
+		return okStream(changesetResp{Type: "session_changeset", Changeset: base64.StdEncoding.EncodeToString(cs)}), false
+
 	case "close":
 		return okStream(simpleResp{Type: "close"}), true
 
 	default:
 		return errStream("unknown request type: " + sr.Type), false
 	}
+}
+
+// startCapture attaches a SQLite SESSION to the stream's pinned connection so
+// subsequent writes on the stream are recorded into a changeset. Empty tables
+// tracks all tables. It is a quicSQL extension to the Hrana pipeline; the SESSION
+// lives on the pinned connection until session_changeset fetches it or the stream
+// closes (the session store closes an unfetched capture).
+func (h *Handler) startCapture(sess *session.Session, tables []string) error {
+	if sess.Capture() != nil {
+		return &protocolError{"a capture session is already open on this stream"}
+	}
+	return sess.Conn().Raw(func(dc any) error {
+		c, ok := dc.(*sqlite.Conn)
+		if !ok {
+			return &protocolError{fmt.Sprintf("connection is not *sqlite.Conn (%T)", dc)}
+		}
+		cap, err := c.CreateSession("main")
+		if err != nil {
+			return err
+		}
+		if len(tables) == 0 {
+			if err := cap.Attach(""); err != nil { // "" attaches all tables
+				_ = cap.Close()
+				return err
+			}
+		}
+		for _, t := range tables {
+			if err := cap.Attach(t); err != nil {
+				_ = cap.Close()
+				return err
+			}
+		}
+		sess.SetCapture(cap)
+		return nil
+	})
+}
+
+// captureChangeset serializes and closes the stream's capture session (single-
+// shot: the SESSION is consumed once its changeset is read).
+func captureChangeset(sess *session.Session) ([]byte, error) {
+	cap := sess.TakeCapture() // take ownership so teardown can't also close it
+	if cap == nil {
+		return nil, &protocolError{"no capture session open (send session_start first)"}
+	}
+	cs, err := cap.Changeset()
+	_ = cap.Close()
+	return cs, err
 }
 
 func (h *Handler) execStmt(ctx context.Context, sess *session.Session, st hStmt) (*hStmtResult, error) {
@@ -283,6 +345,7 @@ func toHStmtResult(res *engine.Result, wantRows *bool) *hStmtResult {
 		Cols:             make([]hCol, len(res.Columns)),
 		Rows:             [][]hValue{},
 		AffectedRowCount: uint64(res.RowsAffected),
+		Truncated:        res.Truncated,
 	}
 	for i, c := range res.Columns {
 		name := c.Name
@@ -324,7 +387,10 @@ func hErrorFrom(err error) *hError {
 	case errors.Is(err, engine.ErrDenied):
 		return &hError{Message: err.Error()}
 	case errors.As(err, &e):
-		code := engine.CodeName(e.Code)
+		// Send the EXTENDED-code name so a client can tell constraint subtypes
+		// (unique / foreign-key / not-null / check) apart — the primary code
+		// alone collapses them all to SQLITE_CONSTRAINT.
+		code := engine.ExtendedCodeName(e.Extended)
 		return &hError{Message: e.Msg, Code: &code}
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return &hError{Message: "statement timed out"}

@@ -112,14 +112,21 @@ type SQLPolicy struct {
 
 // Database is one registry entry: a logical name mapped to a physical open.
 type Database struct {
-	Name    string         `yaml:"name"`
-	Backend string         `yaml:"backend"` // file | memory | memory-shared | mvcc | memdb | vault
-	Path    string         `yaml:"path"`
-	Mode    string         `yaml:"mode"` // rw | ro | rwc
-	Pool    Pool           `yaml:"pool"`
-	Pragmas map[string]any `yaml:"pragmas"`
-	Vault   *VaultConfig   `yaml:"vault"`
-	Grants  []Grant        `yaml:"grants"`
+	Name string `yaml:"name"`
+	// Backend selects storage: file | memory | memory-shared | mvcc | memdb | vault.
+	Backend string `yaml:"backend"`
+	Path    string `yaml:"path"`
+	Mode    string `yaml:"mode"` // rw | ro | rwc
+	Pool    Pool   `yaml:"pool"`
+	// PragmasPreset opts this database into a named pragma baseline the server
+	// applies when it opens connections: "" (default) is bare SQLite; "recommended"
+	// seeds the production preset (WAL + busy_timeout + foreign_keys). Explicit
+	// Pragmas keys override the preset. It is a server-side setting — a client
+	// cannot change a connection's configuration over the wire.
+	PragmasPreset string         `yaml:"pragmas_preset"`
+	Pragmas       map[string]any `yaml:"pragmas"`
+	Vault         *VaultConfig   `yaml:"vault"`
+	Grants        []Grant        `yaml:"grants"`
 }
 
 type Pool struct {
@@ -171,6 +178,7 @@ type Limits struct {
 	MaxRows               int           `yaml:"max_rows"`
 	MaxResultBytes        int64         `yaml:"max_result_bytes"`
 	MaxRequestBytes       int64         `yaml:"max_request_bytes"`
+	MaxBlobBytes          int64         `yaml:"max_blob_bytes"` // cap for a single streamed large object (0 = default)
 	StatementTimeout      time.Duration `yaml:"statement_timeout"`
 	TxIdleTimeout         time.Duration `yaml:"tx_idle_timeout"`
 	MaxTxLifetime         time.Duration `yaml:"max_tx_lifetime"`
