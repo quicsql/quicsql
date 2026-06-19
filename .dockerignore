@@ -1,0 +1,11 @@
+# Minimal context trim. Only relevant to the commented-out from-source
+# `docker build .` variant in the Dockerfile — GoReleaser's docker flow builds
+# from its own temp context (Dockerfile + binary) and never reads this file.
+.git
+.github
+.plans
+dist
+docs
+examples
+skills
+*.md

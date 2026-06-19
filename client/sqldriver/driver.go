@@ -122,7 +122,7 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 	default:
 		return nil, fmt.Errorf("quicsql: unknown transport %q (want h1|h2c|h2|h3|unix)", transport)
 	}
-	return &connector{db: db, mk: mk}, nil
+	return &connector{db: db, mk: mk, ownClient: true}, nil
 }
 
 // OpenConnectorClient wraps a pre-built *client.Client (for auth a DSN cannot
@@ -135,12 +135,16 @@ func OpenConnectorClient(cl *client.Client, db string) driver.Connector {
 }
 
 // connector lazily builds one shared client for every database/sql connection it
-// hands out; the client's HTTP transport pools connections underneath.
+// hands out; the client's HTTP transport pools connections underneath. ownClient
+// marks a client this connector built from a DSN (so sql.DB.Close should close
+// it) versus one supplied by the caller via OpenConnectorClient (whose lifetime
+// the caller owns).
 type connector struct {
-	db   string
-	mk   func() *client.Client
-	once sync.Once
-	cl   *client.Client
+	db        string
+	mk        func() *client.Client
+	once      sync.Once
+	cl        *client.Client
+	ownClient bool
 }
 
 func (c *connector) Connect(context.Context) (driver.Conn, error) {
@@ -148,6 +152,18 @@ func (c *connector) Connect(context.Context) (driver.Conn, error) {
 	return &conn{db: c.db, cl: c.cl}, nil
 }
 func (c *connector) Driver() driver.Driver { return drv{} }
+
+// Close satisfies io.Closer so sql.DB.Close() releases the underlying client's
+// transport (notably HTTP/3's background goroutines and UDP socket) instead of
+// leaking it. Only a DSN-built client is closed here; a caller-supplied client
+// (OpenConnectorClient) is left for the caller to close. database/sql calls this
+// after the conn pool has drained, so reading c.cl needs no extra sync.
+func (c *connector) Close() error {
+	if c.ownClient && c.cl != nil {
+		return c.cl.Close()
+	}
+	return nil
+}
 
 // conn is one database/sql connection. While tx is non-nil the connection is
 // inside a transaction: every statement routes to the session-pinned Hrana
@@ -358,10 +374,19 @@ type rows struct {
 	i   int
 }
 
+// errTruncated is surfaced through rows.Err() when the server capped the result
+// set (row or byte limit): the delivered rows are a prefix of the real result,
+// so reporting a plain io.EOF would let the caller mistake a partial answer for a
+// complete one.
+var errTruncated = errors.New("quicsql: result truncated by the server's row/byte cap; the returned rows are incomplete")
+
 func (r *rows) Columns() []string { return r.res.Columns }
 func (r *rows) Close() error      { return nil }
 func (r *rows) Next(dest []driver.Value) error {
 	if r.i >= len(r.res.Rows) {
+		if r.res.Truncated {
+			return errTruncated
+		}
 		return io.EOF
 	}
 	row := r.res.Rows[r.i]

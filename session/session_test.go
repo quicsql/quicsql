@@ -89,6 +89,30 @@ func TestResumeBindingChecksDoNotConsume(t *testing.T) {
 	}
 }
 
+// TestResumeRefusesBusySession: the cursor endpoint hands its baton out in the
+// response prelude (PeekBaton), before the request finishes — a resume inside
+// that window (valid baton, session still busy) must be refused without
+// consuming the baton, which becomes usable once the request completes.
+func TestResumeRefusesBusySession(t *testing.T) {
+	db, cleanup := testDB(t)
+	defer cleanup()
+	st, _ := NewStore(time.Minute, time.Minute, 10)
+	s, err := st.Open(context.Background(), db, func() {}, "", false) // busy=true
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	b := st.PeekBaton(s) // the cursor prelude's baton; the session stays busy
+	if _, err := st.Resume(b, "d", ""); err != ErrBadBaton {
+		t.Fatalf("busy resume: want ErrBadBaton, got %v", err)
+	}
+	if got := st.Baton(s); got != b { // finishing the request keeps the same baton current
+		t.Fatalf("Baton after PeekBaton: got a different baton (%q vs %q)", got, b)
+	}
+	if _, err := st.Resume(b, "d", ""); err != nil {
+		t.Fatalf("peeked baton after the request finished: %v", err)
+	}
+}
+
 func TestResumeExpiry(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()

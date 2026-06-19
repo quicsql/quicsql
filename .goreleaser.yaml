@@ -1,0 +1,143 @@
+# GoReleaser v2 configuration for quicsql.net → github.com/quicsql/quicsql.
+#
+# Flow: .github/workflows/release.yml runs `goreleaser release --clean` on a
+# v* tag, producing cross-platform archives, checksums, a GitHub release with
+# changelog, and multi-arch images at ghcr.io/quicsql/quicsql.
+#
+# PRECONDITION: go.mod must be free of local filesystem replace directives
+# (the co-dev `replace gosqlite.org => ../../sqlite` set) — the release
+# workflow hard-gates on that before this config ever runs, because a runner
+# has no sibling checkout and a release must pin published versions anyway.
+#
+# Validate edits with `goreleaser check`.
+
+version: 2
+
+project_name: quicsql
+
+before:
+  hooks:
+    # Only sound once the replaces are gone (see the gate in release.yml);
+    # with them present this would fail on the missing ../../sqlite checkout.
+    - go mod download
+
+builds:
+  - id: quicsql
+    main: ./cmd/quicsql
+    binary: quicsql
+    env:
+      # gosqlite is CGo-free, so every target is a pure cross-compile —
+      # no C toolchain anywhere in the matrix (mirrors `just dist`).
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      # Reproducibility: strip local path prefixes from the binary.
+      - -trimpath
+    # Reproducibility: stamp file modtimes with the commit time, not build time.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      # -s -w strips the symbol table and DWARF for a smaller binary (matches
+      # the justfile `dist` recipe). No version injection: cmd/quicsql has no
+      # version variable today (checked cmd/quicsql/main.go — flags + config
+      # only). When one is added (e.g. `var version = "devel"` in package
+      # main), append here:  -X main.version={{ .Version }}
+      - -s -w
+
+archives:
+  - id: default
+    # tar.gz everywhere, zip for Windows where tar is not native.
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  # Conventional-commit-style grouping; anything unmatched lands in Other,
+  # so non-conventional messages still show up rather than vanish.
+  groups:
+    - title: Features
+      regexp: '^.*feat[(\w)]*:'
+      order: 0
+    - title: Fixes
+      regexp: '^.*fix[(\w)]*:'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+# Docker images via the prebuilt-binary flow: GoReleaser copies the already
+# cross-compiled linux binary for each arch into a minimal build context next
+# to ./Dockerfile (which just COPYies it in — nothing compiles inside docker),
+# builds one single-arch image per entry, and the docker_manifests below
+# stitch them into the multi-arch tags users actually pull.
+#
+# `goreleaser check` notes that dockers/docker_manifests are being phased out
+# in favor of dockers_v2; they remain fully supported throughout v2, so this
+# stays on the classic flow for now (migrating means a $TARGETPLATFORM-aware
+# Dockerfile — do both together when GoReleaser sets a removal date).
+dockers:
+  - id: linux-amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    ids: [quicsql]
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=CGo-free SQLite network server"
+      - "--label=org.opencontainers.image.url=https://github.com/quicsql/quicsql"
+      - "--label=org.opencontainers.image.source=https://github.com/quicsql/quicsql"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+  - id: linux-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    ids: [quicsql]
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=CGo-free SQLite network server"
+      - "--label=org.opencontainers.image.url=https://github.com/quicsql/quicsql"
+      - "--label=org.opencontainers.image.source=https://github.com/quicsql/quicsql"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+docker_manifests:
+  - name_template: "ghcr.io/quicsql/quicsql:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-amd64"
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/quicsql/quicsql:latest"
+    image_templates:
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-amd64"
+      - "ghcr.io/quicsql/quicsql:{{ .Version }}-arm64"
+
+release:
+  github:
+    owner: quicsql
+    name: quicsql
+
+snapshot:
+  # Local `goreleaser release --snapshot` builds get an unambiguous dev version.
+  version_template: "{{ incpatch .Version }}-dev"

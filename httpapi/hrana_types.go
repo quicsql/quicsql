@@ -199,6 +199,51 @@ type hBatchResult struct {
 	StepErrors  []*hError      `json:"step_errors"`
 }
 
+// --- cursor (POST /v2|/v3/cursor) ---
+
+// cursorReq is the Hrana CursorReqBody: one batch to execute on the stream
+// identified by baton (null opens a new stream), with the result streamed back.
+type cursorReq struct {
+	Baton *string `json:"baton"`
+	Batch *hBatch `json:"batch"`
+}
+
+// cursorPrelude is the Hrana CursorRespBody — the first newline-separated JSON
+// line of a cursor response; the entry lines follow it.
+type cursorPrelude struct {
+	Baton   *string `json:"baton"`
+	BaseURL *string `json:"base_url"`
+}
+
+// Cursor entries: one JSON line each, together encoding the same information as
+// an hBatchResult but delivered incrementally. A step index refers to the
+// batch's steps array; a skipped step (condition false) produces no entries.
+type cursorStepBegin struct {
+	Type string `json:"type"` // "step_begin"
+	Step uint32 `json:"step"`
+	Cols []hCol `json:"cols"`
+}
+
+type cursorRow struct {
+	Type string   `json:"type"` // "row"
+	Row  []hValue `json:"row"`
+}
+
+type cursorStepEnd struct {
+	Type             string  `json:"type"` // "step_end"
+	AffectedRowCount uint64  `json:"affected_row_count"`
+	LastInsertRowid  *string `json:"last_insert_rowid"`
+	// Truncated is the quicSQL extension mirrored from hStmtResult: the step's
+	// row set was capped by the max-rows limit.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+type cursorStepError struct {
+	Type  string  `json:"type"` // "step_error"
+	Step  uint32  `json:"step"`
+	Error *hError `json:"error"`
+}
+
 // --- describe / error ---
 
 type hDescribeResult struct {

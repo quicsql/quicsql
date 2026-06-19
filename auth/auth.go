@@ -343,7 +343,12 @@ func (a *Authenticator) tryMTLS(r *http.Request) (*authz.Principal, bool, error)
 	if name, ok := a.mtlsSPKI[hex.EncodeToString(spki[:])]; ok {
 		return &authz.Principal{Name: name, Method: "mtls"}, true, nil
 	}
-	return nil, true, errInvalidCredential // a verified client cert, but not one we map to a principal
+	// A CA-verified client cert that maps to no principal is treated as "not
+	// present" so the request can still authenticate via another accepted method
+	// (bearer/keyring/password) — the point of VerifyClientCertIfGiven when mtls
+	// sits alongside other methods. On an mtls-only listener nothing else matches,
+	// so the request still fails closed (401 errUnauthenticated).
+	return nil, false, nil
 }
 
 func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, error) {
@@ -367,10 +372,22 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	if err != nil {
 		return nil, true, errInvalidCredential
 	}
-	if !keyring.VerifyState([]ed25519.PublicKey{cred.pub}, []byte(chal), sigBytes) {
+	// Verify the signature over the challenge BOUND to this request's method and
+	// path, not the bare challenge: a signature captured off a cleartext listener
+	// (or a header-logging proxy) then can't be replayed onto a different — e.g.
+	// more privileged — request within the challenge's TTL.
+	if !keyring.VerifyState([]ed25519.PublicKey{cred.pub}, keyringSigningInput(chal, r.Method, r.URL.Path), sigBytes) {
 		return nil, true, errInvalidCredential
 	}
 	return &authz.Principal{Name: cred.name, Method: "keyring"}, true, nil
+}
+
+// keyringSigningInput is the exact byte string the ed25519 challenge/response
+// signs and verifies: the server's challenge bound to the request's method and
+// path. The client (client.authenticate) MUST build the identical bytes — keep
+// the two in sync.
+func keyringSigningInput(challenge, method, path string) []byte {
+	return []byte(challenge + "\n" + method + "\n" + path)
 }
 
 func (a *Authenticator) tryPeercred(r *http.Request) (*authz.Principal, bool) {

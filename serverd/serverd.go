@@ -106,7 +106,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 			return nil, fmt.Errorf("open meta store: %w", err)
 		}
 	}
-	dbs, err := reconcile(cfg.Databases, store, log)
+	dbs, err := reconcile(cfg.Databases, store, cfg.Server.DataDir, log)
 	if err != nil {
 		closeStore(store, log)
 		return nil, fmt.Errorf("reconcile databases: %w", err)
@@ -246,9 +246,10 @@ func buildPolicy(cfg *config.Config, dbs []config.Database) *authz.Policy {
 
 // reconcile merges the config seed databases with the meta store's
 // runtime-created ones (meta wins on a name conflict; a store-less run returns
-// the seeds). Meta specs are re-validated so a tampered store can't inject a
-// database that never passed config validation.
-func reconcile(seeds []config.Database, store *meta.Store, log *slog.Logger) ([]config.Database, error) {
+// the seeds). Meta specs are re-validated — name, backend, and (for on-disk
+// backends) path containment within data_dir — so a tampered store can't inject
+// a database that never passed the control plane's create-time checks.
+func reconcile(seeds []config.Database, store *meta.Store, dataDir string, log *slog.Logger) ([]config.Database, error) {
 	if store == nil {
 		return seeds, nil
 	}
@@ -271,6 +272,15 @@ func reconcile(seeds []config.Database, store *meta.Store, log *slog.Logger) ([]
 		if !config.ValidDBName(db.Name) || !config.KnownBackends[db.Backend] {
 			log.Warn("quicsql: skipping invalid meta-store database entry", "db", db.Name, "backend", db.Backend)
 			continue
+		}
+		// An on-disk backend's path must stay within data_dir, mirroring the
+		// control plane's create-time guard: a tampered meta store must not make
+		// the daemon open/create a file at an arbitrary absolute or `..` path.
+		if config.UsesPath(db.Backend) && db.Path != "" {
+			if _, ok := config.WithinDir(dataDir, db.Path); !ok {
+				log.Warn("quicsql: skipping meta-store database with out-of-bounds path", "db", db.Name)
+				continue
+			}
 		}
 		if _, seen := byName[db.Name]; seen {
 			log.Warn("quicsql: meta-store database shadows a config seed", "db", db.Name)

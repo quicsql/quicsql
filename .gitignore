@@ -1,1 +1,7 @@
 /dist/
+
+# Local co-development overlay: `just codev` writes a go.work that resolves
+# gosqlite.org* from the sibling ../../sqlite checkout instead of the published
+# versions pinned in go.mod. It is per-developer state, never committed.
+/go.work
+/go.work.sum

@@ -79,6 +79,11 @@ type Listener struct {
 	TLS        string   `yaml:"tls"` // name of a tls profile (required for h2/h3)
 	Auth       []string `yaml:"auth"`
 	SocketMode string   `yaml:"socket_mode"`
+	// Advertise (h3 only) opts this HTTP/3 endpoint into Alt-Svc advertising: the
+	// TCP transports (h1/h2/h2c) then emit `Alt-Svc: h3=":<port>"` so a client that
+	// connected over TCP can discover and upgrade to h3 (as browsers do with :443).
+	// Off by default — h3 is served regardless; this only advertises it.
+	Advertise bool `yaml:"advertise"`
 }
 
 // TLSProfile describes how to obtain the TLS certificate for a listener.

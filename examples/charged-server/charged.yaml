@@ -26,7 +26,9 @@ tls:
 # h2/TLS + h3/QUIC are the secure transports; h1/h2c/unix are dev extras.
 listeners:
   - {name: h2,   transport: h2,   address: 0.0.0.0:7777, tls: charged, auth: [mtls, bearer, keyring, password]}
-  - {name: h3,   transport: h3,   address: 0.0.0.0:7778, tls: charged, auth: [mtls, bearer, keyring, password]}
+  # h3 (QUIC/UDP) shares the h2 (TLS/TCP) port, as HTTPS shares :443; advertise
+  # makes the TCP transports emit Alt-Svc so a client can discover and upgrade to h3.
+  - {name: h3,   transport: h3,   address: 0.0.0.0:7777, tls: charged, auth: [mtls, bearer, keyring, password], advertise: true}
   - {name: h1,   transport: h1,   address: 0.0.0.0:7775, auth: [bearer, password, none]}
   - {name: h2c,  transport: h2c,  address: 0.0.0.0:7776, auth: [bearer, password, none]}
   - {name: unix, transport: unix, address: ./data/quicsql.sock, socket_mode: "0600", auth: [peercred, none]}

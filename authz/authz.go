@@ -117,6 +117,15 @@ func (p *Policy) Grant(db, principal string, level Level) {
 	}
 }
 
+// Revoke drops every grant on db, so a later database that reuses the name does
+// not inherit the old database's privileges. Called when the control plane
+// detaches a database.
+func (p *Policy) Revoke(db string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.grants, db)
+}
+
 // Level returns the effective capability of pr on db.
 func (p *Policy) Level(pr *Principal, db string) Level {
 	if p.open {

@@ -175,6 +175,97 @@ func TestHranaNamedArgs(t *testing.T) {
 	}
 }
 
+// describeResult decodes the first result of a pipeline as a DescribeResult.
+func describeResult(t *testing.T, r hpResp) (res struct {
+	Params []struct {
+		Name *string `json:"name"`
+	} `json:"params"`
+	Cols []struct {
+		Name     *string `json:"name"`
+		Decltype *string `json:"decltype"`
+	} `json:"cols"`
+	IsExplain  bool `json:"is_explain"`
+	IsReadonly bool `json:"is_readonly"`
+}) {
+	t.Helper()
+	if len(r.Results) == 0 || r.Results[0].Type != "ok" {
+		t.Fatalf("describe did not succeed: %+v", r.Results)
+	}
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(r.Results[0].Response, &resp); err != nil {
+		t.Fatalf("decode describe response: %v", err)
+	}
+	if err := json.Unmarshal(resp.Result, &res); err != nil {
+		t.Fatalf("decode describe result: %v", err)
+	}
+	return res
+}
+
+// TestHranaDescribeSelect: describe prepares the statement and reports its real
+// shape — column names with declared types, one params entry per SQL parameter
+// (null name for a positional `?`, prefixed name otherwise), and the driver's
+// exact read-only classification.
+func TestHranaDescribeSelect(t *testing.T) {
+	h := newHranaHandler(t, walDB("app"))
+	pipe(t, h, "app", nil, `[{"type":"execute","stmt":{"sql":"CREATE TABLE t(a INTEGER, b TEXT)"}}]`)
+
+	res := describeResult(t, pipe(t, h, "app", nil, `[{"type":"describe","sql":"SELECT a, b FROM t WHERE a > ? AND b = :name"}]`))
+	if len(res.Cols) != 2 || *res.Cols[0].Name != "a" || *res.Cols[1].Name != "b" {
+		t.Fatalf("describe cols: %+v", res.Cols)
+	}
+	if *res.Cols[0].Decltype != "INTEGER" || *res.Cols[1].Decltype != "TEXT" {
+		t.Fatalf("describe decltypes: %+v", res.Cols)
+	}
+	if len(res.Params) != 2 {
+		t.Fatalf("describe params: want 2, got %+v", res.Params)
+	}
+	if res.Params[0].Name != nil { // positional ? is nameless
+		t.Fatalf("positional param should have a null name: %+v", res.Params[0])
+	}
+	if res.Params[1].Name == nil || *res.Params[1].Name != ":name" {
+		t.Fatalf("named param should keep its prefix: %+v", res.Params[1])
+	}
+	if !res.IsReadonly || res.IsExplain {
+		t.Fatalf("SELECT: want is_readonly=true is_explain=false, got %+v", res)
+	}
+
+	// EXPLAIN is flagged.
+	res = describeResult(t, pipe(t, h, "app", nil, `[{"type":"describe","sql":"EXPLAIN SELECT a FROM t"}]`))
+	if !res.IsExplain {
+		t.Fatalf("EXPLAIN: want is_explain=true, got %+v", res)
+	}
+}
+
+// TestHranaDescribeWriteDoesNotExecute: describing an INSERT reports zero cols,
+// the right param count, is_readonly=false — and must NOT run the statement.
+func TestHranaDescribeWriteDoesNotExecute(t *testing.T) {
+	h := newHranaHandler(t, walDB("app"))
+	pipe(t, h, "app", nil, `[{"type":"execute","stmt":{"sql":"CREATE TABLE t(a INTEGER)"}}]`)
+
+	res := describeResult(t, pipe(t, h, "app", nil, `[{"type":"describe","sql":"INSERT INTO t(a) VALUES(1)"}]`))
+	if len(res.Cols) != 0 || len(res.Params) != 0 || res.IsReadonly {
+		t.Fatalf("INSERT describe: want no cols/params and is_readonly=false, got %+v", res)
+	}
+	if got := firstInt(t, pipe(t, h, "app", nil, `[{"type":"execute","stmt":{"sql":"SELECT count(*) AS n FROM t","want_rows":true}}]`)); got != "0" {
+		t.Fatalf("describe must not execute the statement: count %s", got)
+	}
+}
+
+// TestHranaDescribeInvalidSQL: a prepare failure is an in-stream Hrana error
+// (message + code), not a transport error.
+func TestHranaDescribeInvalidSQL(t *testing.T) {
+	h := newHranaHandler(t, walDB("app"))
+	r := pipe(t, h, "app", nil, `[{"type":"describe","sql":"SELEC nonsense FROM nowhere"}]`)
+	if len(r.Results) == 0 || r.Results[0].Type != "error" || r.Results[0].Error == nil {
+		t.Fatalf("invalid SQL describe: want an error result, got %+v", r.Results)
+	}
+	if r.Results[0].Error.Message == "" {
+		t.Fatal("describe error should carry the SQLite message")
+	}
+}
+
 func TestHranaForgedBatonRejected(t *testing.T) {
 	h := newHranaHandler(t, walDB("app"))
 	rec := post(t, h, "/app/v3/pipeline", `{"baton":"forged.baton.value","requests":[]}`)

@@ -29,6 +29,27 @@ func TestValidateTransportsAndTLS(t *testing.T) {
 		{"bad tls mode", &Config{TLS: map[string]TLSProfile{"p": {Mode: "weird"}}}, true},
 		{"bad min_version", &Config{TLS: map[string]TLSProfile{"p": {Mode: "self_signed", MinVersion: "1.4"}}}, true},
 		{"files without cert", &Config{TLS: map[string]TLSProfile{"p": {Mode: "files"}}}, true},
+		{"h2 and h3 share a port (tcp+udp ok)", &Config{
+			TLS: map[string]TLSProfile{"p": {Mode: "self_signed"}},
+			Listeners: []Listener{
+				{Name: "h2", Transport: "h2", Address: "127.0.0.1:7777", TLS: "p"},
+				{Name: "h3", Transport: "h3", Address: "127.0.0.1:7777", TLS: "p"},
+			},
+		}, false},
+		{"two tcp listeners on one address", &Config{
+			Listeners: []Listener{
+				{Name: "a", Transport: "h1", Address: ":7777"},
+				{Name: "b", Transport: "h2c", Address: ":7777"},
+			},
+		}, true},
+		{"advertise on non-h3", &Config{
+			TLS:       map[string]TLSProfile{"p": {Mode: "self_signed"}},
+			Listeners: []Listener{{Name: "x", Transport: "h2", Address: ":7777", TLS: "p", Advertise: true}},
+		}, true},
+		{"advertise on h3 ok", &Config{
+			TLS:       map[string]TLSProfile{"p": {Mode: "self_signed"}},
+			Listeners: []Listener{{Name: "h3", Transport: "h3", Address: ":7777", TLS: "p", Advertise: true}},
+		}, false},
 		{"good", &Config{
 			TLS:       map[string]TLSProfile{"p": {Mode: "self_signed", MinVersion: "1.3"}},
 			Listeners: []Listener{{Name: "x", Transport: "h2", TLS: "p"}, {Name: "u", Transport: "unix"}},

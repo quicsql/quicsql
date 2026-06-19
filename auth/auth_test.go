@@ -94,11 +94,22 @@ func TestMTLSAuth(t *testing.T) {
 		t.Fatalf("valid mtls: p=%+v err=%v", p, err)
 	}
 
+	// On an mtls-ONLY listener a CA-verified but unmapped cert is rejected —
+	// nothing else can authenticate it.
 	other := makeCert(t, "intruder.example.com")
 	bad := httptest.NewRequest(http.MethodPost, "/x/query", nil)
 	bad.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{other}}
-	if _, err := m.authenticate(bad); err == nil {
-		t.Fatal("unmapped client cert must be rejected")
+	mtlsOnly := m.a.Middleware(config.Listener{Name: "m", Auth: []string{"mtls"}}, nil)
+	if _, err := mtlsOnly.authenticate(bad); err == nil {
+		t.Fatal("unmapped client cert on an mtls-only listener must be rejected")
+	}
+
+	// But when the listener also accepts other methods, an unmapped cert is not a
+	// hard failure: it falls through so a bearer/keyring/none client with a
+	// general-purpose client cert still authenticates (here, to anonymous via none).
+	p2, err := m.authenticate(bad)
+	if err != nil || !p2.IsAnonymous() {
+		t.Fatalf("unmapped cert should fall through on a none-accepting listener: p=%+v err=%v", p2, err)
 	}
 }
 
@@ -123,7 +134,7 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	sig := ed25519.Sign(priv, []byte(chal))
+	sig := ed25519.Sign(priv, keyringSigningInput(chal, http.MethodPost, "/x/query"))
 
 	r := httptest.NewRequest(http.MethodPost, "/x/query", nil)
 	r.Header.Set("X-Quicsql-Key", keyLine)
@@ -132,6 +143,16 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	p, err := m.authenticate(r)
 	if err != nil || p.Name != "signer" || p.Method != "keyring" {
 		t.Fatalf("valid keyring: p=%+v err=%v", p, err)
+	}
+
+	// The signature is bound to the request's method+path: replaying it onto a
+	// different path must be rejected (anti-replay binding).
+	replayed := httptest.NewRequest(http.MethodPost, "/y/query", nil)
+	replayed.Header.Set("X-Quicsql-Key", keyLine)
+	replayed.Header.Set("X-Quicsql-Challenge", chal)
+	replayed.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig)) // bound to /x/query
+	if _, err := m.authenticate(replayed); err == nil {
+		t.Fatal("a signature bound to a different request path must be rejected")
 	}
 
 	// A signature over a different challenge (or a forged one) is rejected.

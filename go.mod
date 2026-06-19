@@ -8,11 +8,11 @@ require (
 	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.46.0
-	gosqlite.org v0.12.0
-	gosqlite.org/blobstore v0.0.0-00010101000000-000000000000
-	gosqlite.org/crypto/keyring v0.12.0
-	gosqlite.org/vfs/crypto v0.12.0
-	gosqlite.org/vfs/vault v0.12.0
+	gosqlite.org v0.13.0
+	gosqlite.org/blobstore v0.13.0
+	gosqlite.org/crypto/keyring v0.13.0
+	gosqlite.org/vfs/crypto v0.13.0
+	gosqlite.org/vfs/vault v0.13.0
 )
 
 require (
@@ -32,23 +32,8 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	lukechampine.com/adiantum v1.1.1 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
-	modernc.org/libc v1.72.3 // indirect
+	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
+	modernc.org/sqlite v1.53.0 // indirect
 )
-
-// Dev convenience so quicSQL builds against the sibling gosqlite checkout during
-// co-development. The path holds whether resolved via the .quicsql symlink in the
-// gosqlite repo or the real checkout — both sit two levels under the shared
-// parent, so ../../sqlite reaches gosqlite either way. Consumers override these
-// with their own replaces; a real release drops them for published versions.
-replace gosqlite.org => ../../sqlite
-
-replace gosqlite.org/vfs/vault => ../../sqlite/vfs/vault
-
-replace gosqlite.org/vfs/crypto => ../../sqlite/vfs/crypto
-
-replace gosqlite.org/crypto/keyring => ../../sqlite/crypto/keyring
-
-replace gosqlite.org/blobstore => ../../sqlite/blobstore

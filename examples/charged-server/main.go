@@ -9,12 +9,12 @@
 // you pass, so it is meant to run on a HOST and be reached from elsewhere:
 //
 //	go run . -hosts your.host.name,203.0.113.10          # bind 0.0.0.0, cert for these SANs
-//	docker run -p 7777:7777 -p 7778:7778/udp quicsql-charged   # see Dockerfile
+//	docker run -p 7777:7777 -p 7777:7777/udp quicsql-charged   # see Dockerfile
 //
-// Then point the sibling remote-tour at it: `go run . -addr your.host.name:7777`.
-// Credentials are fixed dev material derived from seeds (see creds.go) — the tour
-// derives the identical CA/keys, so nothing is copied between machines. Replace it
-// all for a real deployment.
+// Then point the remote tour at it: `go run ./examples/remote-tour -addr your.host.name:7777`.
+// Credentials are fixed dev material (see the shared internal/showcase package) —
+// the tour derives the identical CA/keys, so nothing is copied between machines.
+// Replace it all for a real deployment.
 package main
 
 import (
@@ -37,7 +37,8 @@ import (
 
 	sqlite "gosqlite.org"
 	"quicsql.net/config"
-	_ "quicsql.net/extensions" // regexp, fts5, vec0, spellfix1, rtree, … on every connection
+	"quicsql.net/examples/internal/showcase" // shared dev creds (server + tour derive the same)
+	_ "quicsql.net/extensions"               // regexp, fts5, vec0, spellfix1, rtree, … on every connection
 	"quicsql.net/serverd"
 )
 
@@ -76,22 +77,22 @@ func run(bind, hostsCSV, dataDir string) error {
 
 	// Fixed dev secrets on disk: the vault (Adiantum, 32-byte) key and the meta
 	// store's vault key. The catalog vault encrypts + compresses at rest.
-	if err := os.WriteFile(filepath.Join(keysDir, "catalog"), devVaultKey(), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(keysDir, "catalog"), showcase.VaultKey(), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(keysDir, "meta"), devSeed("meta"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(keysDir, "meta"), showcase.Seed("meta"), 0o600); err != nil {
 		return err
 	}
 
 	// TLS: mint the server leaf for the SANs and write the files-mode profile
 	// inputs (leaf cert + key, and the CA as the mTLS client-CA).
-	ca, _ := devCA()
-	certFile, keyFile, caFile, err := writeTLSFiles(tlsDir, devLeaf(hosts), ca)
+	ca, _ := showcase.CA()
+	certFile, keyFile, caFile, err := writeTLSFiles(tlsDir, showcase.Leaf(hosts), ca)
 	if err != nil {
 		return err
 	}
 
-	pwHash, err := bcrypt.GenerateFromPassword([]byte(devPassword), bcrypt.DefaultCost)
+	pwHash, err := bcrypt.GenerateFromPassword([]byte(showcase.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
@@ -107,18 +108,20 @@ func run(bind, hostsCSV, dataDir string) error {
 		},
 		Listeners: []config.Listener{
 			{Name: "h2", Transport: "h2", Address: net.JoinHostPort(bind, "7777"), TLS: "charged", Auth: []string{"mtls", "bearer", "keyring", "password"}},
-			{Name: "h3", Transport: "h3", Address: net.JoinHostPort(bind, "7778"), TLS: "charged", Auth: []string{"mtls", "bearer", "keyring", "password"}},
+			// h3 (QUIC/UDP) shares the h2 (TLS/TCP) port, the way HTTPS shares :443;
+			// advertise: true makes the TCP transports emit Alt-Svc so clients upgrade.
+			{Name: "h3", Transport: "h3", Address: net.JoinHostPort(bind, "7777"), TLS: "charged", Auth: []string{"mtls", "bearer", "keyring", "password"}, Advertise: true},
 			{Name: "h1", Transport: "h1", Address: net.JoinHostPort(bind, "7775"), Auth: []string{"bearer", "password", "none"}},
 			{Name: "h2c", Transport: "h2c", Address: net.JoinHostPort(bind, "7776"), Auth: []string{"bearer", "password", "none"}},
 			{Name: "unix", Transport: "unix", Address: filepath.Join(dataDir, "quicsql.sock"), SocketMode: "0600", Auth: []string{"peercred", "none"}},
 		},
 		Auth: config.Auth{Principals: []config.Principal{
 			{Name: "tourist", Methods: []map[string]any{
-				{"bearer": map[string]any{"token_hash": devTokenHash()}},
-				{"mtls": map[string]any{"subject_cn": mtlsCN}},
+				{"bearer": map[string]any{"token_hash": showcase.TokenHash()}},
+				{"mtls": map[string]any{"subject_cn": showcase.MTLSCN}},
 			}},
-			{Name: "analyst", Methods: []map[string]any{{"password": map[string]any{"user": devUser, "password_hash": string(pwHash)}}}},
-			{Name: "signer", Methods: []map[string]any{{"keyring": map[string]any{"ed25519": devAuthLine()}}}},
+			{Name: "analyst", Methods: []map[string]any{{"password": map[string]any{"user": showcase.User, "password_hash": string(pwHash)}}}},
+			{Name: "signer", Methods: []map[string]any{{"keyring": map[string]any{"ed25519": showcase.AuthLine()}}}},
 		}},
 		Databases: []config.Database{
 			{Name: "catalog", Backend: "vault", Path: "catalog.vault",
@@ -192,14 +195,14 @@ func banner(hosts []string) {
 	fmt.Fprintf(os.Stderr, `
 quicSQL charged server — up.
   encrypted+compressed vault: "catalog"   plain file: "app"   in-memory: "cache"
-  secure transports:  h2  :7777 (TLS)   h3  :7778 (QUIC/TLS)
+  secure transports:  h2 :7777 (TLS/TCP) + h3 :7777 (QUIC/UDP, same port; Alt-Svc)
   dev transports:     h1  :7775          h2c :7776          unix (data dir)
   auth: bearer / password / mTLS(CN=%s) / ed25519 keyring     control plane: on
 
   connect the remote tour:
-    (cd ../quicsql-remote-tour && go run . -addr %s:7777)
+    go run ./examples/remote-tour -addr %s:7777
   bearer token (dev): %s
 
   Ctrl-C to stop.
-`, mtlsCN, dial, devToken)
+`, showcase.MTLSCN, dial, showcase.Token)
 }

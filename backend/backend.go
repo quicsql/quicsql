@@ -64,15 +64,70 @@ var writeActions = map[int]bool{
 	sqlite.SQLITE_ALTER_TABLE: true, sqlite.SQLITE_REINDEX: true, sqlite.SQLITE_ANALYZE: true,
 }
 
+// setterWritePragmas names PRAGMAs whose *setter* form (an argument is present)
+// a read-only connection must not run: they write the database header or change
+// its durability / layout. The read form (no argument) stays allowed, so a
+// read-only client can still inspect e.g. user_version or journal_mode. query_only
+// is handled separately (see denyWrites) because SetConnMode itself must be able
+// to turn it ON.
+var setterWritePragmas = map[string]bool{
+	"user_version":       true,
+	"application_id":     true,
+	"schema_version":     true,
+	"journal_mode":       true,
+	"auto_vacuum":        true,
+	"secure_delete":      true,
+	"wal_autocheckpoint": true,
+}
+
+// mutatingPragmas names PRAGMAs that mutate the database even with no argument,
+// so they are denied outright on a read-only connection (they have no meaningful
+// read form).
+var mutatingPragmas = map[string]bool{
+	"wal_checkpoint":     true,
+	"incremental_vacuum": true,
+	"optimize":           true,
+}
+
+// falsyPragmaArg reports whether v is one of SQLite's boolean-false tokens, i.e.
+// a request to turn a boolean pragma OFF.
+func falsyPragmaArg(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "no", "false", "off":
+		return true
+	default:
+		return false
+	}
+}
+
 // denyWrites is the read-only authorizer: it denies ATTACH/DETACH (like the base
-// authorizer) and every write action, so a read-only connection rejects writes
-// at compile time with SQLITE_AUTH.
-func denyWrites(op int, _, _, _, _ string) int {
+// authorizer), every write action, and the write-enabling / file-mutating PRAGMAs
+// — so a read-only connection rejects writes at compile time with SQLITE_AUTH.
+// Critically it denies turning PRAGMA query_only OFF: query_only is the run-time
+// net SetConnMode relies on (it blocks header writes the action-code authorizer
+// never sees), so a read-only principal must not be able to switch it off and
+// then write. Enabling query_only (the server's own SetConnMode) stays allowed.
+// For SQLITE_PRAGMA, arg1 is the pragma name and arg2 its argument (empty for a
+// read).
+func denyWrites(op int, arg1, arg2, _, _ string) int {
 	switch {
 	case op == sqlite.SQLITE_ATTACH || op == sqlite.SQLITE_DETACH:
 		return sqlite.SQLITE_DENY
 	case writeActions[op]:
 		return sqlite.SQLITE_DENY
+	case op == sqlite.SQLITE_PRAGMA:
+		name := strings.ToLower(arg1)
+		switch {
+		case name == "query_only":
+			if falsyPragmaArg(arg2) { // deny only turning it OFF
+				return sqlite.SQLITE_DENY
+			}
+			return sqlite.SQLITE_OK
+		case mutatingPragmas[name] || (setterWritePragmas[name] && arg2 != ""):
+			return sqlite.SQLITE_DENY
+		default:
+			return sqlite.SQLITE_OK
+		}
 	default:
 		return sqlite.SQLITE_OK
 	}

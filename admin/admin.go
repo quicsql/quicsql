@@ -12,7 +12,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -108,28 +107,14 @@ func (h *Handler) principal(r *http.Request) string {
 	return authz.FromContext(r.Context()).Name
 }
 
-// usesPath reports whether a backend opens an on-disk file addressed by db.Path
-// (so its path must be containment-checked). In-memory backends ignore Path.
-func usesPath(backend string) bool { return backend == "file" || backend == "vault" }
-
 // contained resolves p against the server's data_dir and returns the cleaned
 // absolute path if it stays within data_dir; ok=false for an escape (absolute
-// path outside, or `..`) or when data_dir is unset. It is the single guard for
-// every control-plane path a caller supplies (create's db.Path, snapshot's dest).
+// path outside, or `..`) or when data_dir is unset. It is the guard for every
+// control-plane path a caller supplies (create's db.Path, snapshot's dest), and
+// shares config.WithinDir with the startup meta-store reconcile so the two can't
+// diverge.
 func (h *Handler) contained(p string) (string, bool) {
-	if h.dataDir == "" || p == "" {
-		return "", false
-	}
-	abs := p
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(h.dataDir, abs)
-	}
-	abs = filepath.Clean(abs)
-	rel, err := filepath.Rel(h.dataDir, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return abs, true
+	return config.WithinDir(h.dataDir, p)
 }
 
 // handleDatabases lists the databases the caller may administer.
@@ -185,7 +170,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// must be relative and not escape (no absolute path, no `..`). This stops a
 	// caller from making the server open/create a SQLite file at an arbitrary
 	// filesystem location.
-	if usesPath(db.Backend) && db.Path != "" {
+	if config.UsesPath(db.Backend) && db.Path != "" {
 		if _, ok := h.contained(db.Path); !ok {
 			writeErr(w, http.StatusBadRequest, "database path must be relative and within data_dir")
 			return
@@ -227,6 +212,9 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Revoke first so this create's grant set is authoritative rather than
+	// max-merged with any stale grants left under this name.
+	h.pol.Revoke(db.Name)
 	for _, g := range req.Grants {
 		if lvl, ok := authz.ParseLevel(g.Level); ok {
 			h.pol.Grant(db.Name, g.Principal, lvl)
@@ -265,6 +253,10 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "cannot detach database")
 		return
 	}
+	// Drop the database's grants so a later database that reuses this name does
+	// not inherit stale privileges (Policy.Grant keeps the max level, so without
+	// this a re-created name would silently retain the old grants).
+	h.pol.Revoke(req.Database)
 	if h.store != nil {
 		_ = h.store.Delete(req.Database)
 		h.store.Audit(h.principal(r), "detach", req.Database, "")

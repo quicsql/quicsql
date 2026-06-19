@@ -249,7 +249,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v2", "/v3":
 		w.WriteHeader(http.StatusOK) // Hrana version-support probe
 	case "/v2/cursor", "/v3/cursor":
-		writeErr(w, http.StatusNotImplemented, "cursor requests are not implemented yet")
+		h.handleCursor(w, r, db)
 	default:
 		writeErr(w, http.StatusNotFound, "unknown endpoint "+endpoint)
 	}

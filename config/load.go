@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -38,6 +39,16 @@ var EndpointTokens = map[string]bool{
 var KnownBackends = map[string]bool{
 	"file": true, "memory": true, "memory-shared": true, "mvcc": true, "memdb": true, "vault": true,
 }
+
+// pathBackends are the backends that open an on-disk file addressed by db.Path,
+// so their path must be containment-checked (WithinDir). In-memory backends
+// ignore Path.
+var pathBackends = map[string]bool{"file": true, "vault": true}
+
+// UsesPath reports whether a backend opens an on-disk file addressed by db.Path.
+// Single-sourced here so the control-plane create check and the startup reconcile
+// agree on which backends need path containment.
+func UsesPath(backend string) bool { return pathBackends[backend] }
 
 // ListenerAuthMethods are the method names a listener may accept. `none` admits
 // unauthenticated requests as the anonymous principal; the rest each require a
@@ -99,6 +110,28 @@ func ValidDBName(s string) bool {
 		}
 	}
 	return true
+}
+
+// WithinDir resolves p against dir and returns the cleaned absolute path if it
+// stays within dir; ok=false for an escape (an absolute path outside dir, or a
+// `..` traversal) or when dir/p is empty. It is the single guard for every
+// operator/meta-store-supplied on-disk path (control-plane create's db.Path,
+// snapshot dest, and the startup reconcile of meta-store specs), so a tampered
+// store or request can't make the daemon open a file at an arbitrary location.
+func WithinDir(dir, p string) (string, bool) {
+	if dir == "" || p == "" {
+		return "", false
+	}
+	abs := p
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(dir, abs)
+	}
+	abs = filepath.Clean(abs)
+	rel, err := filepath.Rel(dir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return abs, true
 }
 
 // knownTopLevel are the config sections wired into behavior. inertTopLevel are
@@ -175,14 +208,13 @@ func (c *Config) Validate() error {
 		if db.Name == "" {
 			return fmt.Errorf("config: database with empty name")
 		}
-		if strings.HasPrefix(db.Name, "_") || Reserved[db.Name] {
-			return fmt.Errorf("config: database %q uses a reserved name", db.Name)
-		}
-		if EndpointTokens[db.Name] {
-			return fmt.Errorf("config: database %q collides with a reserved endpoint name", db.Name)
-		}
-		if strings.ContainsAny(db.Name, `/\`) {
-			return fmt.Errorf("config: database %q must not contain a path separator", db.Name)
+		// ValidDBName is the SAME predicate the HTTP router enforces, so a config
+		// seed and a runtime request agree on what names are usable. It rejects
+		// reserved / endpoint names, path separators, and any name that isn't a
+		// plain identifier (no spaces, quotes, or control chars) — a name that
+		// passes here is reachable over the wire.
+		if !ValidDBName(db.Name) {
+			return fmt.Errorf("config: database %q has an invalid or reserved name (use letters, digits, and -._; not leading _, not a reserved or endpoint name)", db.Name)
 		}
 		if seen[db.Name] {
 			return fmt.Errorf("config: duplicate database name %q", db.Name)
@@ -324,9 +356,28 @@ func (c *Config) validateAuth() error {
 	return nil
 }
 
+// transportFamily is the socket family a transport binds — the axis a bind
+// conflict is scoped to. h1/h2/h2c are TCP, h3 is UDP (QUIC), unix is a socket
+// path; a TCP and a UDP listener may share a port number, same-family ones can't.
+func transportFamily(transport string) string {
+	switch transport {
+	case "h3":
+		return "udp"
+	case "unix":
+		return "unix"
+	default:
+		return "tcp"
+	}
+}
+
 // validateTransports fails fast on listener/TLS wiring errors at load rather than
 // deferring them to server startup.
 func (c *Config) validateTransports() error {
+	// Track the (protocol-family, address) each listener binds so two can't clash.
+	// h1/h2/h2c bind TCP, h3 binds UDP, unix binds a socket path — so h2 (TCP) and
+	// h3 (UDP) may SHARE a port (as :443 does), but two TCP listeners on one address
+	// (or two h3, or two unix on one path) would collide at bind time.
+	bound := map[string]string{} // "family\x00address" → listener name
 	for _, lc := range c.Listeners {
 		switch lc.Transport {
 		case "h1", "h2", "h2c", "h3", "unix":
@@ -342,6 +393,16 @@ func (c *Config) validateTransports() error {
 			if _, ok := c.TLS[lc.TLS]; !ok {
 				return fmt.Errorf("config: listener %q references unknown tls profile %q", lc.Name, lc.TLS)
 			}
+		}
+		if lc.Advertise && lc.Transport != "h3" {
+			return fmt.Errorf("config: listener %q: advertise is only valid on an h3 listener", lc.Name)
+		}
+		if lc.Address != "" {
+			key := transportFamily(lc.Transport) + "\x00" + lc.Address
+			if other, dup := bound[key]; dup {
+				return fmt.Errorf("config: listeners %q and %q both bind %s %q (h2/h3 may share a port, but same-family listeners may not)", other, lc.Name, transportFamily(lc.Transport), lc.Address)
+			}
+			bound[key] = lc.Name
 		}
 	}
 	for name, p := range c.TLS {

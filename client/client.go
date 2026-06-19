@@ -430,8 +430,11 @@ func (c *Client) do(ctx context.Context, db, sql string, args []any) (*Result, e
 }
 
 // authenticate attaches the client's single credential to req. For the ed25519
-// challenge/response it signs a challenge — cached and reused within its window,
-// so a burst of requests does not pay a fetch each.
+// challenge/response the challenge is cached and reused within its window (so a
+// burst does not pay a fetch each), but the signature is computed per request
+// over the challenge BOUND to the request's method and path — so a captured
+// signature can't be replayed onto a different request (see keyringSigningInput
+// and auth.tryKeyring, which must build the identical bytes).
 func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 	switch {
 	case c.edPriv != nil:
@@ -439,7 +442,7 @@ func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 		if err != nil {
 			return err
 		}
-		sig := ed25519.Sign(c.edPriv, []byte(chal))
+		sig := ed25519.Sign(c.edPriv, keyringSigningInput(chal, req.Method, req.URL.Path))
 		req.Header.Set("X-Quicsql-Key", c.edPubLine)
 		req.Header.Set("X-Quicsql-Challenge", chal)
 		req.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
@@ -449,6 +452,14 @@ func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return nil
+}
+
+// keyringSigningInput is the exact byte string the ed25519 challenge/response
+// signs: the server's challenge bound to this request's method and path. The
+// server reconstructs and verifies the identical bytes in auth.tryKeyring — the
+// two MUST stay in sync.
+func keyringSigningInput(challenge, method, path string) []byte {
+	return []byte(challenge + "\n" + method + "\n" + path)
 }
 
 // challenge returns a keyring challenge to sign: the cached one if it is still
@@ -502,12 +513,19 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 }
 
 // encodeRequest builds the {sql, args} body, boxing []byte args as {"base64":…}.
+// time.Time is rendered as RFC3339Nano text explicitly (rather than relying on
+// json.Marshal's implicit time encoding) so it matches the Hrana path's
+// encodeHValue exactly — the same value stores identically in autocommit and in a
+// transaction. Keep the two in sync.
 func encodeRequest(sql string, args []any) ([]byte, error) {
 	out := make([]any, len(args))
 	for i, a := range args {
-		if b, ok := a.([]byte); ok {
-			out[i] = map[string]string{"base64": base64.StdEncoding.EncodeToString(b)}
-		} else {
+		switch v := a.(type) {
+		case []byte:
+			out[i] = map[string]string{"base64": base64.StdEncoding.EncodeToString(v)}
+		case time.Time:
+			out[i] = v.Format(time.RFC3339Nano)
+		default:
 			out[i] = a
 		}
 	}

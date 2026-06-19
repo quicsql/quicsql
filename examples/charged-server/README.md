@@ -6,7 +6,7 @@ A deployable, **fully-charged** quicSQL server — meant to run on a host and be
 
 - **Encryption + compression at rest** — the `catalog` database is a `vfs/vault` container: Adiantum-encrypted and zstd-compressed (`best`). Plus a plain file DB `app` and a shared in-memory `cache`. (See the [databases guide](../../docs/databases.md).)
 - **Server-composed engine** — the standard extension bundle (`regexp`, `fts5`, `vec0`, `spellfix1`, `rtree`, …) **and a custom SQL function** (`showcase_greet`) registered via `sqlite.RegisterAutoHook` before `serverd.Run`. This is how server-side functions/extensions/VFS reach remote clients: the server runs them; clients call them via SQL.
-- **Encryption in transit** — **h2/TLS (7777)** and **HTTP/3 over QUIC (7778)** as the primary secure transports, with cleartext h1 (7775) / h2c (7776) and a Unix socket as dev extras. It mints its TLS leaf from a fixed dev CA for the SANs you pass with `-hosts`. (See the [mTLS guide](../../docs/mtls-production.md).)
+- **Encryption in transit** — **h2/TLS** and **HTTP/3 over QUIC** as the primary secure transports, **sharing port 7777** (QUIC/UDP alongside h2's TLS/TCP, the way HTTPS shares :443; the h3 listener sets `advertise: true` so the TCP transports emit `Alt-Svc` and clients upgrade), with cleartext h1 (7775) / h2c (7776) and a Unix socket as dev extras. It mints its TLS leaf from a fixed dev CA for the SANs you pass with `-hosts`. (See the [mTLS guide](../../docs/mtls-production.md).)
 - **Every auth method + authz level** — bearer, HTTP-password, **mTLS**, and the **ed25519 keyring** challenge/response; per-database grants at `none`/`read-only`/`read-write`/`admin`. (See the [auth guide](../../docs/auth-and-authz.md).)
 - **Control plane** (`/_admin`, admin-only), rate + concurrency **limits**, a **slow-query log**, and a **vault-backed meta store**.
 
@@ -27,9 +27,9 @@ The `Dockerfile` builds the **released** `quicsql.net` (published gosqlite). Dur
 
 ### HTTP/3 (QUIC) through Docker
 
-h2 is TCP (7777); **h3 is QUIC over UDP (7778)**. Two things trip it up in containers, and both look the same on the client — `timeout: no recent network activity` (quic-go's idle timeout, i.e. UDP never made the round trip) while h2 keeps working:
+h2 is TCP (7777); **h3 is QUIC over UDP on the same port (7777)**. Two things trip it up in containers, and both look the same on the client — `timeout: no recent network activity` (quic-go's idle timeout, i.e. UDP never made the round trip) while h2 keeps working:
 
-- **Forget the `/udp` suffix.** `-p 7778:7778` publishes *TCP* 7778; QUIC packets are silently dropped. It must be `-p 7778:7778/udp`.
+- **Forget the `/udp` suffix.** `-p 7777:7777` publishes *TCP* only; QUIC packets are silently dropped. You need both: `-p 7777:7777 -p 7777:7777/udp`.
 - **Docker Desktop on macOS/Windows.** Its userspace UDP proxy does not reliably forward QUIC even with `/udp`, so h3 can still time out. This is a Docker Desktop limitation, not a server bug — the same binary serves h3 fine when run natively (`go run`) or in Docker on **Linux** with host or bridge networking.
 
 ## Credentials

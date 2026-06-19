@@ -1,6 +1,6 @@
 // Command quicsql is the quicSQL server daemon. It serves the native-JSON and
 // Hrana endpoints over every transport (HTTP/1.1, cleartext h2c, HTTP/2 over TLS,
-// HTTP/3 over QUIC, and Unix sockets) — see .plans/plan-quicsql-server.md.
+// HTTP/3 over QUIC, and Unix sockets).
 //
 // It is a single brand-named binary (not `-d`-suffixed) so later phases can add
 // subcommands (`quicsql serve`, `quicsql query`, `quicsql admin`) without a rename.
@@ -24,6 +24,8 @@ import (
 const shutdownGrace = 10 * time.Second
 
 func main() {
+	hardenUmask() // create data files owner-only (0600), before anything opens a file
+
 	cfgPath := flag.String("config", "quicsql.yaml", "path to the YAML config file")
 	flag.Parse()
 

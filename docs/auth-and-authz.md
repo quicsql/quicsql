@@ -77,7 +77,7 @@ Two properties are worth internalizing:
 
 **The server never stores your secret in the clear.** For `bearer` it stores only `sha256` of the token; for `password` only a bcrypt hash. You compute the hash once when you write the config (or point it at a secret source) and hand the *raw* token/password to the client. A leaked config does not leak usable credentials. `mtls` and `keyring` are even stronger: they store only public material (a certificate subject or a public key), and the private half never leaves the client.
 
-**A wrong credential is rejected, never downgraded.** If a listener accepts `bearer` and a request arrives *with* a `Bearer` header that does not match, the request is denied — it does **not** silently fall back to anonymous. This is the "hard method" rule: presenting a credential is a claim, and a failed claim is a `401`. The methods are tried in priority order `mtls → keyring → bearer → password`; the first one whose credential is *present* decides the outcome. `peercred` is the one "soft" method — an unmapped Unix uid simply falls through — and `none` is the terminal fallback that yields the anonymous principal.
+**A wrong credential is rejected, never downgraded.** If a listener accepts `bearer` and a request arrives *with* a `Bearer` header that does not match, the request is denied — it does **not** silently fall back to anonymous. This is the "hard method" rule: presenting a credential is a claim, and a failed claim is a `401`. The methods are tried in priority order `mtls → keyring → bearer → password`; the first one whose credential is *present* decides the outcome. Two "soft" cases fall through instead of failing: an unmapped Unix `peercred` uid, and a CA-verified client certificate that maps to no principal (so a client with a general-purpose mTLS identity can still authenticate via `bearer`/`keyring` on a listener that accepts them — on an `mtls`-only listener nothing else matches, so it still ends in a `401`). `none` is the terminal fallback that yields the anonymous principal.
 
 ### Per-listener acceptance
 
@@ -104,19 +104,19 @@ client                                             server
   │  { "challenge": "…" }                             │  (no server-side state saved)
   │ ◀─────────────────────────────────────────────   │
   │                                                   │
-  │  sign the challenge with the ed25519 private key  │
+  │  sign challenge‖method‖path with the ed25519 key  │
   │  POST /app/query                                  │
   │    X-Quicsql-Key:       ssh-ed25519 AAAA…         │
   │    X-Quicsql-Challenge: <the challenge>           │
   │    X-Quicsql-Signature: <base64 signature>        │
   │ ─────────────────────────────────────────────▶   │  1. re-check the challenge's HMAC + expiry
   │                                                   │  2. look up the key → principal
-  │                                                   │  3. verify the signature over the challenge
+  │                                                   │  3. verify the signature over challenge‖method‖path
   │  result                                           │
   │ ◀─────────────────────────────────────────────   │
 ```
 
-The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The short lifetime bounds how long a captured challenge+signature pair could be replayed. The client library does the whole dance for you before each request; you just supply the key.
+The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The signature is computed over the challenge **bound to the request's method and path**, so a captured signature cannot be replayed onto a different (e.g. more privileged) request; the challenge's short lifetime further bounds how long even the identical request could be replayed. Because the binding is per request — not per challenge — the client still caches and reuses one challenge across a burst of requests, signing each one separately. The client library does the whole dance for you before each request; you just supply the key. Keep the keyring method on a TLS or Unix-socket listener where the headers can't be sniffed off the wire in the first place.
 
 ### The anonymous principal
 
@@ -284,7 +284,7 @@ Failures are shaped like every other quicSQL error — a JSON envelope `{"error"
 
 | Status | Meaning | Typical cause |
 | --- | --- | --- |
-| `401 Unauthorized` | authentication failed | missing credential on a listener that requires one; a wrong token/password; a client cert that maps to no principal; an expired challenge |
+| `401 Unauthorized` | authentication failed | missing credential on a listener that requires one; a wrong token/password; a client cert that maps to no principal on an `mtls`-only listener; an expired challenge |
 | `403 Forbidden` | authenticated, but not allowed | a read-only principal attempting a write; any principal touching a database it has no grant on; a non-admin hitting `/_admin` |
 
 A `401` also carries a `WWW-Authenticate: Bearer, Basic realm="quicsql"` header. The rule of thumb: **`401` means "I don't know who you are," `403` means "I know who you are, and the answer is no."**

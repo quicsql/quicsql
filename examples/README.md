@@ -38,6 +38,22 @@ It configures one principal per method — no-auth (anonymous), Unix peer-creden
 
 By default the secret-bearing methods (bearer / password / keyring) run over cleartext HTTP/1.1 so the demo needs no certificate setup on a first run; those methods send a credential on every request, so in a real deployment you would put them behind TLS. `-tls` demonstrates exactly that: the same matrix, but the credential listener becomes a server-authenticated TLS h2 endpoint (its own `self_signed` profile with no client-CA, so it presents a cert without demanding one). mTLS keeps its own client-CA listener and peer-credentials keeps the Unix socket regardless.
 
+## `charged-server` + `remote-tour` — a real two-process deployment, over the network
+
+`demo` and `auth` run the server in-process. This pair runs the **deployed shape**: a standalone server process and a separate client process talking over TLS with mTLS — exactly what a real deployment does, HTTP/3 included.
+
+- **`charged-server`** is a fully-charged, deployable server: an encrypted + compressed `vfs/vault` database, a plain file DB and a shared in-memory DB; the standard extension bundle plus a custom server-registered SQL function; every auth method; TLS h2 + HTTP/3 as the primary secure transports (with cleartext h1/h2c and a Unix socket as dev extras); the control plane; rate/concurrency limits; a slow-query log; and a vault-backed meta store. It binds a real interface and mints its TLS leaf for the SANs you pass, so it can run on a host and be reached from elsewhere. It ships a `Dockerfile` and a matching `charged.yaml` for the standalone `quicsql` binary.
+- **`remote-tour`** is a pure remote client — only `quicsql.net/client` and the `database/sql` driver, no ORM — that walks every network-reachable feature and self-verifies (non-zero exit on any miss): native CRUD with parameterized args, a Hrana interactive transaction (commit + rollback), the custom SQL function and bundled extensions (REGEXP, sha256, `generate_series`, rtree, FTS5), SESSION changesets, streamed large objects, the `database/sql` driver under both names, decrypting a vault export, the auth matrix, the h2/h3 transport matrix, the control plane, and `/_metrics`.
+
+```
+just showcase                  # self-contained: builds + starts the server, runs the tour, stops the server
+# or, as two processes (e.g. on two machines):
+go run ./examples/charged-server -hosts your.host,203.0.113.10   # on the server host
+go run ./examples/remote-tour   -addr your.host:7777             # from anywhere
+```
+
+Both sides derive the SAME fixed dev credentials (CA, mTLS client cert, keyring key, bearer token) from the shared `internal/showcase` package, so nothing is copied between them at runtime — DEV ONLY; replace it for a real deployment. (The LiteORM-over-quicSQL tour — models, typed vector/full-text/hybrid search, sessions — is a cross-module demo and lives with LiteORM.)
+
 ## Connecting from Go — the `client` package, the `quicsql` database/sql driver, and LiteORM
 
 `gosqlite.org` itself is a driver for **local** SQLite; it is not a network client. To reach the server from Go:
@@ -55,7 +71,7 @@ By default the secret-bearing methods (bearer / password / keyring) run over cle
 
   One scheme (`quicsql`), transport as a parameter: `?transport=h1|h2c|h2|h3|unix` (default `h1`). Credentials go in query params (`?token=` or `?user=&password=`); `?insecure=1` skips cert verification for the dev cert; a unix DSN is `quicsql:///<db>?transport=unix&socket=/path`. **Transactions are supported** — `BeginTx` pins a libSQL Hrana session so `BEGIN … COMMIT` and SAVEPOINT nesting run on one server connection; autocommit statements use the faster stateless endpoint. Importing the driver also teaches gosqlite's built-in `sqlite` driver to open the same DSN, so `sql.Open("sqlite", "quicsql://…")` works too.
 
-- **LiteORM** (`liteorm.org/dialect/sqlite`) — the full ORM and query builder run against a remote server via `sqlite.OpenRemote(dsn)` (or `WrapDB(*sql.DB)`), the remote counterpart of `sqlite.Open(path)`. Migrations, CRUD, the query builder, transactions, and SQLite constraint-error classification all work unchanged; the native-only subpackages (`search` reads, `lob`, `changeset`) need a local handle and are unavailable remotely. See the runnable **`examples/liteorm-quicsql`** at the repo root (`go run .`).
+- **LiteORM** (`liteorm.org/dialect/sqlite`) — the full ORM and query builder run against a remote server: `sqlite.Open(dsn)` opens a local path or, for a `quicsql://` DSN, a remote server (or `WrapDB(*sql.DB)` to adapt a client you built yourself, e.g. for mTLS/keyring). Migrations, CRUD, the query builder, transactions, and SQLite constraint-error classification all work unchanged; over the wire, vector/full-text/hybrid search runs as SQL against the server's vec0/fts5 sidecars, changesets drive the SESSION extension server-side, and large objects transfer whole (streaming/partial blob I/O needs a local handle). The runnable LiteORM-over-quicSQL tour lives in the LiteORM repo's examples.
 
 ## `quicsql.demo.yaml` — standalone config
 

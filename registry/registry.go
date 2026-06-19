@@ -73,60 +73,75 @@ func New(backends map[string]backend.Backend, log *slog.Logger) *Registry {
 // and is marked opening), so a slow open never stalls other databases and never
 // races Reserve/Close/List.
 func (r *Registry) Get(ctx context.Context, name string) (*DB, func(), error) {
-	r.mu.Lock()
-	e := r.entries[name]
-	if e == nil {
-		be := r.backends[name]
-		if be == nil {
-			r.mu.Unlock()
-			return nil, nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
-		}
-		// We are the opener: pre-count a ref (for the handle we'll return) and
-		// mark opening so Reserve/Close see the in-flight open.
-		e = &entry{name: name, be: be, ready: make(chan struct{}), opening: true, refs: 1}
-		r.entries[name] = e
-		r.mu.Unlock()
-
-		h, err := be.Open(ctx) // blocking; no lock held, no shared-entry field touched
-
+	for {
 		r.mu.Lock()
-		e.opening = false
-		if err != nil {
-			// Drop the poisoned entry so a later Get can retry once the fault clears.
-			e.err = err
-			e.refs = 0
-			delete(r.entries, name)
+		e := r.entries[name]
+		if e == nil {
+			be := r.backends[name]
+			if be == nil {
+				r.mu.Unlock()
+				return nil, nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
+			}
+			// We are the opener: pre-count a ref (for the handle we'll return) and
+			// mark opening so Reserve/Close see the in-flight open.
+			e = &entry{name: name, be: be, ready: make(chan struct{}), opening: true, refs: 1}
+			r.entries[name] = e
+			r.mu.Unlock()
+
+			h, err := be.Open(ctx) // blocking; no lock held, no shared-entry field touched
+
+			r.mu.Lock()
+			e.opening = false
+			if err != nil {
+				// Drop the poisoned entry so a later Get can retry once the fault clears.
+				e.err = err
+				e.refs = 0
+				delete(r.entries, name)
+				r.mu.Unlock()
+				close(e.ready)
+				r.log.Error("registry: open failed", "db", name, "err", err)
+				return nil, nil, err
+			}
+			e.db = &DB{Name: name, Kind: be.Kind(), ReadOnly: be.ReadOnly(), Handle: h}
+			e.last = time.Now()
 			r.mu.Unlock()
 			close(e.ready)
-			r.log.Error("registry: open failed", "db", name, "err", err)
-			return nil, nil, err
+			return e.db, r.releaseFunc(e), nil
 		}
-		e.db = &DB{Name: name, Kind: be.Kind(), ReadOnly: be.ReadOnly(), Handle: h}
-		e.last = time.Now()
 		r.mu.Unlock()
-		close(e.ready)
-		return e.db, r.releaseFunc(e), nil
-	}
-	r.mu.Unlock()
 
-	// An open is in flight (or done): wait for it, honoring ctx.
-	select {
-	case <-e.ready:
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	}
+		// An open is in flight (or done): wait for it, honoring ctx.
+		select {
+		case <-e.ready:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e.err != nil {
-		return nil, nil, e.err
+		r.mu.Lock()
+		// Re-check the entry under the lock: while we waited on e.ready (lock
+		// released) a concurrent Reserve/Remove may have closed this handle and
+		// deleted or replaced the entry. Using the captured e would hand back a
+		// closed *sqlite.DB and violate Reserve's exclusive ownership — so retry
+		// from the top, which re-resolves to the opener, reserved, unknown, or a
+		// freshly reopened handle as appropriate.
+		if r.entries[name] != e {
+			r.mu.Unlock()
+			continue
+		}
+		if e.err != nil {
+			r.mu.Unlock()
+			return nil, nil, e.err
+		}
+		if e.reserved {
+			r.mu.Unlock()
+			return nil, nil, ErrReserved
+		}
+		e.refs++
+		e.last = time.Now()
+		db, release := e.db, r.releaseFunc(e)
+		r.mu.Unlock()
+		return db, release, nil
 	}
-	if e.reserved {
-		return nil, nil, ErrReserved
-	}
-	e.refs++
-	e.last = time.Now()
-	return e.db, r.releaseFunc(e), nil
 }
 
 // releaseFunc returns a single-use decrement for one Get. Each Get gets its own

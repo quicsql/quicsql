@@ -19,11 +19,12 @@ var ErrDenied = errors.New("statement not permitted by server policy")
 // full per-principal authorizer (Phase 4).
 //
 // The read/write split is a heuristic — the leading keyword plus a RETURNING
-// probe — used on BOTH the native and Hrana paths (Hrana `describe` reports
-// is_readonly from IsReadOnly). Wiring the driver's (*Stmt).Readonly for exact
-// classification is a follow-up. A misclassified writing-CTE without RETURNING
-// still EXECUTES correctly (QueryContext runs it); only its rows_affected
-// metadata goes unreported.
+// probe — used on BOTH the native and Hrana execution paths. (Hrana `describe`
+// no longer relies on it: it prepares the statement and reports the driver's
+// exact sqlite3_stmt_readonly.) Wiring the same exact classification into Run
+// is a follow-up. A misclassified writing-CTE without RETURNING still EXECUTES
+// correctly (QueryContext runs it); only its rows_affected metadata goes
+// unreported.
 func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, error) {
 	switch strings.ToUpper(firstToken(s.SQL)) {
 	case "ATTACH", "DETACH":
@@ -36,8 +37,14 @@ func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, erro
 }
 
 // IsReadOnly reports whether a statement only reads (SELECT and friends, and not
-// a writing RETURNING). Used by Hrana `describe`. Phase-1-grade heuristic.
+// a writing RETURNING). Phase-1-grade heuristic.
 func IsReadOnly(sql string) bool { return isReadOnly(sql) && !hasReturning(sql) }
+
+// IsExplain reports whether the statement is an EXPLAIN / EXPLAIN QUERY PLAN,
+// for Hrana describe's is_explain. The driver does not expose
+// sqlite3_stmt_isexplain; the leading keyword is exact here because EXPLAIN is
+// only valid as the first token of a statement.
+func IsExplain(sql string) bool { return strings.EqualFold(firstToken(sql), "EXPLAIN") }
 
 func isReadOnly(sql string) bool {
 	switch strings.ToUpper(firstToken(sql)) {

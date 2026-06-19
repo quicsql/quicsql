@@ -53,16 +53,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 
 	sess, err := h.stream(ctx, dbName, req.Baton, level)
 	if err != nil {
-		switch {
-		case errors.Is(err, session.ErrBadBaton):
-			writeErr(w, http.StatusBadRequest, "invalid or expired baton")
-		case errors.Is(err, session.ErrPrincipalMismatch):
-			writeErr(w, http.StatusForbidden, "baton belongs to a different principal")
-		case errors.Is(err, session.ErrTooMany):
-			writeErr(w, http.StatusServiceUnavailable, "too many open sessions")
-		default:
-			h.writeGetError(w, dbName, err)
-		}
+		h.writeStreamError(w, dbName, err)
 		return
 	}
 
@@ -86,6 +77,21 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		baton = &b
 	}
 	writeJSON(w, http.StatusOK, pipelineResp{Baton: baton, Results: results})
+}
+
+// writeStreamError maps a stream-resolution failure (stream) to its status.
+// The pipeline and cursor endpoints share it so the two report identically.
+func (h *Handler) writeStreamError(w http.ResponseWriter, dbName string, err error) {
+	switch {
+	case errors.Is(err, session.ErrBadBaton):
+		writeErr(w, http.StatusBadRequest, "invalid or expired baton")
+	case errors.Is(err, session.ErrPrincipalMismatch):
+		writeErr(w, http.StatusForbidden, "baton belongs to a different principal")
+	case errors.Is(err, session.ErrTooMany):
+		writeErr(w, http.StatusServiceUnavailable, "too many open sessions")
+	default:
+		h.writeGetError(w, dbName, err)
+	}
 }
 
 // stream resolves the session for a pipeline request: resume an existing one
@@ -148,9 +154,11 @@ func (h *Handler) runStreamRequest(ctx context.Context, sess *session.Session, s
 		if err != nil {
 			return errStream(err.Error()), false
 		}
-		return okStream(describeResp{Type: "describe", Result: &hDescribeResult{
-			Params: []hDescribeParam{}, Cols: []hCol{}, IsReadonly: engine.IsReadOnly(sqlText),
-		}}), false
+		res, err := describeStmt(sess, sqlText)
+		if err != nil {
+			return streamResult{Type: "error", Error: hErrorFrom(err)}, false
+		}
+		return okStream(describeResp{Type: "describe", Result: res}), false
 
 	case "store_sql":
 		if sr.SQLID == nil || sr.SQL == nil {
@@ -239,6 +247,72 @@ func captureChangeset(sess *session.Session) ([]byte, error) {
 	return cs, err
 }
 
+// stmtDescriber is the introspection surface of gosqlite's prepared statement.
+// The driver's stmt type is unexported, so its exported methods are reached
+// through this assertion on the driver.Stmt that Conn.Prepare returns.
+type stmtDescriber interface {
+	ColumnCount() int
+	ColumnName(i int) string
+	ColumnDeclType(i int) string
+	BindCount() int
+	BindName(i int) string
+	Readonly() bool
+}
+
+// describeStmt implements Hrana's describe: it PREPARES sqlText on the
+// stream's pinned connection — never stepping it, so describing a write
+// changes nothing — and reports the statement's real shape: one params entry
+// per bound parameter (name null for anonymous `?`, prefixed `:AAA`/`@AAA`/
+// `$AAA`/`?NNN` otherwise, per the spec), the result columns with declared
+// types where a column resolves to one, and sqlite3_stmt_readonly's exact
+// classification. A prepare failure (bad SQL, or the read-only authorizer
+// denying a write at compile time) is returned for the caller to surface as an
+// in-stream Hrana error, not a transport error.
+func describeStmt(sess *session.Session, sqlText string) (*hDescribeResult, error) {
+	out := &hDescribeResult{Params: []hDescribeParam{}, Cols: []hCol{}, IsExplain: engine.IsExplain(sqlText)}
+	err := sess.Conn().Raw(func(dc any) error {
+		c, ok := dc.(*sqlite.Conn)
+		if !ok {
+			return &protocolError{fmt.Sprintf("connection is not *sqlite.Conn (%T)", dc)}
+		}
+		ds, err := c.Prepare(sqlText)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = ds.Close() }()
+		st, ok := ds.(stmtDescriber)
+		if !ok {
+			return &protocolError{fmt.Sprintf("statement is not introspectable (%T)", ds)}
+		}
+		for i := range st.ColumnCount() {
+			name := st.ColumnName(i)
+			col := hCol{Name: &name}
+			if dt := st.ColumnDeclType(i); dt != "" {
+				col.Decltype = &dt
+			}
+			out.Cols = append(out.Cols, col)
+		}
+		for i := 1; i <= st.BindCount(); i++ { // SQLite indexes parameters from 1
+			var p hDescribeParam
+			if name := st.BindName(i); name != "" {
+				p.Name = &name
+			}
+			out.Params = append(out.Params, p)
+		}
+		out.IsReadonly = st.Readonly()
+		return nil
+	})
+	if err != nil {
+		// Carry the SQLite codes into the shared engine.Error shape so hErrorFrom
+		// maps a prepare failure exactly like an execution failure.
+		if se, ok := errors.AsType[*sqlite.Error](err); ok {
+			return nil, &engine.Error{Code: se.Code(), Extended: se.ExtendedCode(), Msg: se.Error()}
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 func (h *Handler) execStmt(ctx context.Context, sess *session.Session, st hStmt) (*hStmtResult, error) {
 	sqlText, err := resolveSQL(sess, st.SQL, st.SQLID)
 	if err != nil {
@@ -254,6 +328,17 @@ func (h *Handler) execStmt(ctx context.Context, sess *session.Session, st hStmt)
 }
 
 func (h *Handler) execBatch(ctx context.Context, sess *session.Session, b hBatch) *hBatchResult {
+	return h.runHranaBatch(ctx, sess, b, nil)
+}
+
+// runHranaBatch executes a Hrana batch step by step, evaluating each step's
+// condition against the results so far. Every EXECUTED step is also reported to
+// emit (when non-nil) — skipped steps are not, matching the cursor entry rules —
+// and a false return from emit abandons the rest of the batch (the cursor
+// client is gone). The pipeline `batch` request and the cursor endpoint share
+// this loop so their condition semantics cannot drift. (runBatch, in native.go,
+// is the native path's all-or-nothing transaction batch — a different contract.)
+func (h *Handler) runHranaBatch(ctx context.Context, sess *session.Session, b hBatch, emit func(step int, res *hStmtResult, herr *hError) bool) *hBatchResult {
 	n := len(b.Steps)
 	out := &hBatchResult{StepResults: make([]*hStmtResult, n), StepErrors: make([]*hError, n)}
 	ac := autocommit(sess.Conn())
@@ -262,10 +347,15 @@ func (h *Handler) execBatch(ctx context.Context, sess *session.Session, b hBatch
 			continue // skipped step: both result and error stay nil
 		}
 		res, err := h.execStmt(ctx, sess, step.Stmt)
+		var herr *hError
 		if err != nil {
-			out.StepErrors[i] = hErrorFrom(err)
+			herr = hErrorFrom(err)
+			out.StepErrors[i] = herr
 		} else {
 			out.StepResults[i] = res
+		}
+		if emit != nil && !emit(i, res, herr) {
+			return out
 		}
 		ac = autocommit(sess.Conn()) // BEGIN/COMMIT in a step flips autocommit
 	}

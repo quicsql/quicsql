@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // Stream is a session-pinned sequence of statements over the server's Hrana
@@ -360,6 +361,13 @@ func encodeHValue(a any) map[string]any {
 		return map[string]any{"type": "float", "value": v}
 	case string:
 		return map[string]any{"type": "text", "value": v}
+	case time.Time:
+		// Store times as RFC3339Nano text — the SAME form json.Marshal produces on
+		// the native path (client.encodeRequest), so a time bound in a transaction
+		// and one bound in autocommit land as the identical value. SQLite has no
+		// native time type; its date functions parse RFC3339. Keep the two paths in
+		// sync.
+		return map[string]any{"type": "text", "value": v.Format(time.RFC3339Nano)}
 	case []byte:
 		return map[string]any{"type": "blob", "base64": base64.StdEncoding.EncodeToString(v)}
 	default:

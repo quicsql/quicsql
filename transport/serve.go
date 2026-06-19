@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
@@ -66,6 +67,15 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 	// Apply this listener's auth middleware around the shared handler.
 	if opts.Wrap != nil {
 		handler = opts.Wrap(lc, handler)
+	}
+	// On the TCP transports, advertise any opt-in h3 endpoint (advertise: true) via
+	// Alt-Svc, so a client that connected over TCP can discover and upgrade to h3 —
+	// the same mechanism browsers use to move to h3 on :443.
+	switch lc.Transport {
+	case "h1", "h2", "h2c":
+		if av := altSvcHeader(cfg.Listeners); av != "" {
+			handler = withAltSvc(handler, av)
+		}
 	}
 	switch lc.Transport {
 	case "unix":
@@ -179,6 +189,34 @@ func (s *Set) tlsFor(cfg *config.Config, lc config.Listener) (*tls.Config, confi
 // accepts.
 func onlyAuthMethod(lc config.Listener, method string) bool {
 	return len(lc.Auth) == 1 && lc.Auth[0] == method
+}
+
+// altSvcHeader builds the Alt-Svc value advertising every h3 listener flagged
+// `advertise: true`, or "" if none opted in. e.g. `h3=":7777"; ma=2592000`. The
+// authority is port-only (`:port`) so it advertises h3 on the SAME host the
+// client already reached — correct whether h3 shares the TCP port or uses another.
+func altSvcHeader(listeners []config.Listener) string {
+	var parts []string
+	for _, lc := range listeners {
+		if lc.Transport != "h3" || !lc.Advertise {
+			continue
+		}
+		_, port, err := net.SplitHostPort(lc.Address)
+		if err != nil || port == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf(`h3=":%s"; ma=2592000`, port))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// withAltSvc adds a fixed Alt-Svc header to every response (used on the TCP
+// transports to advertise an opt-in h3 endpoint).
+func withAltSvc(next http.Handler, value string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Alt-Svc", value)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func warnSelfSigned(log *slog.Logger, name string, p config.TLSProfile) {

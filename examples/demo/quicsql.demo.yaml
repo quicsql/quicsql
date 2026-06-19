@@ -21,13 +21,13 @@ secrets:
 tls:
   dev: {mode: self_signed, hosts: [localhost, 127.0.0.1]}   # dev-only; use mode: files in production
 
-# One listener per transport. h2 (tcp) + h3 (udp) can share a port like 443 does;
-# here they are distinct for clarity. No auth ⇒ open mode (loopback, trusted).
+# h2 (TCP) and h3 (UDP) share port 7777, the way HTTPS shares :443 — TCP and UDP
+# are separate namespaces, so they don't collide. No auth ⇒ open mode (loopback).
 listeners:
   - {name: h1,   transport: h1,   address: 127.0.0.1:7775}
   - {name: h2c,  transport: h2c,  address: 127.0.0.1:7776}
   - {name: h2,   transport: h2,   address: 127.0.0.1:7777, tls: dev}
-  - {name: h3,   transport: h3,   address: 127.0.0.1:7778, tls: dev}
+  - {name: h3,   transport: h3,   address: 127.0.0.1:7777, tls: dev}   # same port as h2 (UDP vs TCP)
   - {name: unix, transport: unix, address: ./data/quicsql.sock, socket_mode: "0600"}
 
 databases:

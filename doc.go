@@ -21,7 +21,8 @@
 // list databases and vault maintenance — offline compact, online reclaim, trim,
 // snapshot — with a meta store and audit log), and observability + safety rails:
 // a /_metrics OpenMetrics endpoint, /_admin introspection (info / stats /
-// sessions / kill), a slow-query log (driver TraceProfile, params redacted), a
+// sessions / kill), a slow-query log (driver TraceProfile, params redacted by
+// default — logging.expand_params opts into expanded SQL), a
 // per-principal rate limit and per-database concurrency cap, and statement /
 // transaction timeouts that interrupt a runaway or disconnected query.
 package quicsql

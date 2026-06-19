@@ -222,6 +222,15 @@ func (st *Store) Resume(baton, dbName, principal string) (*Session, error) {
 	if s == nil || s.gen != gen {
 		return nil, ErrBadBaton
 	}
+	if s.busy {
+		// A current-generation baton can coexist with an in-flight request only
+		// because the cursor endpoint hands the baton out in its response prelude,
+		// before the batch finishes (PeekBaton). Hrana requires serial use — the
+		// client must read the whole response before its next request — so a
+		// resume inside that window is refused, WITHOUT consuming the baton: it
+		// becomes usable the moment the in-flight request completes.
+		return nil, ErrBadBaton
+	}
 	if st.reapable(s) {
 		st.closeLocked(id)
 		return nil, ErrBadBaton
@@ -245,6 +254,19 @@ func (st *Store) Baton(s *Session) string {
 	defer st.mu.Unlock()
 	s.busy = false
 	s.lastUsed = time.Now()
+	return st.mint(s.id, s.gen)
+}
+
+// PeekBaton mints the current baton for s WITHOUT clearing the in-flight flag.
+// The cursor endpoint streams its response and must place the baton in the
+// first line (the prelude) while the batch is still executing: the session
+// stays busy for the rest of the stream — so the reaper and Kill leave the
+// pinned connection alone — and Resume refuses a busy session, so the peeked
+// baton is honored only once the request finishes (Baton clears the flag and
+// keeps the same baton current).
+func (st *Store) PeekBaton(s *Session) string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	return st.mint(s.id, s.gen)
 }
 
@@ -333,14 +355,23 @@ func (st *Store) Kill(idStr string) KillResult {
 	return Killed
 }
 
-// CloseAll tears down every session and WAITS for the connections to be rolled
-// back and returned to their pools. The wait matters at shutdown: the caller
-// closes the registry (which closes the pools, checkpointing WAL) right after, so
-// the pinned connections must be back before that — otherwise the pool would be
-// closed out from under an in-flight ROLLBACK.
+// CloseAll tears down every idle session and WAITS for their connections to be
+// rolled back and returned to their pools. The wait matters at shutdown: the
+// caller closes the registry (which closes the pools, checkpointing WAL) right
+// after, so the pinned connections must be back before that — otherwise the pool
+// would be closed out from under an in-flight ROLLBACK.
+//
+// A busy session (a request in flight on its pinned conn) is deliberately skipped
+// — the same rule reap and Kill follow: running ROLLBACK/Close on that conn here
+// would race the in-flight request. Listeners are already draining by the time
+// this runs, so a still-busy session's conn is rolled back and closed when its
+// request finishes and the pool closes under it.
 func (st *Store) CloseAll() {
 	st.mu.Lock()
-	for id := range st.sessions {
+	for id, s := range st.sessions {
+		if s.busy {
+			continue
+		}
 		st.closeLocked(id)
 	}
 	st.mu.Unlock()

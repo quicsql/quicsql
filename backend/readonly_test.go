@@ -72,3 +72,47 @@ func TestReadOnlyConnBlocksWrites(t *testing.T) {
 		t.Fatalf("restored conn blocked INSERT: %v", err)
 	}
 }
+
+// TestReadOnlyConnRefusesQueryOnlyToggle is the direct regression for the
+// read-only bypass: a read-only principal must not be able to run
+// `PRAGMA query_only = OFF` to dismantle the run-time write-block and then write
+// the database header.
+func TestReadOnlyConnRefusesQueryOnlyToggle(t *testing.T) {
+	sec, _ := secret.New(nil)
+	be, err := For(config.Database{Name: "d", Backend: "file", Path: filepath.Join(t.TempDir(), "d.db")}, sec, "")
+	if err != nil {
+		t.Fatalf("For: %v", err)
+	}
+	db, err := be.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close()
+	if err := SetConnMode(ctx, conn, true); err != nil {
+		t.Fatalf("SetConnMode ro: %v", err)
+	}
+
+	// Turning query_only OFF must be denied by the authorizer.
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = OFF"); err == nil {
+		t.Fatal("read-only conn allowed PRAGMA query_only = OFF (read-only bypass)")
+	}
+	// And even after the attempt, a header write is still blocked.
+	if _, err := conn.ExecContext(ctx, "PRAGMA user_version = 1337"); err == nil {
+		t.Fatal("read-only conn allowed a header write after query_only toggle attempt")
+	}
+	// Reading query_only is still allowed and reports it is still ON.
+	var qo int
+	if err := conn.QueryRowContext(ctx, "PRAGMA query_only").Scan(&qo); err != nil {
+		t.Fatalf("read query_only: %v", err)
+	}
+	if qo != 1 {
+		t.Fatalf("query_only was turned off: got %d, want 1", qo)
+	}
+}
