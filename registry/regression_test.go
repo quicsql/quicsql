@@ -9,11 +9,11 @@ import (
 	"testing"
 
 	"gosqlite.org"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
 )
 
 // fakeBackend opens a real in-memory handle, optionally failing the first failN

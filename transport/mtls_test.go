@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"gosqlite.org/server/auth"
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
-	"gosqlite.org/server/transport"
+	"quicsql.net/auth"
+	"quicsql.net/authz"
+	"quicsql.net/config"
+	"quicsql.net/secret"
+	"quicsql.net/transport"
 )
 
 // TestMTLSEndToEnd stands up an h2-over-TLS listener with a client CA and the

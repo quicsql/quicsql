@@ -1,11 +1,11 @@
-// Package server is the quicSQL nursery: a SQLite network server / multiplexer
+// Package quicsql is the quicSQL server: a SQLite network server / multiplexer
 // that owns local databases (plain files, in-memory, and vfs/vault containers)
 // and fans many network clients into ONE long-lived open handle per database —
 // the single-owner discipline that makes a vault file safely shareable.
 //
-// It is developed in-repo as gosqlite.org/server and is NOT exposed from the
-// gosqlite public surface; the trajectory is extraction into the standalone
-// quicSQL product. The full design lives in .plans/plan-quicsql-server.md.
+// quicSQL is its own module, quicsql.net, built on gosqlite (gosqlite.org) — the
+// CGo-free SQLite engine it embeds. During co-development it resolves gosqlite
+// from the sibling checkout via the replaces in go.mod.
 //
 // Live today (Phases 0-7): the config/backend/registry/engine core, the
 // native-JSON and libSQL Hrana protocols (execute/batch/interactive
@@ -24,4 +24,4 @@
 // sessions / kill), a slow-query log (driver TraceProfile, params redacted), a
 // per-principal rate limit and per-database concurrency cap, and statement /
 // transaction timeouts that interrupt a runaway or disconnected query.
-package server
+package quicsql

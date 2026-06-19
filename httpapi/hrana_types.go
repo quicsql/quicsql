@@ -7,7 +7,7 @@ import (
 	"math"
 	"strconv"
 
-	"gosqlite.org/server/engine"
+	"quicsql.net/engine"
 )
 
 // hValue marshals an engine.Value in Hrana's tagged form and back. Integers are

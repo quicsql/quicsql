@@ -7,8 +7,8 @@ import (
 	"errors"
 	"net/http"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/engine"
+	"quicsql.net/backend"
+	"quicsql.net/engine"
 )
 
 // queryRequest is the native-JSON request body: either a single `sql` (+ `args`)

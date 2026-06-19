@@ -42,11 +42,11 @@ By default the secret-bearing methods (bearer / password / keyring) run over cle
 
 `gosqlite.org` itself is a driver for **local** SQLite; it is not a network client. To reach the server from Go:
 
-- **`gosqlite.org/server/client`** — a thin client for the native-JSON API, one constructor per transport (`H1`, `H2C`, `H2TLS`, `H3`, `Unix`) with auth options (`WithBearer`, `WithBasicAuth`, `WithClientCert`, `WithEd25519`). This is what both demos use.
-- **`gosqlite.org/server/client/quicsqldriver`** — registers a `database/sql` driver named `quicsql`, so ordinary `database/sql` code connects to a remote database exactly like a local one:
+- **`quicsql.net/client`** — a thin client for the native-JSON API, one constructor per transport (`H1`, `H2C`, `H2TLS`, `H3`, `Unix`) with auth options (`WithBearer`, `WithBasicAuth`, `WithClientCert`, `WithEd25519`). This is what both demos use.
+- **`quicsql.net/client/sqldriver`** — registers a `database/sql` driver named `quicsql`, so ordinary `database/sql` code connects to a remote database exactly like a local one:
 
   ```go
-  import _ "gosqlite.org/server/client/quicsqldriver"
+  import _ "quicsql.net/client/sqldriver"
 
   db, _ := sql.Open("quicsql", "quicsql://127.0.0.1:7775/users?transport=h1&token=<bearer>")
   var n int
@@ -59,4 +59,4 @@ By default the secret-bearing methods (bearer / password / keyring) run over cle
 
 ## `quicsql.demo.yaml` — standalone config
 
-The equivalent config for running the real `quicsql` binary (`quicsql --config quicsql.demo.yaml`); see the comments at the top of the file for the one-time key setup and example `curl` calls. The Go `client` package (`gosqlite.org/server/client`) is the thin Go client the demo uses; point it at any of the listeners.
+The equivalent config for running the real `quicsql` binary (`quicsql --config quicsql.demo.yaml`); see the comments at the top of the file for the one-time key setup and example `curl` calls. The Go `client` package (`quicsql.net/client`) is the thin Go client the demo uses; point it at any of the listeners.

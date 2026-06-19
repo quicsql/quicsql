@@ -20,7 +20,7 @@ import (
 	"strings"
 
 	"gosqlite.org/crypto/keyring"
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 // ErrNotImplemented marks a resolver path a later phase fills in.

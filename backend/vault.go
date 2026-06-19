@@ -6,10 +6,10 @@ import (
 	"os"
 
 	"gosqlite.org"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
 	"gosqlite.org/vfs/crypto"
 	"gosqlite.org/vfs/vault"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // vaultBackend opens a vfs/vault container (compression and/or encryption).

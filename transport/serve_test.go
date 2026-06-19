@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/transport"
+	"quicsql.net/config"
+	"quicsql.net/transport"
 )
 
 func dummy() http.Handler {

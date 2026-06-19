@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"gosqlite.org/server/admin"
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
-	"gosqlite.org/server/session"
+	"quicsql.net/admin"
+	"quicsql.net/authz"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
+	"quicsql.net/session"
 )
 
 func newAdmin(t *testing.T, admins []string, open bool, seed map[string]backend.Backend, sec secret.Resolver, dataDir string) (*admin.Handler, *registry.Registry, *authz.Policy) {

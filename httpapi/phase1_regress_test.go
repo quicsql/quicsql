@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/httpapi"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/httpapi"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
 )
 
 // newHandlerDB builds a handler serving a single database of the caller's shape.

@@ -19,8 +19,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // build compiles an Authenticator over the given principals with no secret

@@ -16,14 +16,14 @@ import (
 	"strings"
 	"time"
 
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/internal/httpjson"
-	"gosqlite.org/server/meta"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
-	"gosqlite.org/server/session"
+	"quicsql.net/authz"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/internal/httpjson"
+	"quicsql.net/meta"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
+	"quicsql.net/session"
 )
 
 // Handler serves /_admin/*. It is nil-safe to construct without a meta store

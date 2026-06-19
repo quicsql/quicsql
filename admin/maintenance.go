@@ -6,8 +6,8 @@ import (
 	"os"
 
 	"gosqlite.org"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/registry"
+	"quicsql.net/backend"
+	"quicsql.net/registry"
 )
 
 // maintenanceRequest selects a maintenance op on one database.

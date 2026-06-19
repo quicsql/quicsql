@@ -16,14 +16,14 @@ import (
 	"sync"
 	"time"
 
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/internal/httpjson"
-	"gosqlite.org/server/limits"
-	"gosqlite.org/server/obs"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/session"
+	"quicsql.net/authz"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/internal/httpjson"
+	"quicsql.net/limits"
+	"quicsql.net/obs"
+	"quicsql.net/registry"
+	"quicsql.net/session"
 )
 
 const (

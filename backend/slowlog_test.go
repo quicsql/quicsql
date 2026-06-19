@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // TestSlowLogCapturesAndRedacts installs the slow log at threshold 0 (log every

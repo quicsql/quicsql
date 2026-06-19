@@ -41,9 +41,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/serverd"
+	"quicsql.net/client"
+	"quicsql.net/config"
+	"quicsql.net/serverd"
 )
 
 // creds holds every credential the demo mints and shares between the server

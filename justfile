@@ -1,4 +1,4 @@
-# quicsql (gosqlite.org/server) — common operations for the network-server nursery.
+# quicsql (quicsql.net) — common operations for the network-server nursery.
 #
 # A separate module (own go.mod, replace gosqlite.org => ..), so these recipes run
 # in this module's context. Install just from https://just.systems. Run `just`
@@ -63,6 +63,13 @@ auth-demo:
 auth-demo-tls:
     go run ./examples/auth -tls
 
+# Run the fully-charged deployable server: vault encryption+compression, the
+# extension bundle + a custom SQL function, every transport (h2/TLS + h3/QUIC +
+# dev extras), every auth method, control plane, limits, and a vault meta store.
+# Usage: just charged -hosts your.host,203.0.113.10   (binds 0.0.0.0; Ctrl-C to stop)
+charged *ARGS:
+    go run ./examples/charged-server {{ARGS}}
+
 # Two-module showcase, run locally as a smoke test: start the fully-charged server
 # (encryption+compression, all auth/transports, extensions, a custom function),
 # run the remote tour against it over TLS+mTLS, then stop the server. In a real
@@ -72,11 +79,11 @@ showcase:
     set -euo pipefail
     dir=$(mktemp -d)
     trap 'kill "${srv:-0}" 2>/dev/null || true; rm -rf "$dir"' EXIT
-    (cd ../examples/quicsql-charged-server && go build -o "$dir/charged" .)
+    (cd ../../sqlite/examples/quicsql-charged-server && go build -o "$dir/charged" .)
     "$dir/charged" -data "$dir/data" -hosts localhost,127.0.0.1 >"$dir/server.log" 2>&1 &
     srv=$!
     for _ in $(seq 1 40); do curl -sf http://127.0.0.1:7775/_health >/dev/null 2>&1 && break; sleep 0.25; done
-    (cd ../examples/quicsql-remote-tour && go run . -addr localhost:7777)
+    (cd ../../sqlite/examples/quicsql-remote-tour && go run . -addr localhost:7777)
 
 # LiteORM Studio (browser DB admin GUI) driving a REMOTE quicSQL database: starts
 # an in-process quicSQL server, seeds it, and serves the studio at
@@ -84,7 +91,7 @@ showcase:
 # studio does travels over the wire to quicSQL. `just studio -smoke` self-tests
 # the API round trip and exits instead of serving.
 studio *ARGS:
-    cd ../examples/quicsql-studio && go run . {{ARGS}}
+    cd ../../sqlite/examples/quicsql-studio && go run . {{ARGS}}
 
 # Lint: fmt-check + vet + staticcheck + golangci-lint + modernize (matches CI).
 # fmt-check runs first — cheapest, and the most common local-only-push CI failure.
@@ -106,8 +113,8 @@ staticcheck:
 # with the rest of gosqlite. Same PATH-independent shape as staticcheck.
 golangci:
     @bin=$(command -v golangci-lint || echo "$(go env GOPATH)/bin/golangci-lint"); \
-    if [ -x "$bin" ]; then "$bin" run --timeout 5m --config ../.golangci.yml; \
-    else go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --timeout 5m --config ../.golangci.yml; fi
+    if [ -x "$bin" ]; then "$bin" run --timeout 5m --config .golangci.yml; \
+    else go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --timeout 5m --config .golangci.yml; fi
 
 # gopls modernize: catches Go-version-bump idioms. Run via `go run` so
 # contributors need no separate install. `^go: ` strips Go's auto-toolchain

@@ -14,7 +14,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 const (

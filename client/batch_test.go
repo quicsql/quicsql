@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
+	"quicsql.net/client"
+	"quicsql.net/config"
 )
 
 // TestBatch runs several statements in one request and verifies they all execute

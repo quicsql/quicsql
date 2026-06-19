@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"gosqlite.org"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 const schema = `

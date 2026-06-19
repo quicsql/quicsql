@@ -18,7 +18,7 @@ import (
 	"os"
 	"time"
 
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 // devCertValidity is how long a generated self-signed (dev-only) cert is valid.

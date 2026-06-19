@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/httpapi"
-	"gosqlite.org/server/limits"
-	"gosqlite.org/server/obs"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/httpapi"
+	"quicsql.net/limits"
+	"quicsql.net/obs"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
 )
 
 func obsHandler(t *testing.T, opts ...httpapi.Option) *httpapi.Handler {

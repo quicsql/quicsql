@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"gosqlite.org/server/config"
-	_ "gosqlite.org/server/extensions" // curated, network-safe extension bundle (regexp, vec0, fts5, …)
-	"gosqlite.org/server/serverd"
+	"quicsql.net/config"
+	_ "quicsql.net/extensions" // curated, network-safe extension bundle (regexp, vec0, fts5, …)
+	"quicsql.net/serverd"
 )
 
 const shutdownGrace = 10 * time.Second

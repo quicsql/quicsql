@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
 )
 
 func testDB(t *testing.T) (*registry.DB, func()) {

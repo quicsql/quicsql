@@ -15,14 +15,14 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/httpapi"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
-	"gosqlite.org/server/session"
-	"gosqlite.org/server/transport"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/httpapi"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
+	"quicsql.net/session"
+	"quicsql.net/transport"
 )
 
 func newMatrixHandler(t *testing.T) http.Handler {

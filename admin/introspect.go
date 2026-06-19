@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"time"
 
-	"gosqlite.org/server/session"
+	"quicsql.net/session"
 )
 
 // handleInfo reports server-level state (uptime, goroutines, memory, database and

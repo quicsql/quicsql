@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"gosqlite.org/crypto/keyring"
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 func fileResolver(t *testing.T, files map[string][]byte) Resolver {

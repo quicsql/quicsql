@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"gosqlite.org"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // securityOnce guards the process-global authorizer registration.

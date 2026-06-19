@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/meta"
-	"gosqlite.org/server/secret"
+	"quicsql.net/config"
+	"quicsql.net/meta"
+	"quicsql.net/secret"
 )
 
 func openStore(t *testing.T) *meta.Store {

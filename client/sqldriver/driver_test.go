@@ -1,4 +1,4 @@
-package quicsqldriver_test
+package sqldriver_test
 
 import (
 	"context"
@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/serverd"
+	"quicsql.net/config"
+	"quicsql.net/serverd"
 
-	_ "gosqlite.org/server/client/quicsqldriver"
+	_ "quicsql.net/client/sqldriver"
 )
 
 func freeTCP(t *testing.T) string {

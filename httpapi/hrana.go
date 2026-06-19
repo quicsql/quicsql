@@ -11,9 +11,9 @@ import (
 	"strconv"
 
 	"gosqlite.org"
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/session"
+	"quicsql.net/authz"
+	"quicsql.net/engine"
+	"quicsql.net/session"
 )
 
 // handlePipeline serves Hrana's POST /v2|v3/pipeline: it resolves the stream's

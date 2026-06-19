@@ -26,10 +26,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"gosqlite.org/crypto/keyring"
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/internal/httpjson"
-	"gosqlite.org/server/secret"
+	"quicsql.net/authz"
+	"quicsql.net/config"
+	"quicsql.net/internal/httpjson"
+	"quicsql.net/secret"
 )
 
 // Authenticator holds the compiled credential directory shared by every

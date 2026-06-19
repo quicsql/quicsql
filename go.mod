@@ -1,4 +1,4 @@
-module gosqlite.org/server
+module quicsql.net
 
 go 1.26.0
 
@@ -38,14 +38,17 @@ require (
 	modernc.org/sqlite v1.52.0 // indirect
 )
 
-// Dev convenience so this nursery module builds against the checkout it lives in;
-// ignored by consumers once quicSQL is extracted to its own repo.
-replace gosqlite.org => ..
+// Dev convenience so quicSQL builds against the sibling gosqlite checkout during
+// co-development. The path holds whether resolved via the .quicsql symlink in the
+// gosqlite repo or the real checkout — both sit two levels under the shared
+// parent, so ../../sqlite reaches gosqlite either way. Consumers override these
+// with their own replaces; a real release drops them for published versions.
+replace gosqlite.org => ../../sqlite
 
-replace gosqlite.org/vfs/vault => ../vfs/vault
+replace gosqlite.org/vfs/vault => ../../sqlite/vfs/vault
 
-replace gosqlite.org/vfs/crypto => ../vfs/crypto
+replace gosqlite.org/vfs/crypto => ../../sqlite/vfs/crypto
 
-replace gosqlite.org/crypto/keyring => ../crypto/keyring
+replace gosqlite.org/crypto/keyring => ../../sqlite/crypto/keyring
 
-replace gosqlite.org/blobstore => ../blobstore
+replace gosqlite.org/blobstore => ../../sqlite/blobstore

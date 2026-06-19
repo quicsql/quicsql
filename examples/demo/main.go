@@ -28,9 +28,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/serverd"
+	"quicsql.net/client"
+	"quicsql.net/config"
+	"quicsql.net/serverd"
 )
 
 func main() {

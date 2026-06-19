@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // TestReadOnlyConnBlocksWrites verifies the connection-level read-only guard: a

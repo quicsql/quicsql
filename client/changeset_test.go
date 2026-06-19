@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
+	"quicsql.net/client"
+	"quicsql.net/config"
 )
 
 // TestChangesetCaptureApply proves the SESSION/changeset wire protocol: capture a

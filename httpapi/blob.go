@@ -9,7 +9,7 @@ import (
 
 	sqlite "gosqlite.org"
 	"gosqlite.org/blobstore"
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 // handleBlob serves the large-object endpoints backed by gosqlite's blobstore

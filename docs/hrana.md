@@ -87,7 +87,7 @@ The statements run in order on one connection, each autocommitting; you get one 
 Most applications never call the Hrana client directly — they use the `database/sql` driver, which uses the native endpoint for autocommit statements and **transparently opens a Hrana session for `BeginTx`**:
 
 ```go
-import _ "gosqlite.org/server/client/quicsqldriver"
+import _ "quicsql.net/client/sqldriver"
 
 db, _ := sql.Open("quicsql", "quicsql://db.example.com:7777/app?transport=h2&token="+tok)
 
@@ -102,7 +102,7 @@ if _, err := tx.ExecContext(ctx, "UPDATE …"); err != nil {
 return tx.Commit()                       // ← commits and closes the session
 ```
 
-For mTLS or keyring auth (which a DSN cannot express), build a `*client.Client` as in the [mTLS guide](mtls-production.md) and pass it to `quicsqldriver.OpenConnectorClient(c, "app")`, then `sql.OpenDB(...)`. Everything above works identically. LiteORM's transactions ride this same path — see the LiteORM-over-quicSQL example.
+For mTLS or keyring auth (which a DSN cannot express), build a `*client.Client` as in the [mTLS guide](mtls-production.md) and pass it to `sqldriver.OpenConnectorClient(c, "app")`, then `sql.OpenDB(...)`. Everything above works identically. LiteORM's transactions ride this same path — see the LiteORM-over-quicSQL example.
 
 ## Auth over Hrana
 

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	sqlite "gosqlite.org"
-	"gosqlite.org/server/config"
+	"quicsql.net/config"
 )
 
 func TestPragmasPreset(t *testing.T) {

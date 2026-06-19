@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"gosqlite.org/server/secret"
+	"quicsql.net/secret"
 )
 
 // errInvalidCredential marks a credential that was presented but did not verify

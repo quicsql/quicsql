@@ -6,9 +6,9 @@ import (
 	"io"
 
 	"gosqlite.org"
-	"gosqlite.org/server/config"
 	"gosqlite.org/vfs/memdb"
 	"gosqlite.org/vfs/mvcc"
+	"quicsql.net/config"
 )
 
 // vfsBackend opens an in-memory registered-VFS database (mvcc or memdb). Each

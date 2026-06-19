@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"gosqlite.org/server/backend"
+	"quicsql.net/backend"
 )
 
 // ErrUnknownDB is returned (wrapped) when a name has no configured backend.

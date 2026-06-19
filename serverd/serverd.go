@@ -12,9 +12,9 @@
 // the network. Register everything BEFORE calling Run:
 //
 //	import (
-//	    _ "gosqlite.org/server/extensions"   // the curated, network-safe bundle
+//	    _ "quicsql.net/extensions"   // the curated, network-safe bundle
 //	    sqlite "gosqlite.org"
-//	    "gosqlite.org/server/serverd"
+//	    "quicsql.net/serverd"
 //	)
 //
 //	func main() {
@@ -39,20 +39,20 @@ import (
 	"net/http"
 	"time"
 
-	"gosqlite.org/server/admin"
-	"gosqlite.org/server/auth"
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/httpapi"
-	"gosqlite.org/server/limits"
-	"gosqlite.org/server/meta"
-	"gosqlite.org/server/obs"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
-	"gosqlite.org/server/session"
-	"gosqlite.org/server/transport"
+	"quicsql.net/admin"
+	"quicsql.net/auth"
+	"quicsql.net/authz"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/httpapi"
+	"quicsql.net/limits"
+	"quicsql.net/meta"
+	"quicsql.net/obs"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
+	"quicsql.net/session"
+	"quicsql.net/transport"
 )
 
 const (

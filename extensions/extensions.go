@@ -4,7 +4,7 @@
 // SQL — REGEXP, FTS5 (built into the engine), vec0 vector search, spellfix1,
 // r-tree, and a spread of pure-compute functions.
 //
-//	import _ "gosqlite.org/server/extensions"
+//	import _ "quicsql.net/extensions"
 //
 // The default quicsql daemon imports this. An in-process embedder that wants the
 // same batteries imports it too; one that wants a different set imports the

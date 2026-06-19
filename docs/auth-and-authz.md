@@ -257,7 +257,7 @@ Read this the way the server does: `tourist` (bearer or mTLS) is read-write on `
 The client library (or the `database/sql` driver) presents credentials like this. Note the two that a URL **cannot** carry:
 
 ```go
-import "gosqlite.org/server/client"
+import "quicsql.net/client"
 
 // bearer over TLS (verify the private CA)
 c := client.H2TLS("host:7777", false, client.WithRootCA(pool), client.WithBearer(rawToken))
@@ -272,7 +272,7 @@ c := client.H2TLS("host:7777", false, client.WithRootCA(pool), client.WithClient
 c := client.H2TLS("host:7777", false, client.WithRootCA(pool), client.WithEd25519(pubLine, priv))
 ```
 
-Through the `database/sql` driver, a DSN can carry the two credentials expressible as text — `?token=<bearer>` or `?user=<u>&password=<p>` — but **mTLS and keyring cannot be written in a URL** (a certificate and a private key are not URL parameters). For those, build a `*client.Client` as above and hand it to `quicsqldriver.OpenConnectorClient`.
+Through the `database/sql` driver, a DSN can carry the two credentials expressible as text — `?token=<bearer>` or `?user=<u>&password=<p>` — but **mTLS and keyring cannot be written in a URL** (a certificate and a private key are not URL parameters). For those, build a `*client.Client` as above and hand it to `sqldriver.OpenConnectorClient`.
 
 ## Identity also scopes the rate limit
 

@@ -5,11 +5,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/engine"
-	"gosqlite.org/server/registry"
-	"gosqlite.org/server/secret"
+	"quicsql.net/backend"
+	"quicsql.net/config"
+	"quicsql.net/engine"
+	"quicsql.net/registry"
+	"quicsql.net/secret"
 )
 
 // TestPhase0_MultiplexAcrossBackends is the Phase 0 exit criterion: open plain,

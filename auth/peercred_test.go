@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"gosqlite.org/server/authz"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/secret"
+	"quicsql.net/authz"
+	"quicsql.net/config"
+	"quicsql.net/secret"
 )
 
 // TestPeercredOverUnixSocket exercises the real SO_PEERCRED/LOCAL_PEERCRED path:

@@ -1,0 +1,58 @@
+# Reference config for the standalone `quicsql` daemon, mirroring what main.go
+# composes in Go. The Go program is authoritative — it also registers the custom
+# `showcase_greet` SQL function (which a YAML cannot do) and derives the fixed dev
+# TLS/keys. To run THIS file with the real daemon you bring your own key/cert files:
+#
+#   quicsql --config charged.yaml
+#
+# The daemon binary must import an extension set (cmd/quicsql imports the bundle).
+# Custom SQL functions require a custom main() that calls serverd.Run (see main.go).
+
+server:
+  data_dir: ./data
+  meta_store: {backend: vault, path: _meta.vault, key: keys:meta}   # encrypted meta store
+
+secrets:
+  - {name: keys, type: file, dir: ./data/keys}       # keys:<name> reads ./data/keys/<name>
+
+tls:
+  charged:
+    mode: files                                      # bring a CA-signed leaf + the client-CA
+    cert: ./data/tls/leaf.crt
+    key: ./data/tls/leaf.key
+    client_ca: ./data/tls/ca.crt                     # enables mTLS
+    min_version: "1.2"
+
+# h2/TLS + h3/QUIC are the secure transports; h1/h2c/unix are dev extras.
+listeners:
+  - {name: h2,   transport: h2,   address: 0.0.0.0:7777, tls: charged, auth: [mtls, bearer, keyring, password]}
+  - {name: h3,   transport: h3,   address: 0.0.0.0:7778, tls: charged, auth: [mtls, bearer, keyring, password]}
+  - {name: h1,   transport: h1,   address: 0.0.0.0:7775, auth: [bearer, password, none]}
+  - {name: h2c,  transport: h2c,  address: 0.0.0.0:7776, auth: [bearer, password, none]}
+  - {name: unix, transport: unix, address: ./data/quicsql.sock, socket_mode: "0600", auth: [peercred, none]}
+
+auth:
+  principals:
+    - {name: tourist, methods: [{bearer: {token_hash: "<sha256-of-token>"}}, {mtls: {subject_cn: tourist}}]}
+    - {name: analyst, methods: [{password: {user: analyst, password_hash: "<bcrypt>"}}]}
+    - {name: signer,  methods: [{keyring: {ed25519: "ssh-ed25519 AAAA... "}}]}
+
+databases:
+  - name: catalog                                    # encrypted + compressed at rest
+    backend: vault
+    path: catalog.vault
+    vault: {compression: best, cipher: adiantum, key: keys:catalog}
+    grants: [{principal: tourist, level: admin}]
+  - name: app
+    backend: file
+    path: app.db
+    mode: rwc
+    pragmas_preset: recommended
+    grants: [{principal: tourist, level: read-write}, {principal: analyst, level: read-only}, {principal: signer, level: read-write}]
+  - name: cache
+    backend: memory-shared
+    grants: [{principal: tourist, level: read-write}, {principal: "*", level: read-only}]
+
+control_plane: {enabled: true, admins: [tourist]}
+limits: {statement_timeout: 30s, max_concurrent_per_db: 512, rate: {per_principal_rps: 100}}
+logging: {slow_threshold: 200ms}

@@ -1,8 +1,8 @@
-// Package quicsqldriver registers a database/sql driver named "quicsql" that
+// Package sqldriver registers a database/sql driver named "quicsql" that
 // speaks to a quicSQL server, so ordinary database/sql code connects to a remote
 // database the same way it opens a local one:
 //
-//	import _ "gosqlite.org/server/client/quicsqldriver"
+//	import _ "quicsql.net/client/sqldriver"
 //	db, _ := sql.Open("quicsql", "quicsql://127.0.0.1:7775/users?transport=h1")
 //	db.QueryRowContext(ctx, "SELECT count(*) FROM users").Scan(&n)
 //
@@ -10,7 +10,7 @@
 // dispatch the same DSN, so callers that already use gosqlite for local files can
 // point at a server by DSN alone:
 //
-//	import _ "gosqlite.org/server/client/quicsqldriver"
+//	import _ "quicsql.net/client/sqldriver"
 //	db, _ := sql.Open("sqlite", "quicsql://127.0.0.1:7775/users?transport=h1")
 //
 // DSN: one scheme, transport as a parameter.
@@ -29,7 +29,7 @@
 // Transactions are supported: BeginTx opens a session-pinned Hrana stream so that
 // every statement in the transaction (and SAVEPOINT nesting) runs on the same
 // server-side connection. Autocommit statements use the faster stateless endpoint.
-package quicsqldriver
+package sqldriver
 
 import (
 	"context"
@@ -44,7 +44,7 @@ import (
 	"sync"
 
 	sqlite "gosqlite.org"
-	"gosqlite.org/server/client"
+	"quicsql.net/client"
 )
 
 func init() {

@@ -22,8 +22,8 @@ import (
 	"time"
 
 	sqlite "gosqlite.org"
-	"gosqlite.org/server/backend"
-	"gosqlite.org/server/registry"
+	"quicsql.net/backend"
+	"quicsql.net/registry"
 )
 
 var (

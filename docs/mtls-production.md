@@ -150,7 +150,7 @@ import (
 	"crypto/x509"
 	"os"
 
-	"gosqlite.org/server/client"
+	"quicsql.net/client"
 )
 
 caPEM, _ := os.ReadFile("server-ca.crt")          // the CA that signed the SERVER leaf
@@ -165,7 +165,7 @@ c := client.H2TLS("db.example.com:7777", false,   // false = verify the server (
 defer c.Close()
 ```
 
-A DSN cannot carry a certificate and a private key, so the `database/sql` driver reaches mTLS by building this `*client.Client` and handing it to `quicsqldriver.OpenConnectorClient(c, "app")` — see the [Hrana guide](hrana.md) and the driver docs.
+A DSN cannot carry a certificate and a private key, so the `database/sql` driver reaches mTLS by building this `*client.Client` and handing it to `sqldriver.OpenConnectorClient(c, "app")` — see the [Hrana guide](hrana.md) and the driver docs.
 
 ## Testing from the command line
 

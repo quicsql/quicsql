@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	sqlite "gosqlite.org" // registers the local "sqlite" driver for the round-trip
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
+	"quicsql.net/client"
+	"quicsql.net/config"
 )
 
 // TestExportRoundTrip proves the /export endpoint returns a real SQLite image: it

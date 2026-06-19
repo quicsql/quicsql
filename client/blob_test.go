@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
+	"quicsql.net/client"
+	"quicsql.net/config"
 )
 
 // TestBlobRoundTrip proves the whole-object blob wire protocol: create an object,

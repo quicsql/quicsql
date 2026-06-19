@@ -9,7 +9,7 @@ import (
 	"math"
 	"strings"
 
-	"gosqlite.org/server/engine"
+	"quicsql.net/engine"
 )
 
 // encodeValue maps a cell to its native-JSON form: null/number/string bare, and

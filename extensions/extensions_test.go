@@ -8,10 +8,10 @@ import (
 	"net"
 	"testing"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
-	_ "gosqlite.org/server/extensions" // registers the bundle on every server connection
-	"gosqlite.org/server/serverd"
+	"quicsql.net/client"
+	"quicsql.net/config"
+	_ "quicsql.net/extensions" // registers the bundle on every server connection
+	"quicsql.net/serverd"
 )
 
 func freeTCP(t *testing.T) string {

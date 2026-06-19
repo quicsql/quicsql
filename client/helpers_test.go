@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/serverd"
+	"quicsql.net/config"
+	"quicsql.net/serverd"
 )
 
 // runServer starts an in-process quicSQL server from cfg (logs discarded) and

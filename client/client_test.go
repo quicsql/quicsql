@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosqlite.org/server/client"
-	"gosqlite.org/server/config"
-	"gosqlite.org/server/serverd"
+	"quicsql.net/client"
+	"quicsql.net/config"
+	"quicsql.net/serverd"
 )
 
 func freeTCP(t *testing.T) string {
