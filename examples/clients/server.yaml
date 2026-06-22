@@ -1,0 +1,36 @@
+# The shared server for the client-language examples (examples/clients/*).
+#
+#   go run ../../cmd/quicsql --config server.yaml     (from this directory)
+#
+# One database ("app"), one principal ("dev") authenticating with the bearer
+# token "dev-token" — so every example also demonstrates auth. The listener
+# accepts ONLY bearer (no anonymous fallback): a missing/wrong token is a 401.
+#
+# The listener binds 0.0.0.0, not loopback, because the PHP examples run inside
+# Docker and reach the host as host.docker.internal. That exposure is bounded:
+# principals exist, so open mode is off and every request must present the token.
+# Don't copy the 0.0.0.0 bind into production configs without real credentials.
+
+server:
+  data_dir: ./data
+
+listeners:
+  - { name: h1, transport: h1, address: 0.0.0.0:7775, auth: [bearer] }
+
+auth:
+  principals:
+    - name: dev
+      methods:
+        # sha256("dev-token") as a hex literal. Real configs should reference a
+        # secrets source ("keys:<name>") instead of inlining, but the value is
+        # a hash — the token itself never appears in config.
+        - bearer: { token_hash: "c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712" }
+
+databases:
+  - name: app
+    backend: file
+    path: app.db
+    mode: rwc
+    pragmas_preset: recommended
+    grants:
+      - { principal: dev, level: read-write }

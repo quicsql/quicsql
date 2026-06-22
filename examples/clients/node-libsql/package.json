@@ -1,0 +1,11 @@
+{
+  "name": "quicsql-example-node-libsql",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.17"
+  }
+}

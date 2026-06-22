@@ -1,0 +1,4 @@
+sqlalchemy>=2.0
+# The official SQLAlchemy dialect for libSQL; connects to quicSQL over plain
+# HTTP (sqlite+libsql://host:port/db — https only with ?secure=true).
+sqlalchemy-libsql>=0.2.0

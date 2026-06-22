@@ -1,0 +1,4 @@
+# The current official libSQL binding. (The older `libsql-client` and
+# `libsql-experimental` packages are deprecated — and libsql-client's HTTP mode
+# speaks a pre-Hrana protocol that will NOT work against quicSQL.)
+libsql>=0.1.11
