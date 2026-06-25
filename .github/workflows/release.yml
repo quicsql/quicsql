@@ -1,0 +1,66 @@
+# Release pipeline for github.com/quicsql/quicsql: pushing a v* tag runs
+# GoReleaser (config: .goreleaser.yaml), producing cross-platform archives,
+# checksums, a GitHub release, and multi-arch images at ghcr.io/quicsql/quicsql.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release + upload archives
+  packages: write # push images to ghcr.io/quicsql/quicsql
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the changelog and version templates need them.
+          fetch-depth: 0
+
+      # HARD GATE — keep this the first step after checkout. During
+      # co-development go.mod replaces gosqlite.org (and vfs/vault, vfs/crypto,
+      # crypto/keyring, blobstore) with ../../sqlite/… sibling paths. A release
+      # built that way would either fail outright (the runner has no sibling
+      # checkout) or — far worse, if someone "fixed" that by vendoring — ship
+      # binaries built from unpublished, unpinned code. A real release must pin
+      # published gosqlite.org versions, so refuse to continue while any
+      # filesystem replace is present. (CI only warns on this; the tag is where
+      # it becomes non-negotiable.)
+      - name: Gate — refuse to release with filesystem replace directives
+        run: |
+          if grep -En '=>[[:space:]]*\.\.?/' go.mod; then
+            echo "::error file=go.mod::go.mod still contains local filesystem replace directives. Drop them and pin published gosqlite.org versions (go get gosqlite.org@vX.Y.Z … && go mod tidy) before tagging a release."
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # Go version pinned in go.mod, nowhere else
+          cache: true
+
+      # QEMU + buildx for the multi-arch docker flow: GoReleaser builds the
+      # arm64 image on this amd64 runner. Today's Dockerfile has no RUN steps
+      # so emulation is not strictly exercised, but registering QEMU keeps the
+      # build working the day one is added.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          # Track the latest GoReleaser v2 — matches `version: 2` in
+          # .goreleaser.yaml (which uses v2.6+ keys like archives.formats).
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
