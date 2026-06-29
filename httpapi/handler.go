@@ -27,26 +27,34 @@ import (
 )
 
 const (
-	defaultMaxBody = 8 << 20 // 8 MiB request-body cap (query/pipeline/changeset)
-	defaultMaxBlob = 1 << 30 // 1 GiB cap for a single streamed large object
+	defaultMaxBody   = 8 << 20 // 8 MiB request-body cap (query/pipeline/changeset)
+	defaultMaxBlob   = 1 << 30 // 1 GiB cap for a single streamed large object
+	defaultMaxExport = 1 << 30 // 1 GiB cap on an /export image (materialized whole in RAM)
+
+	// maxConcurrentExports bounds how many exports materialize a full DB image in
+	// RAM at once (across all databases), on top of the per-db meter — so a fleet
+	// of concurrent exports can't OOM the process.
+	maxConcurrentExports = 4
 )
 
 // Handler is the quicSQL HTTP handler. The auth middleware (package auth) has
 // already attached the request's principal to the context by the time a request
 // reaches here; the handler enforces the per-database capability via policy.
 type Handler struct {
-	reg      *registry.Registry
-	eng      *engine.Engine
-	route    config.Routing
-	policy   *authz.Policy
-	admin    http.Handler // control plane at /_admin (nil = disabled)
-	metrics  obs.Metrics  // request counters/latency (nil = disabled)
-	limiter  *limits.Limiter
-	maxBody  int64
-	maxBlob  int64         // cap for a single streamed large object (blob write)
-	stmtTO   time.Duration // per-request statement timeout (0 = none)
-	log      *slog.Logger
-	sessions *session.Store // Hrana interactive-transaction streams (nil = disabled)
+	reg       *registry.Registry
+	eng       *engine.Engine
+	route     config.Routing
+	policy    *authz.Policy
+	admin     http.Handler // control plane at /_admin (nil = disabled)
+	metrics   obs.Metrics  // request counters/latency (nil = disabled)
+	limiter   *limits.Limiter
+	maxBody   int64
+	maxBlob   int64         // cap for a single streamed large object (blob write)
+	maxExport int64         // cap for a full-database /export image (0 = uncapped)
+	exportSem chan struct{} // global concurrency slot for in-RAM exports
+	stmtTO    time.Duration // per-request statement timeout (0 = none)
+	log       *slog.Logger
+	sessions  *session.Store // Hrana interactive-transaction streams (nil = disabled)
 	// blobStores caches an opened *blobstore.Store per (db handle, name) so blob
 	// ops don't re-open (and re-run the idempotent CREATE TABLE) per request, and
 	// so a provisioned store's options survive across ops. Keyed like the local
@@ -75,6 +83,12 @@ func WithMaxBlob(n int64) Option {
 			h.maxBlob = n
 		}
 	}
+}
+
+// WithMaxExport caps a full-database /export image (bytes), which is materialized
+// whole in RAM. Non-positive disables the cap (unbounded).
+func WithMaxExport(n int64) Option {
+	return func(h *Handler) { h.maxExport = n }
 }
 
 // WithStatementTimeout bounds each request's execution via the request context.
@@ -128,12 +142,17 @@ func WithLimiter(l *limits.Limiter) Option {
 // New builds the handler. When neither path nor host routing is configured, path
 // routing is enabled by default.
 func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts ...Option) *Handler {
-	h := &Handler{reg: reg, eng: eng, route: route, policy: authz.NewPolicy(true), maxBody: defaultMaxBody, maxBlob: defaultMaxBlob, log: slog.Default()}
+	h := &Handler{reg: reg, eng: eng, route: route, policy: authz.NewPolicy(true), maxBody: defaultMaxBody, maxBlob: defaultMaxBlob, maxExport: defaultMaxExport, exportSem: make(chan struct{}, maxConcurrentExports), log: slog.Default()}
 	if !h.route.ByPath && !h.route.ByHost {
 		h.route.ByPath = true
 	}
 	for _, o := range opts {
 		o(h)
+	}
+	// Evict cached blob stores when the registry closes a handle (idle-reaped,
+	// detached, or reserved) so the cache doesn't pin a closed *sqlite.DB.
+	if h.reg != nil {
+		h.reg.SetCloseHook(h.forgetBlobStores)
 	}
 	return h
 }
@@ -369,6 +388,12 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeAPIError(w, status, apiError{Message: msg})
 }
 
+// writeDenied writes the standard read-only 403 — a write attempted by a
+// read-only principal. Single source so every endpoint's wording matches.
+func writeDenied(w http.ResponseWriter) {
+	writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
+}
+
 // writeAPIError is the single error-envelope writer; every error response goes
 // through here so the schema is defined once.
 func writeAPIError(w http.ResponseWriter, status int, e apiError) {
@@ -398,7 +423,7 @@ func (h *Handler) writeRunError(w http.ResponseWriter, err error) {
 	case errors.Is(err, engine.ErrDenied):
 		writeErr(w, http.StatusForbidden, err.Error())
 	case engine.IsNotAuthorized(err):
-		writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
+		writeDenied(w)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		writeErr(w, http.StatusGatewayTimeout, "statement timed out")
 	default:

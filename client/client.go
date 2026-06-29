@@ -146,7 +146,7 @@ func Unix(socketPath string, opts ...Option) *Client {
 }
 
 func tlsConfig(insecure bool, nextProtos []string, o *clientOpts) *tls.Config {
-	cfg := &tls.Config{InsecureSkipVerify: insecure, NextProtos: nextProtos, RootCAs: o.rootCA}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure, NextProtos: nextProtos, RootCAs: o.rootCA}
 	if o.cert != nil {
 		cfg.Certificates = []tls.Certificate{*o.cert}
 	}

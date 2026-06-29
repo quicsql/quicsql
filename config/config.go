@@ -10,16 +10,16 @@ import "time"
 // Config is the whole server configuration. Only the Phase 0 subset is wired to
 // behavior today; the remaining sections are parsed so the schema is stable.
 type Config struct {
-	Server       Server                `yaml:"server"`
-	Secrets      []SecretSource        `yaml:"secrets"`
-	Routing      Routing               `yaml:"routing"`
-	TLS          map[string]TLSProfile `yaml:"tls"`
-	Listeners    []Listener            `yaml:"listeners"`
-	Auth         Auth                  `yaml:"auth"`
-	Databases    []Database            `yaml:"databases"`
-	ControlPlane ControlPlane          `yaml:"control_plane"`
-	Limits       Limits                `yaml:"limits"`
-	Logging      Logging               `yaml:"logging"`
+	Server       Server                `yaml:"server" json:"server"`
+	Secrets      []SecretSource        `yaml:"secrets" json:"secrets"`
+	Routing      Routing               `yaml:"routing" json:"routing"`
+	TLS          map[string]TLSProfile `yaml:"tls" json:"tls"`
+	Listeners    []Listener            `yaml:"listeners" json:"listeners"`
+	Auth         Auth                  `yaml:"auth" json:"auth"`
+	Databases    []Database            `yaml:"databases" json:"databases"`
+	ControlPlane ControlPlane          `yaml:"control_plane" json:"control_plane"`
+	Limits       Limits                `yaml:"limits" json:"limits"`
+	Logging      Logging               `yaml:"logging" json:"logging"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
 }
@@ -30,8 +30,8 @@ type Config struct {
 // maintenance on any database; a principal holding an `admin` grant on one
 // database may run maintenance on that database only.
 type ControlPlane struct {
-	Enabled bool     `yaml:"enabled"`
-	Admins  []string `yaml:"admins"`
+	Enabled bool     `yaml:"enabled" json:"enabled"`
+	Admins  []string `yaml:"admins" json:"admins"`
 }
 
 // Warnings returns human-readable notes about config that parsed but has no
@@ -40,8 +40,8 @@ type ControlPlane struct {
 func (c *Config) Warnings() []string { return c.warnings }
 
 type Server struct {
-	DataDir   string    `yaml:"data_dir"`
-	MetaStore MetaStore `yaml:"meta_store"`
+	DataDir   string    `yaml:"data_dir" json:"data_dir"`
+	MetaStore MetaStore `yaml:"meta_store" json:"meta_store"`
 }
 
 // MetaStore is the server-owned runtime registry + audit + idempotency state.
@@ -50,158 +50,162 @@ type Server struct {
 // plan). A vault meta store without a key is a plain (unencrypted) container,
 // warned at startup.
 type MetaStore struct {
-	Backend string `yaml:"backend"` // vault (default) | file
-	Path    string `yaml:"path"`
-	Key     string `yaml:"key"` // secret ref for the vault backend (raw cipher key)
+	Backend string `yaml:"backend" json:"backend"` // vault (default) | file
+	Path    string `yaml:"path" json:"path"`
+	Key     string `yaml:"key" json:"key"` // secret ref for the vault backend (raw cipher key)
 }
 
 // SecretSource declares one place key material can be read from. Every source
 // is unattended (env/file/kms) — there is deliberately no interactive unlock, so
 // the daemon starts without human interaction.
 type SecretSource struct {
-	Name     string `yaml:"name"`
-	Type     string `yaml:"type"` // env | file | kms
-	Dir      string `yaml:"dir"`
-	Endpoint string `yaml:"endpoint"`
+	Name     string `yaml:"name" json:"name"`
+	Type     string `yaml:"type" json:"type"` // env | file | kms
+	Dir      string `yaml:"dir" json:"dir"`
+	Endpoint string `yaml:"endpoint" json:"endpoint"`
 }
 
 type Routing struct {
-	ByPath     bool   `yaml:"by_path"`
-	ByHost     bool   `yaml:"by_host"`
-	HostSuffix string `yaml:"host_suffix"`
-	DefaultDB  string `yaml:"default_db"`
+	ByPath     bool   `yaml:"by_path" json:"by_path"`
+	ByHost     bool   `yaml:"by_host" json:"by_host"`
+	HostSuffix string `yaml:"host_suffix" json:"host_suffix"`
+	DefaultDB  string `yaml:"default_db" json:"default_db"`
 }
 
 type Listener struct {
-	Name       string   `yaml:"name"`
-	Transport  string   `yaml:"transport"` // h1 | h2 | h2c | h3 | unix
-	Address    string   `yaml:"address"`
-	TLS        string   `yaml:"tls"` // name of a tls profile (required for h2/h3)
-	Auth       []string `yaml:"auth"`
-	SocketMode string   `yaml:"socket_mode"`
+	Name       string   `yaml:"name" json:"name"`
+	Transport  string   `yaml:"transport" json:"transport"` // h1 | h2 | h2c | h3 | unix
+	Address    string   `yaml:"address" json:"address"`
+	TLS        string   `yaml:"tls" json:"tls"` // name of a tls profile (required for h2/h3)
+	Auth       []string `yaml:"auth" json:"auth"`
+	SocketMode string   `yaml:"socket_mode" json:"socket_mode"`
 	// Advertise (h3 only) opts this HTTP/3 endpoint into Alt-Svc advertising: the
 	// TCP transports (h1/h2/h2c) then emit `Alt-Svc: h3=":<port>"` so a client that
 	// connected over TCP can discover and upgrade to h3 (as browsers do with :443).
 	// Off by default — h3 is served regardless; this only advertises it.
-	Advertise bool `yaml:"advertise"`
+	Advertise bool `yaml:"advertise" json:"advertise"`
 }
 
 // TLSProfile describes how to obtain the TLS certificate for a listener.
 type TLSProfile struct {
-	Mode       string        `yaml:"mode"`        // files | self_signed | qip
-	Cert       string        `yaml:"cert"`        // files
-	Key        string        `yaml:"key"`         // files
-	ClientCA   string        `yaml:"client_ca"`   // mTLS (Phase 4)
-	MinVersion string        `yaml:"min_version"` // "1.2" | "1.3"
-	Hosts      []string      `yaml:"hosts"`       // self_signed SANs
-	Subdomain  string        `yaml:"subdomain"`   // qip
-	Refresh    time.Duration `yaml:"refresh"`     // qip reload interval
+	Mode       string        `yaml:"mode" json:"mode"`               // files | self_signed | qip
+	Cert       string        `yaml:"cert" json:"cert"`               // files
+	Key        string        `yaml:"key" json:"key"`                 // files
+	ClientCA   string        `yaml:"client_ca" json:"client_ca"`     // mTLS (Phase 4)
+	MinVersion string        `yaml:"min_version" json:"min_version"` // "1.2" | "1.3"
+	Hosts      []string      `yaml:"hosts" json:"hosts"`             // self_signed SANs
+	Subdomain  string        `yaml:"subdomain" json:"subdomain"`     // qip
+	Refresh    time.Duration `yaml:"refresh" json:"refresh"`         // qip reload interval
 }
 
 type Auth struct {
-	AuthorizedKeys string      `yaml:"authorized_keys"`
-	Principals     []Principal `yaml:"principals"`
-	SQLPolicy      SQLPolicy   `yaml:"sql_policy"`
+	AuthorizedKeys string      `yaml:"authorized_keys" json:"authorized_keys"`
+	Principals     []Principal `yaml:"principals" json:"principals"`
+	SQLPolicy      SQLPolicy   `yaml:"sql_policy" json:"sql_policy"`
 }
 
 type Principal struct {
-	Name    string           `yaml:"name"`
-	Methods []map[string]any `yaml:"methods"`
+	Name    string           `yaml:"name" json:"name"`
+	Methods []map[string]any `yaml:"methods" json:"methods"`
 }
 
 type SQLPolicy struct {
-	AllowAttach        bool     `yaml:"allow_attach"`
-	AllowLoadExtension bool     `yaml:"allow_load_extension"`
-	EnabledExtensions  []string `yaml:"enabled_extensions"`
+	AllowAttach        bool     `yaml:"allow_attach" json:"allow_attach"`
+	AllowLoadExtension bool     `yaml:"allow_load_extension" json:"allow_load_extension"`
+	EnabledExtensions  []string `yaml:"enabled_extensions" json:"enabled_extensions"`
 }
 
 // Database is one registry entry: a logical name mapped to a physical open.
 type Database struct {
-	Name string `yaml:"name"`
+	Name string `yaml:"name" json:"name"`
 	// Backend selects storage: file | memory | memory-shared | mvcc | memdb | vault.
-	Backend string `yaml:"backend"`
-	Path    string `yaml:"path"`
-	Mode    string `yaml:"mode"` // rw | ro | rwc
-	Pool    Pool   `yaml:"pool"`
+	Backend string `yaml:"backend" json:"backend"`
+	Path    string `yaml:"path" json:"path"`
+	Mode    string `yaml:"mode" json:"mode"` // rw | ro | rwc
+	Pool    Pool   `yaml:"pool" json:"pool"`
 	// PragmasPreset opts this database into a named pragma baseline the server
 	// applies when it opens connections: "" (default) is bare SQLite; "recommended"
 	// seeds the production preset (WAL + busy_timeout + foreign_keys). Explicit
 	// Pragmas keys override the preset. It is a server-side setting — a client
 	// cannot change a connection's configuration over the wire.
-	PragmasPreset string         `yaml:"pragmas_preset"`
-	Pragmas       map[string]any `yaml:"pragmas"`
-	Vault         *VaultConfig   `yaml:"vault"`
-	Grants        []Grant        `yaml:"grants"`
+	PragmasPreset string         `yaml:"pragmas_preset" json:"pragmas_preset"`
+	Pragmas       map[string]any `yaml:"pragmas" json:"pragmas"`
+	Vault         *VaultConfig   `yaml:"vault" json:"vault"`
+	Grants        []Grant        `yaml:"grants" json:"grants"`
 }
 
 type Pool struct {
-	MaxOpen     int           `yaml:"max_open"`
-	TxLock      string        `yaml:"tx_lock"` // deferred | immediate | exclusive
-	BusyTimeout time.Duration `yaml:"busy_timeout"`
+	MaxOpen     int           `yaml:"max_open" json:"max_open"`
+	TxLock      string        `yaml:"tx_lock" json:"tx_lock"` // deferred | immediate | exclusive
+	BusyTimeout time.Duration `yaml:"busy_timeout" json:"busy_timeout"`
 }
 
 // VaultConfig splits the vault.Options surface into OPEN-time (runtime) fields
 // and the create-only provisioning block, mirroring the API's own split.
 type VaultConfig struct {
-	Compression  string       `yaml:"compression"` // none | fastest | fast | default | better | best
-	Cipher       string       `yaml:"cipher"`      // adiantum | aes-xts
-	Key          string       `yaml:"key"`         // secret ref (raw-key mode)
-	Identities   []string     `yaml:"identities"`  // secret refs (recipient mode; first match wins)
-	WriteAs      string       `yaml:"write_as"`    // secret ref; omit ⇒ read-only at rest
-	Masters      []string     `yaml:"masters"`     // trust anchors at open
-	Authenticate bool         `yaml:"authenticate"`
-	Anchor       *Anchor      `yaml:"anchor"`
-	Create       *VaultCreate `yaml:"create"` // honored only when provisioning a new container
+	Compression  string       `yaml:"compression" json:"compression"` // none | fastest | fast | default | better | best
+	Cipher       string       `yaml:"cipher" json:"cipher"`           // adiantum | aes-xts
+	Key          string       `yaml:"key" json:"key"`                 // secret ref (raw-key mode)
+	Identities   []string     `yaml:"identities" json:"identities"`   // secret refs (recipient mode; first match wins)
+	WriteAs      string       `yaml:"write_as" json:"write_as"`       // secret ref; omit ⇒ read-only at rest
+	Masters      []string     `yaml:"masters" json:"masters"`         // trust anchors at open
+	Authenticate bool         `yaml:"authenticate" json:"authenticate"`
+	Anchor       *Anchor      `yaml:"anchor" json:"anchor"`
+	Create       *VaultCreate `yaml:"create" json:"create"` // honored only when provisioning a new container
 }
 
 // Anchor configures the optional rollback-resistance anchor (an external
 // monotonic counter). Only the file type is wired; tpm/kms are seams.
 type Anchor struct {
-	Type string `yaml:"type"` // file | tpm | kms
-	Path string `yaml:"path"`
+	Type string `yaml:"type" json:"type"` // file | tpm | kms
+	Path string `yaml:"path" json:"path"`
 }
 
 // VaultCreate is the create-only provisioning block, honored only when a new
 // container is minted: it defines the initial keyslot membership (recipients,
 // masters, writers, the signing master) and the on-disk geometry.
 type VaultCreate struct {
-	Recipients      []string `yaml:"recipients"`
-	Masters         []string `yaml:"masters"`
-	SignWith        string   `yaml:"sign_with"`
-	Writers         []string `yaml:"writers"`
-	PageSize        int      `yaml:"page_size"`
-	BlockSize       int      `yaml:"block_size"`
-	DirSegmentPages int      `yaml:"dir_segment_pages"`
+	Recipients      []string `yaml:"recipients" json:"recipients"`
+	Masters         []string `yaml:"masters" json:"masters"`
+	SignWith        string   `yaml:"sign_with" json:"sign_with"`
+	Writers         []string `yaml:"writers" json:"writers"`
+	PageSize        int      `yaml:"page_size" json:"page_size"`
+	BlockSize       int      `yaml:"block_size" json:"block_size"`
+	DirSegmentPages int      `yaml:"dir_segment_pages" json:"dir_segment_pages"`
 }
 
 type Grant struct {
-	Principal string `yaml:"principal"`
-	Level     string `yaml:"level"` // none | read-only | read-write | admin
+	Principal string `yaml:"principal" json:"principal"`
+	Level     string `yaml:"level" json:"level"` // none | read-only | read-write | admin
 }
 
 type Limits struct {
-	MaxRows               int           `yaml:"max_rows"`
-	MaxResultBytes        int64         `yaml:"max_result_bytes"`
-	MaxRequestBytes       int64         `yaml:"max_request_bytes"`
-	MaxBlobBytes          int64         `yaml:"max_blob_bytes"` // cap for a single streamed large object (0 = default)
-	StatementTimeout      time.Duration `yaml:"statement_timeout"`
-	TxIdleTimeout         time.Duration `yaml:"tx_idle_timeout"`
-	MaxTxLifetime         time.Duration `yaml:"max_tx_lifetime"`
-	MaxWriteSessionsPerDB int           `yaml:"max_write_sessions_per_db"`
-	MaxConcurrentPerDB    int           `yaml:"max_concurrent_per_db"` // admission cap per db (0 = unlimited)
-	Rate                  Rate          `yaml:"rate"`
+	MaxRows            int           `yaml:"max_rows" json:"max_rows"`
+	MaxResultBytes     int64         `yaml:"max_result_bytes" json:"max_result_bytes"`
+	MaxRequestBytes    int64         `yaml:"max_request_bytes" json:"max_request_bytes"`
+	MaxBlobBytes       int64         `yaml:"max_blob_bytes" json:"max_blob_bytes"` // cap for a single streamed large object (0 = default)
+	StatementTimeout   time.Duration `yaml:"statement_timeout" json:"statement_timeout"`
+	TxIdleTimeout      time.Duration `yaml:"tx_idle_timeout" json:"tx_idle_timeout"`
+	MaxTxLifetime      time.Duration `yaml:"max_tx_lifetime" json:"max_tx_lifetime"`
+	MaxSessionsPerDB   int           `yaml:"max_sessions_per_db" json:"max_sessions_per_db"`     // cap on concurrent pinned Hrana sessions per db (reads + writes)
+	MaxConcurrentPerDB int           `yaml:"max_concurrent_per_db" json:"max_concurrent_per_db"` // admission cap per db (0 = unlimited)
+	// IdleHandleTimeout, if > 0, closes a database's open handle after it has been
+	// idle (no active users) this long; the next request reopens it. Bounds handle
+	// growth for churned control-plane-created databases. 0 keeps handles open.
+	IdleHandleTimeout time.Duration `yaml:"idle_handle_timeout" json:"idle_handle_timeout"`
+	Rate              Rate          `yaml:"rate" json:"rate"`
 }
 
 // Rate configures per-principal request rate limiting.
 type Rate struct {
-	PerPrincipalRPS float64 `yaml:"per_principal_rps"` // token-bucket refill rate (0 = unlimited)
+	PerPrincipalRPS float64 `yaml:"per_principal_rps" json:"per_principal_rps"` // token-bucket refill rate (0 = unlimited)
 }
 
 type Logging struct {
-	Format string `yaml:"format"` // json | text
+	Format string `yaml:"format" json:"format"` // json | text
 	// ExpandParams opts INTO logging bound-parameter values (expanded SQL). The
 	// zero value redacts — params are logged as `?` placeholders — so redaction is
 	// the safe default even when the section is omitted.
-	ExpandParams  bool          `yaml:"expand_params"`
-	SlowThreshold time.Duration `yaml:"slow_threshold"` // >0 enables the slow-query log at this duration
+	ExpandParams  bool          `yaml:"expand_params" json:"expand_params"`
+	SlowThreshold time.Duration `yaml:"slow_threshold" json:"slow_threshold"` // >0 enables the slow-query log at this duration
 }

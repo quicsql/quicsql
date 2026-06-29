@@ -169,7 +169,7 @@ type hCol struct {
 type hStmtResult struct {
 	Cols             []hCol     `json:"cols"`
 	Rows             [][]hValue `json:"rows"`
-	AffectedRowCount uint64     `json:"affected_row_count"`
+	AffectedRowCount int64      `json:"affected_row_count"`
 	LastInsertRowid  *string    `json:"last_insert_rowid"`
 	// Truncated reports that the row set was capped by the max-rows limit. It is a
 	// quicSQL extension to the Hrana result (the spec has no such field).
@@ -231,7 +231,7 @@ type cursorRow struct {
 
 type cursorStepEnd struct {
 	Type             string  `json:"type"` // "step_end"
-	AffectedRowCount uint64  `json:"affected_row_count"`
+	AffectedRowCount int64   `json:"affected_row_count"`
 	LastInsertRowid  *string `json:"last_insert_rowid"`
 	// Truncated is the quicSQL extension mirrored from hStmtResult: the step's
 	// row set was capped by the max-rows limit.

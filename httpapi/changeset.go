@@ -23,7 +23,7 @@ func (h *Handler) handleChangesetApply(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 	if !lvl.CanWrite() {
-		writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
+		writeDenied(w)
 		return
 	}
 	done, ok := h.meter(w, r, db)
@@ -99,7 +99,7 @@ func (h *Handler) handleChangesetConcat(w http.ResponseWriter, r *http.Request, 
 	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body")
+		writeReadBodyErr(w, err)
 		return
 	}
 	var req struct{ A, B string }

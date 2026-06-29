@@ -42,7 +42,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body")
+		writeReadBodyErr(w, err)
 		return
 	}
 	var req pipelineReq
@@ -56,6 +56,16 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		h.writeStreamError(w, dbName, err)
 		return
 	}
+	// Always finalize the session. A panic (or any early return) below would
+	// otherwise strand it busy — the reaper and Kill both skip a busy session — so
+	// its pinned conn, registry ref, and per-db slot would leak until shutdown. On
+	// the normal path `finalized` is set true and this defer is a no-op.
+	finalized := false
+	defer func() {
+		if !finalized {
+			h.sessions.Close(sess)
+		}
+	}()
 
 	closed := false
 	results := make([]streamResult, 0, len(req.Requests))
@@ -76,6 +86,7 @@ func (h *Handler) handlePipeline(w http.ResponseWriter, r *http.Request, dbName 
 		b := h.sessions.Baton(sess)
 		baton = &b
 	}
+	finalized = true // normal finalization done; the deferred Close is now a no-op
 	writeJSON(w, http.StatusOK, pipelineResp{Baton: baton, Results: results})
 }
 
@@ -434,7 +445,7 @@ func toHStmtResult(res *engine.Result, wantRows *bool) *hStmtResult {
 	out := &hStmtResult{
 		Cols:             make([]hCol, len(res.Columns)),
 		Rows:             [][]hValue{},
-		AffectedRowCount: uint64(res.RowsAffected),
+		AffectedRowCount: res.RowsAffected,
 		Truncated:        res.Truncated,
 	}
 	for i, c := range res.Columns {

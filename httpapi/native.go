@@ -67,7 +67,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body")
+		writeReadBodyErr(w, err)
 		return
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -163,7 +163,7 @@ func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, tb engine
 		case errors.Is(err, engine.ErrDenied):
 			writeErr(w, http.StatusForbidden, err.Error())
 		case engine.IsNotAuthorized(err):
-			writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
+			writeDenied(w)
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			writeErr(w, http.StatusGatewayTimeout, "statement timed out")
 		default:

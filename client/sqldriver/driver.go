@@ -228,7 +228,11 @@ func (c *conn) begin(ctx context.Context) (driver.Tx, error) {
 }
 
 func (c *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	res, err := c.run(ctx, query, values(args))
+	vals, err := values(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.run(ctx, query, vals)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +240,11 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 }
 
 func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	res, err := c.run(ctx, query, values(args))
+	vals, err := values(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.run(ctx, query, vals)
 	if err != nil {
 		return nil, err
 	}
@@ -333,14 +341,19 @@ func (c *conn) BlobDelete(ctx context.Context, store string, id int64) error {
 	return c.cl.BlobDelete(ctx, c.db, store, id)
 }
 
-// values flattens driver args to []any (positional; named parameters aren't
-// supported by the wire endpoints).
-func values(args []driver.NamedValue) []any {
+// values flattens driver args to []any. The wire endpoints bind positionally, so
+// a named parameter is rejected rather than silently coerced to its ordinal — a
+// silent coercion would mis-bind a statement that mixes ordering (e.g. reuses one
+// name across several placeholders) and corrupt the result.
+func values(args []driver.NamedValue) ([]any, error) {
 	out := make([]any, len(args))
 	for i, a := range args {
+		if a.Name != "" {
+			return nil, fmt.Errorf("quicsql: named parameter %q is not supported; use positional (?) parameters", a.Name)
+		}
 		out[i] = a.Value
 	}
-	return out
+	return out, nil
 }
 
 type tx struct{ c *conn }

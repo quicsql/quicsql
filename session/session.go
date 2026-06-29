@@ -126,6 +126,9 @@ type Store struct {
 // NewStore builds a session store with a random baton-signing key. ttl is the
 // idle timeout; maxLife caps a session's total lifetime (so a client can't hold
 // the writer forever with keepalives); max bounds concurrent sessions per db.
+// Each of ttl/maxLife/max defaults to a safe value when non-positive — in
+// particular a zero ttl must NOT mean "reap every idle session each tick"
+// (reapable treats Since(lastUsed) > ttl as idle), so it defaults like the rest.
 func NewStore(ttl, maxLife time.Duration, max int) (*Store, error) {
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
@@ -133,6 +136,9 @@ func NewStore(ttl, maxLife time.Duration, max int) (*Store, error) {
 	}
 	if max <= 0 {
 		max = 64
+	}
+	if ttl <= 0 {
+		ttl = 60 * time.Second
 	}
 	if maxLife <= 0 {
 		maxLife = 5 * time.Minute
@@ -401,7 +407,10 @@ func (st *Store) closeLocked(id [idLen]byte) {
 		}
 		_, _ = c.ExecContext(ctx, "ROLLBACK")
 		if readOnly {
-			_ = backend.SetConnMode(ctx, c, false)
+			// Restore base mode on a fresh context, not the ROLLBACK's (which a slow
+			// rollback may have already consumed): a failed restore would return a
+			// still-read-only conn to the pool, breaking a later borrower's writes.
+			_ = backend.SetConnMode(context.Background(), c, false)
 		}
 		_ = c.Close()
 		if release != nil {

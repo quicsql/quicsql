@@ -119,7 +119,7 @@ These `limits` govern Hrana sessions directly. Set them deliberately — the def
 | --- | --- | --- |
 | `tx_idle_timeout` | a client that opens a transaction and stalls | The reaper closes a session idle this long, freeing its connection. Keep it short (seconds to a minute) so a hung client can't pin a connection indefinitely. |
 | `max_tx_lifetime` | a transaction that runs forever | Hard cap on total session age, regardless of activity — a backstop against a long-held writer blocking WAL checkpoints. |
-| `max_write_sessions_per_db` | write contention | SQLite serializes writers; cap concurrent write sessions per database so excess writers get a clear "too many sessions" instead of queueing unboundedly. |
+| `max_sessions_per_db` | pinned-connection pressure | Each interactive session pins one connection (reads and writes alike); cap concurrent sessions per database so excess ones get a clear "too many sessions" instead of exhausting the pool. |
 | `statement_timeout` | a single runaway statement | Interrupts any one statement that exceeds it (native or Hrana). |
 | `max_concurrent_per_db` | overload | Admission cap on in-flight requests per database. |
 
@@ -127,7 +127,7 @@ These `limits` govern Hrana sessions directly. Set them deliberately — the def
 limits:
   tx_idle_timeout: 30s
   max_tx_lifetime: 5m
-  max_write_sessions_per_db: 64
+  max_sessions_per_db: 64
   statement_timeout: 30s
   max_concurrent_per_db: 512
 ```

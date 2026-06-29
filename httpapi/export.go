@@ -29,12 +29,33 @@ func (h *Handler) handleExport(w http.ResponseWriter, r *http.Request, db string
 	}
 	defer done()
 
+	// Bound concurrent in-RAM exports globally (each materializes the whole image),
+	// on top of the per-db meter, so a fleet of exports across databases can't OOM.
+	select {
+	case h.exportSem <- struct{}{}:
+		defer func() { <-h.exportSem }()
+	case <-r.Context().Done():
+		writeErr(w, http.StatusServiceUnavailable, "too many concurrent exports")
+		return
+	}
+
 	dbh, release, err := h.reg.Get(r.Context(), db)
 	if err != nil {
 		h.writeGetError(w, db, err)
 		return
 	}
 	defer release()
+
+	// Refuse a database too large to hold in RAM (Serialize materializes the whole
+	// image before writing). page_count*page_size is the on-disk image size.
+	if h.maxExport > 0 {
+		var size int64
+		if err := dbh.Handle.QueryRowContext(r.Context(),
+			"SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&size); err == nil && size > h.maxExport {
+			writeErr(w, http.StatusRequestEntityTooLarge, "database too large to export")
+			return
+		}
+	}
 
 	data, err := sqlite.Serialize(r.Context(), dbh.Handle.DB)
 	if err != nil {

@@ -32,7 +32,7 @@ func newAdmin(t *testing.T, admins []string, open bool, seed map[string]backend.
 	if sec == nil {
 		sec, _ = secret.New(nil)
 	}
-	return admin.New(reg, pol, nil, nil, sec, dataDir, admins, time.Now(), nil), reg, pol
+	return admin.New(reg, pol, nil, nil, sec, nil, dataDir, admins, time.Now(), nil), reg, pol
 }
 
 func as(t *testing.T, h http.Handler, name, method, target, body string) *httptest.ResponseRecorder {
@@ -234,7 +234,7 @@ func TestIntrospectionSessionsAndKill(t *testing.T) {
 		t.Fatalf("session store: %v", err)
 	}
 	pol := authz.NewPolicy(false)
-	h := admin.New(reg, pol, nil, store, sec, "", []string{"root"}, time.Now(), nil)
+	h := admin.New(reg, pol, nil, store, sec, nil, "", []string{"root"}, time.Now(), nil)
 
 	// Open a live session on "app" and clear its in-flight flag so it is killable.
 	dbh, release, err := reg.Get(context.Background(), "app")
@@ -294,7 +294,7 @@ func TestKillBusySessionRefused(t *testing.T) {
 	reg := registry.New(map[string]backend.Backend{"app": be}, nil)
 	t.Cleanup(func() { _ = reg.Close() })
 	store, _ := session.NewStore(time.Minute, time.Minute, 16)
-	h := admin.New(reg, authz.NewPolicy(false), nil, store, sec, "", []string{"root"}, time.Now(), nil)
+	h := admin.New(reg, authz.NewPolicy(false), nil, store, sec, nil, "", []string{"root"}, time.Now(), nil)
 
 	dbh, release, _ := reg.Get(context.Background(), "app")
 	s, _ := store.Open(context.Background(), dbh, release, "user", false) // busy=true (not cleared)

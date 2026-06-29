@@ -46,7 +46,7 @@ limits:
   statement_timeout: 30s              # interrupt a single runaway statement
   tx_idle_timeout: 30s                # reap an idle Hrana session (frees its pinned conn)
   max_tx_lifetime: 5m                 # hard cap on a session's age
-  max_write_sessions_per_db: 64       # cap concurrent writers (SQLite serializes writes)
+  max_sessions_per_db: 64             # cap concurrent pinned sessions per db (reads + writes)
 ```
 
 The session-related limits are the ones that protect against a client that opens a transaction and stalls — keep `tx_idle_timeout` short. Tuning rationale: the [Hrana guide](../../docs/hrana.md).

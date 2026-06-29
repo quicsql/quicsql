@@ -35,6 +35,7 @@ func Default() *Channels {
 type Metrics interface {
 	IncRequests(db, principal string)
 	ObserveLatency(db string, d time.Duration)
+	Forget(db string) // drop a detached database's series
 }
 
 // Nop is a no-op Metrics.
@@ -42,6 +43,7 @@ type Nop struct{}
 
 func (Nop) IncRequests(string, string)           {}
 func (Nop) ObserveLatency(string, time.Duration) {}
+func (Nop) Forget(string)                        {}
 
 // Exposer is implemented by a Metrics sink that can render itself as
 // OpenMetrics/Prometheus text (the /_metrics endpoint checks for it).

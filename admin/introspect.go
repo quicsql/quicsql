@@ -72,6 +72,7 @@ func (h *Handler) handleKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.isServerAdmin(r) {
+		h.auditDeny(r, "kill", "", "not server-admin")
 		writeErr(w, http.StatusForbidden, "server-admin capability required")
 		return
 	}
@@ -82,7 +83,7 @@ func (h *Handler) handleKill(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Session string `json:"session"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

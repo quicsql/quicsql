@@ -60,7 +60,10 @@ func New(cfg *config.Config, sec secret.Resolver, log *slog.Logger) (*Authentica
 	if err != nil {
 		return nil, err
 	}
-	dummy, err := bcrypt.GenerateFromPassword([]byte("quicsql-timing-equalizer"), bcrypt.MinCost)
+	// Cost must match a real password hash's, not bcrypt.MinCost — otherwise the
+	// unknown-user path (comparing this dummy) is ~64-256× faster than the
+	// known-user path, leaking username existence by response timing.
+	dummy, err := bcrypt.GenerateFromPassword([]byte("quicsql-timing-equalizer"), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}

@@ -92,16 +92,19 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 	for i, c := range cols {
 		res.Columns[i] = Column{Name: c}
 	}
+	// Scan buffers are allocated once and reused: Scan overwrites dest each row and
+	// fromAny copies each value out (database/sql clones a []byte into *any), so the
+	// retained `row` never aliases dest. Avoids two slice allocations per row.
+	dest := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range dest {
+		ptrs[i] = &dest[i]
+	}
 	var bytes int64
 	for rows.Next() {
 		if len(res.Rows) >= e.maxRows {
 			res.Truncated = true
 			break
-		}
-		dest := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range dest {
-			ptrs[i] = &dest[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, wrap(err)
@@ -110,10 +113,15 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 		for i, v := range dest {
 			row[i] = fromAny(v)
 			bytes += row[i].size()
+			// A single oversized cell is already materialized by Scan (bounded by
+			// SQLite's own SQLITE_MAX_LENGTH); stop as soon as the running total
+			// trips the cap so a wide row of big cells can't accumulate further.
+			if bytes >= e.maxBytes {
+				res.Truncated = true
+			}
 		}
 		res.Rows = append(res.Rows, row)
-		if bytes >= e.maxBytes {
-			res.Truncated = true
+		if res.Truncated {
 			break
 		}
 	}

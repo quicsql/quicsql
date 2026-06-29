@@ -25,7 +25,7 @@ Surprises that are actually deliberate, and the ones that bite before shipping.
 - **Always `Close` a Hrana stream** (`defer st.Close(ctx)`), or its pinned connection lingers until `tx_idle_timeout`. A climbing `quicsql_active_sessions` gauge means a missing close.
 - **`Batch` is not atomic** — a failing statement doesn't roll back earlier ones. Wrap in `BEGIN`/`COMMIT` or use `OpenStream` for all-or-nothing.
 - **Read-only really means read-only.** A read-only principal's connection runs `query_only` + a write-denying authorizer, so a write is refused by the engine even inside a `WITH` clause or a transaction — you can't talk past it from the client.
-- **SQLite has one writer.** Keep write transactions short; do reads outside them. `max_write_sessions_per_db` caps concurrent writers rather than queueing them unboundedly.
+- **SQLite has one writer.** Keep write transactions short; do reads outside them. `max_sessions_per_db` caps concurrent pinned sessions rather than exhausting the pool.
 
 ## Config
 

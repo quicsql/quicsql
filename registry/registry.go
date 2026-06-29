@@ -41,6 +41,33 @@ type Registry struct {
 	entries  map[string]*entry
 	backends map[string]backend.Backend
 	log      *slog.Logger
+	onClose  func(*DB) // fired (outside r.mu) when a handle is closed, so caches keyed by it can evict
+}
+
+// SetCloseHook installs a callback invoked (outside the registry mutex) whenever
+// a handle is closed — by Reserve, Remove, the idle reaper, or Close. Caches
+// keyed by the *DB (e.g. the blob-store cache) register it to drop stale entries
+// instead of pinning a closed handle. At most one hook; nil clears it.
+func (r *Registry) SetCloseHook(fn func(*DB)) {
+	r.mu.Lock()
+	r.onClose = fn
+	r.mu.Unlock()
+}
+
+// closeHandle fires the close hook then closes a detached handle. Called OUTSIDE
+// r.mu because Handle.Close() can checkpoint WAL — slow I/O that must not block
+// every other database's Get/Reserve/Remove.
+func (r *Registry) closeHandle(db *DB) error {
+	if db == nil {
+		return nil
+	}
+	r.mu.Lock()
+	hook := r.onClose
+	r.mu.Unlock()
+	if hook != nil {
+		hook(db)
+	}
+	return db.Handle.Close()
 }
 
 type entry struct {
@@ -186,16 +213,23 @@ func (r *Registry) Warm(ctx context.Context) error {
 // until the returned release runs. It does not drain active users — it refuses.
 func (r *Registry) Reserve(name string) (release func(), err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.backends[name] == nil {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("%w: %q", ErrUnknownDB, name)
 	}
-	if err := r.dropIdleEntryLocked(name); err != nil {
+	db, err := r.detachIdleLocked(name)
+	if err != nil {
+		r.mu.Unlock()
 		return nil, err
 	}
+	// Install the reserved placeholder atomically with the detach so no Get can
+	// slip in, then release the lock and close the old handle (slow I/O) — the
+	// reservation is already in place, blocking new users.
 	ph := &entry{name: name, reserved: true, ready: make(chan struct{})}
 	close(ph.ready)
 	r.entries[name] = ph
+	r.mu.Unlock()
+	_ = r.closeHandle(db)
 	return func() {
 		r.mu.Lock()
 		delete(r.entries, name)
@@ -203,23 +237,22 @@ func (r *Registry) Reserve(name string) (release func(), err error) {
 	}, nil
 }
 
-// dropIdleEntryLocked closes and forgets name's open handle IF it is idle, or
-// returns ErrBusy if it is opening / has active users / is reserved. It is the
-// shared teardown of Reserve and Remove; the caller must hold r.mu, and a name
-// with no live entry is a no-op success.
-func (r *Registry) dropIdleEntryLocked(name string) error {
+// detachIdleLocked removes name's entry from the map IF it is idle and returns
+// its handle for the caller to close via closeHandle OUTSIDE r.mu; it returns
+// ErrBusy if the handle is opening / has active users / is reserved, and (nil,
+// nil) for a name with no live handle. The caller MUST hold r.mu. It is the
+// shared detach of Reserve and Remove; closing under the lock (a WAL checkpoint)
+// would stall every other database, so the close is deferred to the caller.
+func (r *Registry) detachIdleLocked(name string) (*DB, error) {
 	e := r.entries[name]
 	if e == nil {
-		return nil
+		return nil, nil
 	}
 	if e.opening || e.refs > 0 || e.reserved {
-		return ErrBusy
-	}
-	if e.db != nil {
-		_ = e.db.Handle.Close()
+		return nil, ErrBusy
 	}
 	delete(r.entries, name)
-	return nil
+	return e.db, nil // e.db may be nil (a placeholder / never-opened entry)
 }
 
 // Add registers a new database at runtime (the control-plane create/attach op).
@@ -239,15 +272,67 @@ func (r *Registry) Add(name string, be backend.Backend) error {
 // handle and forgets the backend. The database file itself is untouched.
 func (r *Registry) Remove(name string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.backends[name] == nil {
+		r.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrUnknownDB, name)
 	}
-	if err := r.dropIdleEntryLocked(name); err != nil {
+	db, err := r.detachIdleLocked(name)
+	if err != nil {
+		r.mu.Unlock()
 		return err
 	}
 	delete(r.backends, name)
+	r.mu.Unlock()
+	_ = r.closeHandle(db) // outside the lock (WAL checkpoint on close)
 	return nil
+}
+
+// ReapIdle closes every open handle idle longer than idleTTL (refs==0, not
+// opening/reserved), returning the count closed. The backend stays registered —
+// only the open handle is dropped, so the next Get reopens lazily. A non-positive
+// idleTTL is a no-op. Uses entry.last (bumped by Get and release).
+func (r *Registry) ReapIdle(idleTTL time.Duration) int {
+	if idleTTL <= 0 {
+		return 0
+	}
+	now := time.Now()
+	var toClose []*DB
+	r.mu.Lock()
+	for name, e := range r.entries {
+		if e.opening || e.refs > 0 || e.reserved || e.db == nil || now.Sub(e.last) < idleTTL {
+			continue
+		}
+		delete(r.entries, name)
+		toClose = append(toClose, e.db)
+	}
+	r.mu.Unlock()
+	for _, db := range toClose {
+		_ = r.closeHandle(db) // outside the lock
+	}
+	return len(toClose)
+}
+
+// StartIdleReaper runs ReapIdle every interval until ctx is done, bounding how
+// long an unused handle (e.g. a control-plane-created database touched once) stays
+// open. A non-positive idleTTL or interval disables it.
+func (r *Registry) StartIdleReaper(ctx context.Context, interval, idleTTL time.Duration) {
+	if idleTTL <= 0 || interval <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n := r.ReapIdle(idleTTL); n > 0 {
+					r.log.Debug("registry: reaped idle handles", "count", n)
+				}
+			}
+		}
+	}()
 }
 
 // Backend returns the backend registered under name (nil if unknown), for the
@@ -285,12 +370,16 @@ func (r *Registry) Close() error {
 		pending = append(pending, e)
 	}
 	r.entries = make(map[string]*entry)
+	hook := r.onClose
 	r.mu.Unlock()
 
 	var errs []error
 	for _, e := range pending {
 		<-e.ready // let a concurrent opener finish publishing (closed already for placeholders)
 		if e.db != nil {
+			if hook != nil {
+				hook(e.db)
+			}
 			if err := e.db.Handle.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("registry: close %q: %w", e.name, err))
 			}

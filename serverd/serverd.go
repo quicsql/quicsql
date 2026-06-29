@@ -131,7 +131,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 	warmCancel()
 
 	reaperCtx, stopReaper := context.WithCancel(context.Background())
-	sessions, err := session.NewStore(orDefault(cfg.Limits.TxIdleTimeout, defaultTxIdleTimeout), cfg.Limits.MaxTxLifetime, cfg.Limits.MaxWriteSessionsPerDB)
+	sessions, err := session.NewStore(orDefault(cfg.Limits.TxIdleTimeout, defaultTxIdleTimeout), cfg.Limits.MaxTxLifetime, cfg.Limits.MaxSessionsPerDB)
 	if err != nil {
 		stopReaper()
 		_ = reg.Close()
@@ -139,6 +139,9 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		return nil, fmt.Errorf("init sessions: %w", err)
 	}
 	sessions.StartReaper(reaperCtx, reapInterval)
+	// Bound open-handle growth for churned (control-plane-created) databases when
+	// idle_handle_timeout is set; a no-op otherwise (handles stay open).
+	reg.StartIdleReaper(reaperCtx, reapInterval, cfg.Limits.IdleHandleTimeout)
 
 	authn, err := auth.New(cfg, sec, log)
 	if err != nil {
@@ -169,7 +172,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		httpapi.WithLimiter(limiter),
 	}
 	if cfg.ControlPlane.Enabled {
-		adminH := admin.New(reg, policy, store, sessions, sec, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
+		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
 		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))
 	}

@@ -50,6 +50,17 @@ func (r *Registry) ObserveLatency(db string, d time.Duration) {
 	r.mu.Unlock()
 }
 
+// Forget drops a database's series (request count + latency) so a detached
+// database stops appearing in scrapes and its maps don't grow unbounded across
+// create/detach churn. Gauges are keyed by metric name, not db, so untouched.
+func (r *Registry) Forget(db string) {
+	r.mu.Lock()
+	delete(r.requests, db)
+	delete(r.latSum, db)
+	delete(r.latCount, db)
+	r.mu.Unlock()
+}
+
 // SetGauge registers a live gauge sampled at scrape time (e.g. active sessions,
 // open databases). A nil sampler removes the gauge.
 func (r *Registry) SetGauge(name string, sample func() int64) {
@@ -80,7 +91,7 @@ func (r *Registry) WriteOpenMetrics(w io.Writer) {
 	for _, db := range sortedKeys(reqs) {
 		b = fmt.Appendf(b, "quicsql_requests_total{db=%q} %d\n", db, reqs[db])
 	}
-	b = append(b, "# TYPE quicsql_request_duration_seconds counter\n"...)
+	b = append(b, "# TYPE quicsql_request_duration_seconds summary\n"...)
 	for _, db := range sortedKeys(latCount) {
 		b = fmt.Appendf(b, "quicsql_request_duration_seconds_sum{db=%q} %g\n", db, latSum[db].Seconds())
 		b = fmt.Appendf(b, "quicsql_request_duration_seconds_count{db=%q} %d\n", db, latCount[db])

@@ -29,11 +29,12 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req maintenanceRequest
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !h.canAdminDB(r, req.Database) {
+		h.auditDeny(r, "maintenance", req.Database, "not admin for database")
 		writeErr(w, http.StatusForbidden, "admin capability required for this database")
 		return
 	}
@@ -182,7 +183,12 @@ func (h *Handler) writeGetErr(w http.ResponseWriter, db string, err error) {
 }
 
 func (h *Handler) audit(r *http.Request, action, db, detail string) {
-	if h.store != nil {
-		h.store.Audit(h.principal(r), action, db, detail)
-	}
+	h.store.Audit(h.principal(r), action, db, detail)
+}
+
+// auditDeny records a rejected control-plane attempt (forbidden or failed) so the
+// trail captures who tried what — not only what succeeded. Suffixing the action
+// with ".denied" keeps denials greppable and distinct from completed actions.
+func (h *Handler) auditDeny(r *http.Request, action, db, reason string) {
+	h.store.Audit(h.principal(r), action+".denied", db, reason)
 }

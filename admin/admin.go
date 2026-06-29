@@ -20,6 +20,7 @@ import (
 	"quicsql.net/config"
 	"quicsql.net/internal/httpjson"
 	"quicsql.net/meta"
+	"quicsql.net/obs"
 	"quicsql.net/registry"
 	"quicsql.net/secret"
 	"quicsql.net/session"
@@ -34,6 +35,7 @@ type Handler struct {
 	store    *meta.Store
 	sessions *session.Store // live sessions, for introspection + KILL (may be nil)
 	sec      secret.Resolver
+	metrics  obs.Metrics // to forget a detached database's series (may be nil)
 	dataDir  string
 	admins   map[string]bool // server-admin principal names
 	started  time.Time
@@ -42,8 +44,9 @@ type Handler struct {
 
 // New builds the admin handler. admins are the server-admin principal names from
 // control_plane.admins; sessions (may be nil) backs the sessions/kill endpoints;
-// started is used for the uptime report.
-func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sessions *session.Store, sec secret.Resolver, dataDir string, admins []string, started time.Time, log *slog.Logger) *Handler {
+// metrics (may be nil) has a detached database's series forgotten; started is used
+// for the uptime report.
+func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sessions *session.Store, sec secret.Resolver, metrics obs.Metrics, dataDir string, admins []string, started time.Time, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -51,7 +54,7 @@ func New(reg *registry.Registry, pol *authz.Policy, store *meta.Store, sessions 
 	for _, a := range admins {
 		set[a] = true
 	}
-	return &Handler{reg: reg, pol: pol, store: store, sessions: sessions, sec: sec, dataDir: dataDir, admins: set, started: started, log: log}
+	return &Handler{reg: reg, pol: pol, store: store, sessions: sessions, sec: sec, metrics: metrics, dataDir: dataDir, admins: set, started: started, log: log}
 }
 
 // ServeHTTP routes the /_admin/* endpoints. The prefix is already matched by the
@@ -117,7 +120,9 @@ func (h *Handler) contained(p string) (string, bool) {
 	return config.WithinDir(h.dataDir, p)
 }
 
-// handleDatabases lists the databases the caller may administer.
+// handleDatabases serves both /_admin/databases and /_admin/stats (the same
+// view): the databases the caller may administer, each with its live per-database
+// stats — kind, whether a handle is currently open, and its reference count.
 func (h *Handler) handleDatabases(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "use GET")
@@ -149,11 +154,12 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.isServerAdmin(r) {
+		h.auditDeny(r, "create", "", "not server-admin")
 		writeErr(w, http.StatusForbidden, "server-admin capability required")
 		return
 	}
 	var req createRequest
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -232,13 +238,14 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.isServerAdmin(r) {
+		h.auditDeny(r, "detach", "", "not server-admin")
 		writeErr(w, http.StatusForbidden, "server-admin capability required")
 		return
 	}
 	var req struct {
 		Database string `json:"database"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -257,6 +264,10 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 	// not inherit stale privileges (Policy.Grant keeps the max level, so without
 	// this a re-created name would silently retain the old grants).
 	h.pol.Revoke(req.Database)
+	// Forget its metrics series so scrapes don't accrue detached databases.
+	if h.metrics != nil {
+		h.metrics.Forget(req.Database)
+	}
 	if h.store != nil {
 		_ = h.store.Delete(req.Database)
 		h.store.Audit(h.principal(r), "detach", req.Database, "")
@@ -266,8 +277,8 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 
 // --- error/JSON helpers (same envelope shape as the data plane) ---
 
-func decode(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+func decode(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return errors.New("invalid JSON body")

@@ -65,7 +65,11 @@ func Open(cfg config.MetaStore, sec secret.Resolver, dataDir string, log *slog.L
 	if err != nil {
 		return nil, fmt.Errorf("meta: %w", err)
 	}
-	db, err := be.Open(context.Background())
+	// Bound the open so a wedged backend (e.g. a vault waiting on a slow KMS, or a
+	// file lock held by another process) fails startup instead of hanging it forever.
+	openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := be.Open(openCtx)
 	if err != nil {
 		return nil, fmt.Errorf("meta: open %s: %w", cfg.Path, err)
 	}
@@ -129,8 +133,13 @@ func (s *Store) Delete(name string) error {
 }
 
 // Audit appends one admin-action record. Best-effort: a failure is logged, not
-// propagated, so auditing can't take the admin op down with it.
+// propagated, so auditing can't take the admin op down with it. Nil-safe: a
+// stateless deployment (no meta store) simply drops the record, so callers can
+// audit unconditionally — including denied/failed attempts.
 func (s *Store) Audit(principal, action, db, detail string) {
+	if s == nil {
+		return
+	}
 	_, err := s.db.Exec(`INSERT INTO audit(at, principal, action, db, detail) VALUES(?,?,?,?,?)`,
 		time.Now().Unix(), principal, action, db, detail)
 	if err != nil {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	sqlite "gosqlite.org"
 	"gosqlite.org/blobstore"
 	"quicsql.net/config"
+	"quicsql.net/registry"
 )
 
 // handleBlob serves the large-object endpoints backed by gosqlite's blobstore
@@ -30,7 +32,7 @@ func (h *Handler) handleBlob(w http.ResponseWriter, r *http.Request, db, endpoin
 	}
 	write := endpoint == "/blob/provision" || endpoint == "/blob/create" || endpoint == "/blob/write" || endpoint == "/blob/delete"
 	if write && !lvl.CanWrite() {
-		writeErr(w, http.StatusForbidden, "forbidden: read-only (write not permitted)")
+		writeDenied(w)
 		return
 	}
 	if write && r.Method != http.MethodPost {
@@ -116,7 +118,10 @@ func (h *Handler) handleBlob(w http.ResponseWriter, r *http.Request, db, endpoin
 			return
 		}
 		if n > h.maxBlob {
-			_ = st.Truncate(ctx, id, 0) // reclaim the partial oversized object
+			// Reclaim the partial oversized object on a background context — the
+			// client may have disconnected (its request ctx cancelled) right after
+			// over-sending, and we still want to drop the partial write.
+			_ = st.Truncate(context.Background(), id, 0)
 			writeErr(w, http.StatusRequestEntityTooLarge, "object exceeds the maximum blob size")
 			return
 		}
@@ -205,6 +210,19 @@ func (h *Handler) provisionBlobStore(dbHandle *sqlite.DB, name string, opts []bl
 	}
 	h.blobStores.Store(blobKey{db: dbHandle, name: name}, st)
 	return st, nil
+}
+
+// forgetBlobStores drops every cached blob store keyed by a now-closed handle.
+// Registered as the registry's close hook (see New), so an idle-reaped, detached,
+// or reserved handle doesn't stay pinned in the cache — which otherwise grew
+// unbounded across reopen cycles.
+func (h *Handler) forgetBlobStores(db *registry.DB) {
+	h.blobStores.Range(func(k, _ any) bool {
+		if bk, ok := k.(blobKey); ok && bk.db == db.Handle {
+			h.blobStores.Delete(k)
+		}
+		return true
+	})
 }
 
 // readBlobStore returns the cached store or, if none, a read-only handle (which
