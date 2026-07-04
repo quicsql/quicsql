@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -23,11 +24,20 @@ import (
 
 const shutdownGrace = 10 * time.Second
 
+// version is the build version, stamped at release time via
+// -ldflags "-X main.version=<tag>" (see .goreleaser.yaml); "dev" otherwise.
+var version = "dev"
+
 func main() {
 	hardenUmask() // create data files owner-only (0600), before anything opens a file
 
 	cfgPath := flag.String("config", "quicsql.yaml", "path to the YAML config file")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("quicsql", version)
+		return
+	}
 
 	log := slog.Default()
 	cfg, err := config.Load(*cfgPath)

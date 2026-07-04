@@ -37,12 +37,11 @@ builds:
     # Reproducibility: stamp file modtimes with the commit time, not build time.
     mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
-      # -s -w strips the symbol table and DWARF for a smaller binary (matches
-      # the justfile `dist` recipe). No version injection: cmd/quicsql has no
-      # version variable today (checked cmd/quicsql/main.go — flags + config
-      # only). When one is added (e.g. `var version = "devel"` in package
-      # main), append here:  -X main.version={{ .Version }}
+      # -s -w strips the symbol table and DWARF for a smaller binary; -X stamps
+      # the version (cmd/quicsql exposes `var version` + a --version flag) so
+      # `quicsql --version` reports the release tag.
       - -s -w
+      - -X main.version={{ .Version }}
 
 archives:
   - id: default
@@ -52,6 +51,10 @@ archives:
       - goos: windows
         formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Ship the license and readme alongside the binary.
+    files:
+      - LICENSE
+      - README.md
 
 checksum:
   name_template: checksums.txt
@@ -132,6 +135,36 @@ docker_manifests:
     image_templates:
       - "ghcr.io/quicsql/quicsql:{{ .Version }}-amd64"
       - "ghcr.io/quicsql/quicsql:{{ .Version }}-arm64"
+
+# Homebrew cask pushed to the tap repo (casks are the current GoReleaser path
+# for pre-built binaries, replacing the deprecated `brews` formula). `brew
+# install` of a cask is macOS-only, so Linux users install via `go install`, a
+# release binary, or the container image. Gated: with no
+# HOMEBREW_TAP_GITHUB_TOKEN the cask is still generated but not uploaded, so a
+# release never fails for want of the tap. To enable `brew install
+# quicsql/tap/quicsql`, create the quicsql/homebrew-tap repo and set the
+# HOMEBREW_TAP_GITHUB_TOKEN secret (a PAT with contents:write on that repo).
+homebrew_casks:
+  - name: quicsql
+    repository:
+      owner: quicsql
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    skip_upload: '{{ if .Env.HOMEBREW_TAP_GITHUB_TOKEN }}false{{ else }}true{{ end }}'
+    homepage: "https://github.com/quicsql/quicsql"
+    description: "CGo-free SQLite network server (native JSON + libSQL Hrana)"
+    license: Apache-2.0
+    commit_author:
+      name: goreleaser-bot
+      email: bot@quicsql.net
+    # Strip the macOS quarantine attribute so the unsigned binary runs without
+    # a Gatekeeper prompt.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/quicsql"]
+          end
 
 release:
   github:

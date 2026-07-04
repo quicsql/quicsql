@@ -23,21 +23,21 @@ Here is what happens to a single request, start to finish:
 ```
                         ┌─────────────────────────────────────────────┐
    client request  ───▶ │  LISTENER (e.g. h2 on :7777, TLS)           │
-                        │  accepts auth methods: [mtls, bearer, ...]   │
+                        │  accepts auth methods: [mtls, bearer, ...]  │
                         └───────────────────┬─────────────────────────┘
                                             │
                          ┌──────────────────▼───────────────────┐
-                         │  AUTHENTICATION middleware            │
-                         │  try each accepted method in order;   │
-                         │  attach a Principal (or Anonymous)    │
+                         │  AUTHENTICATION middleware           │
+                         │  try each accepted method in order;  │
+                         │  attach a Principal (or Anonymous)   │
                          └──────────────────┬───────────────────┘
                                             │  principal = "analyst"
                          ┌──────────────────▼───────────────────┐
-                         │  HANDLER + AUTHORIZATION policy       │
-                         │  level = policy.Level(principal, db)  │
-                         │  read needs ≥ read-only,              │
-                         │  write needs ≥ read-write,            │
-                         │  admin ops need admin                 │
+                         │  HANDLER + AUTHORIZATION policy      │
+                         │  level = policy.Level(principal, db) │
+                         │  read needs ≥ read-only,             │
+                         │  write needs ≥ read-write,           │
+                         │  admin ops need admin                │
                          └──────────────────┬───────────────────┘
                                             │
                                 allowed ────┴──── denied (401 / 403)
@@ -99,21 +99,21 @@ The `keyring` method deserves a closer look because it is the only interactive o
 ```
 client                                             server
   │  GET /_auth/challenge                             │
-  │ ─────────────────────────────────────────────▶   │  mint a challenge:
+  │ ─────────────────────────────────────────────▶    │  mint a challenge:
   │                                                   │  base64url( nonce ‖ expiry ‖ HMAC(nonce ‖ expiry) )
   │  { "challenge": "…" }                             │  (no server-side state saved)
-  │ ◀─────────────────────────────────────────────   │
+  │ ◀─────────────────────────────────────────────    │
   │                                                   │
   │  sign challenge‖method‖path with the ed25519 key  │
   │  POST /app/query                                  │
   │    X-Quicsql-Key:       ssh-ed25519 AAAA…         │
   │    X-Quicsql-Challenge: <the challenge>           │
   │    X-Quicsql-Signature: <base64 signature>        │
-  │ ─────────────────────────────────────────────▶   │  1. re-check the challenge's HMAC + expiry
+  │ ─────────────────────────────────────────────▶    │  1. re-check the challenge's HMAC + expiry
   │                                                   │  2. look up the key → principal
   │                                                   │  3. verify the signature over challenge‖method‖path
   │  result                                           │
-  │ ◀─────────────────────────────────────────────   │
+  │ ◀─────────────────────────────────────────────    │
 ```
 
 The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The signature is computed over the challenge **bound to the request's method and path**, so a captured signature cannot be replayed onto a different (e.g. more privileged) request; the challenge's short lifetime further bounds how long even the identical request could be replayed. Because the binding is per request — not per challenge — the client still caches and reuses one challenge across a burst of requests, signing each one separately. The client library does the whole dance for you before each request; you just supply the key. Keep the keyring method on a TLS or Unix-socket listener where the headers can't be sniffed off the wire in the first place.

@@ -13,7 +13,7 @@ mTLS involves four pieces. Keep them straight and the rest is mechanical:
                               │   hostnames    │   presents its cert  │              │
                               │   clients dial)│ ◀─────────────────── │              │
    ┌─────────────┐   signs    └────────────────┘                      └──────────────┘
-   │  client CA  │ ─────────▶  client certs  ───────────────────────────────▲
+   │  client CA  │ ─────────▶  client certs  ────────────────────────────────▲
    └─────────────┘             (CN or key = the principal)                   │
         ▲                                                                    │
         └──────────── the server trusts this CA (client_ca) and maps ────────┘

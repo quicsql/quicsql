@@ -64,3 +64,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: a PAT with contents:write on quicsql/homebrew-tap. When
+          # unset this is the empty string and the Homebrew cask is generated
+          # but not pushed (see skip_upload in .goreleaser.yaml), so the release
+          # still succeeds. Set this secret to enable `brew install
+          # quicsql/tap/quicsql`.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
