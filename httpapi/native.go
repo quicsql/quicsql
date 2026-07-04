@@ -9,6 +9,7 @@ import (
 
 	"quicsql.net/backend"
 	"quicsql.net/engine"
+	"quicsql.net/internal/wire"
 )
 
 // queryRequest is the native-JSON request body: either a single `sql` (+ `args`)
@@ -125,7 +126,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, db string)
 		return
 	}
 
-	args, err := decodeArgs(req.Args)
+	args, err := wire.DecodeNativeArgs(req.Args)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -150,7 +151,7 @@ func (h *Handler) runBatch(ctx context.Context, w http.ResponseWriter, tb engine
 			writeErr(w, http.StatusBadRequest, "batch statement missing 'sql'")
 			return
 		}
-		args, err := decodeArgs(s.Args)
+		args, err := wire.DecodeNativeArgs(s.Args)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -191,7 +192,7 @@ func toResultJSON(r *engine.Result) resultJSON {
 	for i, row := range r.Rows {
 		cells := make([]any, len(row))
 		for j, v := range row {
-			cells[j] = encodeValue(v)
+			cells[j] = wire.NativeValue{V: v}
 		}
 		rows[i] = cells
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"gosqlite.org"
+	"quicsql.net/internal/wire"
 )
 
 // Error is the typed server error, carrying SQLite's primary and extended
@@ -35,52 +36,13 @@ func IsNotAuthorized(err error) bool {
 // ExtendedCodeName maps an extended SQLite result code to its symbolic name for
 // the Hrana error `code` field, preserving the constraint subtype (UNIQUE vs
 // FOREIGNKEY vs NOTNULL vs CHECK) that the primary code alone collapses to a bare
-// SQLITE_CONSTRAINT. A client (e.g. an ORM error-mapper) needs the subtype to
-// classify a violation, so the tx path must carry it. Codes outside the
-// semantically-meaningful set fall back to the primary code's name.
-func ExtendedCodeName(extended int) string {
-	switch extended {
-	case 2067:
-		return "SQLITE_CONSTRAINT_UNIQUE"
-	case 1555:
-		return "SQLITE_CONSTRAINT_PRIMARYKEY"
-	case 787:
-		return "SQLITE_CONSTRAINT_FOREIGNKEY"
-	case 1299:
-		return "SQLITE_CONSTRAINT_NOTNULL"
-	case 275:
-		return "SQLITE_CONSTRAINT_CHECK"
-	}
-	return CodeName(extended & 0xff)
-}
+// SQLITE_CONSTRAINT. The table lives in package wire so the client's inverse lookup
+// (wire.CodeForName) can't drift from it.
+func ExtendedCodeName(extended int) string { return wire.ExtendedCodeName(extended) }
 
-// CodeName maps a primary SQLite result code to its symbolic name, for the Hrana
-// error `code` field (clients match on e.g. SQLITE_CONSTRAINT). Unknown codes
-// fall back to SQLITE_ERROR.
-func CodeName(primary int) string {
-	switch primary {
-	case 1:
-		return "SQLITE_ERROR"
-	case 5:
-		return "SQLITE_BUSY"
-	case 6:
-		return "SQLITE_LOCKED"
-	case 8:
-		return "SQLITE_READONLY"
-	case 9:
-		return "SQLITE_INTERRUPT"
-	case 11:
-		return "SQLITE_CORRUPT"
-	case 19:
-		return "SQLITE_CONSTRAINT"
-	case 20:
-		return "SQLITE_MISMATCH"
-	case 23:
-		return "SQLITE_AUTH"
-	default:
-		return "SQLITE_ERROR"
-	}
-}
+// CodeName maps a primary SQLite result code to its symbolic name (single-sourced
+// in package wire); unknown codes fall back to SQLITE_ERROR.
+func CodeName(primary int) string { return wire.CodeName(primary) }
 
 // wrap converts a driver error into an *Error when it carries SQLite codes,
 // leaving other errors (context cancel, io) untouched.

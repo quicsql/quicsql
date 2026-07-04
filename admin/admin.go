@@ -164,12 +164,12 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := req.Database
-	if !config.ValidDBName(db.Name) {
-		writeErr(w, http.StatusBadRequest, "invalid or reserved database name")
-		return
-	}
-	if !config.KnownBackends[db.Backend] {
-		writeErr(w, http.StatusBadRequest, "unknown backend")
+	// The SAME per-database validator YAML seeds pass — name, backend, mode, tx_lock,
+	// pragmas_preset, vault vocabulary — so a runtime create can't slip an invalid
+	// spec (e.g. a typo'd mode the backend would coerce to read-write-create) past the
+	// checks a seed is held to. Path containment is the extra control-plane-only gate.
+	if err := config.ValidateDatabase(db); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// A control-plane-created on-disk database must live under data_dir: its path

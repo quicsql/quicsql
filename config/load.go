@@ -205,45 +205,13 @@ func (c *Config) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, db := range c.Databases {
-		if db.Name == "" {
-			return fmt.Errorf("config: database with empty name")
-		}
-		// ValidDBName is the SAME predicate the HTTP router enforces, so a config
-		// seed and a runtime request agree on what names are usable. It rejects
-		// reserved / endpoint names, path separators, and any name that isn't a
-		// plain identifier (no spaces, quotes, or control chars) — a name that
-		// passes here is reachable over the wire.
-		if !ValidDBName(db.Name) {
-			return fmt.Errorf("config: database %q has an invalid or reserved name (use letters, digits, and -._; not leading _, not a reserved or endpoint name)", db.Name)
+		if err := ValidateDatabase(db); err != nil {
+			return err
 		}
 		if seen[db.Name] {
 			return fmt.Errorf("config: duplicate database name %q", db.Name)
 		}
 		seen[db.Name] = true
-		if db.Backend == "" {
-			return fmt.Errorf("config: database %q missing backend", db.Name)
-		}
-		if !KnownBackends[db.Backend] {
-			return fmt.Errorf("config: database %q unknown backend %q", db.Name, db.Backend)
-		}
-		switch db.Mode {
-		case "", "rw", "ro", "rwc":
-		default:
-			return fmt.Errorf("config: database %q invalid mode %q (want rw|ro|rwc)", db.Name, db.Mode)
-		}
-		switch db.Pool.TxLock {
-		case "", "deferred", "immediate", "exclusive":
-		default:
-			return fmt.Errorf("config: database %q invalid tx_lock %q (want deferred|immediate|exclusive)", db.Name, db.Pool.TxLock)
-		}
-		switch db.PragmasPreset {
-		case "", "recommended":
-		default:
-			return fmt.Errorf("config: database %q invalid pragmas_preset %q (want recommended)", db.Name, db.PragmasPreset)
-		}
-		if err := validateVault(db); err != nil {
-			return err
-		}
 	}
 	if err := c.validateTransports(); err != nil {
 		return err
@@ -252,6 +220,48 @@ func (c *Config) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// ValidateDatabase checks a single database spec's invariants — the checks a YAML
+// seed and a control-plane create must agree on: a valid, non-reserved name, a known
+// backend, and valid mode / tx_lock / pragmas_preset / vault vocabulary. It is the
+// single per-database validator shared by Config.Validate (seeds), the admin create
+// route, and the startup reconcile, so a runtime-created (or meta-persisted) database
+// can't bypass a check a seed is held to — e.g. a typo'd mode that backend.accessMode
+// would otherwise silently coerce to read-write-create, downgrading a read-only intent.
+func ValidateDatabase(db Database) error {
+	if db.Name == "" {
+		return fmt.Errorf("config: database with empty name")
+	}
+	// ValidDBName is the SAME predicate the HTTP router enforces, so a config seed
+	// and a runtime request agree on what names are usable. It rejects reserved /
+	// endpoint names, path separators, and any name that isn't a plain identifier —
+	// a name that passes here is reachable over the wire.
+	if !ValidDBName(db.Name) {
+		return fmt.Errorf("config: database %q has an invalid or reserved name (use letters, digits, and -._; not leading _, not a reserved or endpoint name)", db.Name)
+	}
+	if db.Backend == "" {
+		return fmt.Errorf("config: database %q missing backend", db.Name)
+	}
+	if !KnownBackends[db.Backend] {
+		return fmt.Errorf("config: database %q unknown backend %q", db.Name, db.Backend)
+	}
+	switch db.Mode {
+	case "", "rw", "ro", "rwc":
+	default:
+		return fmt.Errorf("config: database %q invalid mode %q (want rw|ro|rwc)", db.Name, db.Mode)
+	}
+	switch db.Pool.TxLock {
+	case "", "deferred", "immediate", "exclusive":
+	default:
+		return fmt.Errorf("config: database %q invalid tx_lock %q (want deferred|immediate|exclusive)", db.Name, db.Pool.TxLock)
+	}
+	switch db.PragmasPreset {
+	case "", "recommended":
+	default:
+		return fmt.Errorf("config: database %q invalid pragmas_preset %q (want recommended)", db.Name, db.PragmasPreset)
+	}
+	return validateVault(db)
 }
 
 // grantLevels is the set of valid `grants[].level` strings, kept beside the other

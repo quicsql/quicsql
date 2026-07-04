@@ -68,12 +68,10 @@ func TestClientRoundTripH1AndUnix(t *testing.T) {
 	if row[0] != "a" || row[1] != "hello" {
 		t.Fatalf("text cells: %+v", row)
 	}
-	if n, ok := row[2].(interface{ Int64() (int64, error) }); ok {
-		if v, _ := n.Int64(); v != 7 {
-			t.Fatalf("int cell = %v, want 7", v)
-		}
-	} else {
-		t.Fatalf("int cell type %T", row[2])
+	// Both read paths now decode an integer cell as int64 (via the shared wire
+	// codec) — the native path used to yield json.Number, which diverged from Hrana.
+	if v, ok := row[2].(int64); !ok || v != 7 {
+		t.Fatalf("int cell = %v (%T), want int64(7)", row[2], row[2])
 	}
 	if b, ok := row[3].([]byte); !ok || len(b) != 3 || b[0] != 1 {
 		t.Fatalf("blob cell = %v (%T)", row[3], row[3])

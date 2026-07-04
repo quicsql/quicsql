@@ -195,7 +195,13 @@ func (h *Handler) meter(w http.ResponseWriter, r *http.Request, db string) (func
 			return nil, false
 		}
 	}
-	if h.metrics != nil {
+	// Only meter databases the registry actually knows. meter runs before reg.Get,
+	// and authorize passes for any ValidDBName in open mode (or under a `*` grant),
+	// so metering here unconditionally would let a caller mint an unbounded set of
+	// phantom per-db series (requests/latSum/latCount) that Forget — keyed on real
+	// detach — could never reclaim. reg.Backend is a cheap locked membership check.
+	metered := h.metrics != nil && h.reg.Backend(db) != nil
+	if metered {
 		h.metrics.IncRequests(db, p.Name)
 	}
 	start := time.Now()
@@ -203,7 +209,7 @@ func (h *Handler) meter(w http.ResponseWriter, r *http.Request, db string) (func
 		if release != nil {
 			release()
 		}
-		if h.metrics != nil {
+		if metered {
 			h.metrics.ObserveLatency(db, time.Since(start))
 		}
 	}, true

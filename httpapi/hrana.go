@@ -13,6 +13,7 @@ import (
 	"gosqlite.org"
 	"quicsql.net/authz"
 	"quicsql.net/engine"
+	"quicsql.net/internal/wire"
 	"quicsql.net/session"
 )
 
@@ -430,12 +431,12 @@ func stmtFromHrana(sqlText string, st hStmt) engine.Statement {
 	case len(st.NamedArgs) > 0:
 		es.Named = make([]engine.NamedArg, len(st.NamedArgs))
 		for i, na := range st.NamedArgs {
-			es.Named[i] = engine.NamedArg{Name: na.Name, Value: na.Value.v}
+			es.Named[i] = engine.NamedArg{Name: na.Name, Value: na.Value.V}
 		}
 	case len(st.Args) > 0:
 		es.Args = make([]engine.Value, len(st.Args))
 		for i, a := range st.Args {
-			es.Args[i] = a.v
+			es.Args[i] = a.V
 		}
 	}
 	return es
@@ -444,7 +445,7 @@ func stmtFromHrana(sqlText string, st hStmt) engine.Statement {
 func toHStmtResult(res *engine.Result, wantRows *bool) *hStmtResult {
 	out := &hStmtResult{
 		Cols:             make([]hCol, len(res.Columns)),
-		Rows:             [][]hValue{},
+		Rows:             [][]wire.HranaValue{},
 		AffectedRowCount: res.RowsAffected,
 		Truncated:        res.Truncated,
 	}
@@ -453,11 +454,11 @@ func toHStmtResult(res *engine.Result, wantRows *bool) *hStmtResult {
 		out.Cols[i] = hCol{Name: &name}
 	}
 	if wantRows == nil || *wantRows {
-		out.Rows = make([][]hValue, len(res.Rows))
+		out.Rows = make([][]wire.HranaValue, len(res.Rows))
 		for i, row := range res.Rows {
-			cells := make([]hValue, len(row))
+			cells := make([]wire.HranaValue, len(row))
 			for j, v := range row {
-				cells[j] = hValue{v: v}
+				cells[j] = wire.HranaValue{V: v}
 			}
 			out.Rows[i] = cells
 		}

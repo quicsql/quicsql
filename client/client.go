@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
+	"quicsql.net/internal/wire"
 )
 
 // Client talks to one quicSQL server over one transport, presenting at most one
@@ -227,9 +228,10 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// Result is one statement's outcome. Rows holds decoded cells: JSON numbers as
-// json.Number, text as string, NULL as nil, a blob as []byte (decoded from the
-// {"base64":…} box).
+// Result is one statement's outcome. Rows holds decoded cells in SQLite's storage
+// classes: integer as int64, real as float64, text as string, NULL as nil, and a
+// blob as []byte. Both the native and the Hrana read paths decode through the same
+// wire codec, so a cell has the same Go type regardless of which endpoint served it.
 type Result struct {
 	Columns      []string
 	Rows         [][]any
@@ -551,44 +553,32 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 	return out.Challenge, nil
 }
 
-// encodeRequest builds the {sql, args} body, boxing []byte args as {"base64":…}.
-// time.Time is rendered as RFC3339Nano text explicitly (rather than relying on
-// json.Marshal's implicit time encoding) so it matches the Hrana path's
-// encodeHValue exactly — the same value stores identically in autocommit and in a
-// transaction. Keep the two in sync.
+// encodeRequest builds the {sql, args} body via the shared wire codec. Each arg is
+// normalized through wire.FromGo and encoded as a wire.NativeValue — the SAME
+// normalizer and encoding basis the Hrana path uses — so a value (including an
+// integral float or a time.Time) stores identically whether it is bound in
+// autocommit or inside an interactive transaction.
 func encodeRequest(sql string, args []any) ([]byte, error) {
-	out := make([]any, len(args))
-	for i, a := range args {
-		switch v := a.(type) {
-		case []byte:
-			out[i] = map[string]string{"base64": base64.StdEncoding.EncodeToString(v)}
-		case time.Time:
-			out[i] = v.Format(time.RFC3339Nano)
-		default:
-			out[i] = a
-		}
-	}
 	req := map[string]any{"sql": sql}
-	if len(out) > 0 {
+	if len(args) > 0 {
+		out := make([]wire.NativeValue, len(args))
+		for i, a := range args {
+			out[i] = wire.NativeValue{V: wire.FromGo(a)}
+		}
 		req["args"] = out
 	}
 	return json.Marshal(req)
 }
 
-// decodeCell maps one response cell to a Go value.
+// decodeCell maps one response cell to a Go value via the shared wire codec:
+// int→int64, float→float64, text→string, blob→[]byte, null→nil — the same shapes
+// the Hrana path yields, so the two decode paths agree.
 func decodeCell(raw json.RawMessage) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
+	var nv wire.NativeValue
+	if err := nv.UnmarshalJSON(raw); err != nil {
 		return nil, err
 	}
-	if m, ok := v.(map[string]any); ok {
-		if b64, ok := m["base64"].(string); ok && len(m) == 1 {
-			return base64.StdEncoding.DecodeString(b64)
-		}
-	}
-	return v, nil
+	return nv.V.Go(), nil
 }
 
 func firstMessage(body []byte) string {

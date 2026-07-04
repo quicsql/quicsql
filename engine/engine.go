@@ -68,7 +68,7 @@ func (s Statement) bindArgs() []any {
 	if len(s.Named) > 0 {
 		a := make([]any, len(s.Named))
 		for i, n := range s.Named {
-			a[i] = sql.Named(n.Name, n.Value.arg())
+			a[i] = sql.Named(n.Name, n.Value.Arg())
 		}
 		return a
 	}
@@ -112,7 +112,7 @@ func (e *Engine) Query(ctx context.Context, q Queryer, s Statement) (*Result, er
 		row := make([]Value, len(cols))
 		for i, v := range dest {
 			row[i] = fromAny(v)
-			bytes += row[i].size()
+			bytes += row[i].Size()
 			// A single oversized cell is already materialized by Scan (bounded by
 			// SQLite's own SQLITE_MAX_LENGTH); stop as soon as the running total
 			// trips the cap so a wide row of big cells can't accumulate further.

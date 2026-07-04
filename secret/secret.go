@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"gosqlite.org/crypto/keyring"
@@ -79,9 +78,13 @@ func (r *mapResolver) Bytes(ref string) ([]byte, error) {
 		}
 		return []byte(v), nil
 	case "file":
-		// Scope the read to src.Dir: reject a name that escapes it via `..`.
-		full := filepath.Join(src.Dir, name)
-		if rel, err := filepath.Rel(src.Dir, full); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// Scope the read to src.Dir via the shared containment guard (the same
+		// config.WithinDir used for every operator-supplied path), so a name that
+		// escapes it — a `..` traversal OR an absolute path outside src.Dir — is
+		// rejected rather than silently rewritten under src.Dir (the local
+		// filepath.Join version quietly mapped /etc/x → src.Dir/etc/x).
+		full, ok := config.WithinDir(src.Dir, name)
+		if !ok {
 			return nil, fmt.Errorf("secret: file ref %q escapes source dir %q", name, src.Dir)
 		}
 		return os.ReadFile(full)

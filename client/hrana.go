@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
+
+	"quicsql.net/internal/wire"
 )
 
 // Stream is a session-pinned sequence of statements over the server's Hrana
@@ -294,122 +295,32 @@ func hranaError(e *hpError) error {
 	return &Error{Message: e.Message, code: ext & 0xff, ext: ext}
 }
 
+// extendedFromName recovers the numeric result code (extended subtype when the
+// name is a constraint specialization, else the primary code) from the symbolic
+// name the server sent, via the single wire table — the inverse of the server's
+// wire.ExtendedCodeName, so the two cannot drift.
 func extendedFromName(name *string) int {
 	if name == nil {
 		return 0
 	}
-	switch *name {
-	case "SQLITE_CONSTRAINT_UNIQUE":
-		return 2067
-	case "SQLITE_CONSTRAINT_PRIMARYKEY":
-		return 1555
-	case "SQLITE_CONSTRAINT_FOREIGNKEY":
-		return 787
-	case "SQLITE_CONSTRAINT_NOTNULL":
-		return 1299
-	case "SQLITE_CONSTRAINT_CHECK":
-		return 275
-	case "SQLITE_BUSY":
-		return 5
-	case "SQLITE_LOCKED":
-		return 6
-	// Primary codes (the server sends these when the extended subtype isn't one of
-	// the constraint specializations above), so Code()/ExtendedCode() at least
-	// carry the primary code rather than 0. Mirrors engine.CodeName.
-	case "SQLITE_ERROR":
-		return 1
-	case "SQLITE_READONLY":
-		return 8
-	case "SQLITE_INTERRUPT":
-		return 9
-	case "SQLITE_CORRUPT":
-		return 11
-	case "SQLITE_CONSTRAINT":
-		return 19
-	case "SQLITE_MISMATCH":
-		return 20
-	case "SQLITE_AUTH":
-		return 23
-	}
-	return 0
+	return wire.CodeForName(*name)
 }
 
 // --- Hrana tagged value codec ---
 
-// encodeHValue maps a Go argument to Hrana's tagged value form. Integers are
-// carried as decimal STRINGS (precision-safe past 2^53); blobs as base64.
-func encodeHValue(a any) map[string]any {
-	switch v := a.(type) {
-	case nil:
-		return map[string]any{"type": "null"}
-	case bool:
-		n := int64(0)
-		if v {
-			n = 1
-		}
-		return map[string]any{"type": "integer", "value": strconv.FormatInt(n, 10)}
-	case int:
-		return map[string]any{"type": "integer", "value": strconv.FormatInt(int64(v), 10)}
-	case int32:
-		return map[string]any{"type": "integer", "value": strconv.FormatInt(int64(v), 10)}
-	case int64:
-		return map[string]any{"type": "integer", "value": strconv.FormatInt(v, 10)}
-	case float32:
-		return map[string]any{"type": "float", "value": float64(v)}
-	case float64:
-		return map[string]any{"type": "float", "value": v}
-	case string:
-		return map[string]any{"type": "text", "value": v}
-	case time.Time:
-		// Store times as RFC3339Nano text — the SAME form json.Marshal produces on
-		// the native path (client.encodeRequest), so a time bound in a transaction
-		// and one bound in autocommit land as the identical value. SQLite has no
-		// native time type; its date functions parse RFC3339. Keep the two paths in
-		// sync.
-		return map[string]any{"type": "text", "value": v.Format(time.RFC3339Nano)}
-	case []byte:
-		return map[string]any{"type": "blob", "base64": base64.StdEncoding.EncodeToString(v)}
-	default:
-		return map[string]any{"type": "text", "value": fmt.Sprint(v)}
-	}
-}
+// encodeHValue maps a Go argument to Hrana's tagged value form via the shared wire
+// codec. It normalizes through wire.FromGo — the SAME normalizer the native path
+// uses — so a given argument encodes to the identical stored type on both paths and
+// the two cannot drift.
+func encodeHValue(a any) wire.HranaValue { return wire.HranaValue{V: wire.FromGo(a)} }
 
-// decodeHValue maps one Hrana tagged value to a Go value: null→nil,
-// integer→int64, float→float64, text→string, blob→[]byte. All are valid
+// decodeHValue maps one Hrana tagged value to a Go value via the shared wire codec:
+// null→nil, integer→int64, float→float64, text→string, blob→[]byte. All are valid
 // driver.Values, so the database/sql driver passes them through unchanged.
 func decodeHValue(raw json.RawMessage) (any, error) {
-	var t struct {
-		Type   string          `json:"type"`
-		Value  json.RawMessage `json:"value"`
-		Base64 string          `json:"base64"`
-	}
-	if err := json.Unmarshal(raw, &t); err != nil {
+	var hv wire.HranaValue
+	if err := hv.UnmarshalJSON(raw); err != nil {
 		return nil, err
 	}
-	switch t.Type {
-	case "null", "":
-		return nil, nil
-	case "integer":
-		var s string
-		if err := json.Unmarshal(t.Value, &s); err != nil {
-			return nil, err
-		}
-		return strconv.ParseInt(s, 10, 64)
-	case "float":
-		var f float64
-		if err := json.Unmarshal(t.Value, &f); err != nil {
-			return nil, err
-		}
-		return f, nil
-	case "text":
-		var s string
-		if err := json.Unmarshal(t.Value, &s); err != nil {
-			return nil, err
-		}
-		return s, nil
-	case "blob":
-		return base64.StdEncoding.DecodeString(t.Base64)
-	default:
-		return nil, fmt.Errorf("quicsql: unknown hrana value type %q", t.Type)
-	}
+	return hv.V.Go(), nil
 }

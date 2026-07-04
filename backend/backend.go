@@ -146,26 +146,45 @@ func denyWrites(op int, arg1, arg2, _, _ string) int {
 // user_version that the action-code authorizer never sees — so enforcement does
 // not depend on enumerating every write action.
 func SetConnMode(ctx context.Context, sc *sql.Conn, readOnly bool) error {
-	if err := sc.Raw(func(dc any) error {
+	// The invariant a pooled conn must preserve is denyWrites ⟺ query_only=ON; the
+	// ordering below keeps a partial failure from returning a half-transitioned conn
+	// to the pool. It is deliberately asymmetric because denyWrites itself DENIES
+	// `PRAGMA query_only = OFF` (part of the read-only enforcement — see denyWrites).
+	if readOnly {
+		// Entering read-only: tighten query_only=ON FIRST, then swap in denyWrites.
+		// If the PRAGMA fails (e.g. the caller's ctx is already cancelled, so the
+		// driver short-circuits before touching the conn), the authorizer is left
+		// untouched — so the conn is NOT parked in the pool carrying denyWrites
+		// without query_only, a half-state that would spuriously deny a later
+		// write-capable borrower (SQLITE_AUTH) until healed. Any authorizer permits
+		// tightening query_only to ON, so this order never self-denies.
+		if _, err := sc.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+			return err
+		}
+		return setAuthorizer(sc, denyWrites)
+	}
+	// Leaving read-only: swap in the base authorizer FIRST, then clear query_only.
+	// denyWrites denies `PRAGMA query_only = OFF`, so the PRAGMA would self-deny if
+	// run before the swap. The restore path runs on context.Background() (see the
+	// callers), so this PRAGMA isn't exposed to the cancelled-ctx short-circuit that
+	// motivates the read-only ordering above.
+	if err := setAuthorizer(sc, denyAttachDetach); err != nil {
+		return err
+	}
+	_, err := sc.ExecContext(ctx, "PRAGMA query_only = OFF")
+	return err
+}
+
+// setAuthorizer swaps the connection authorizer on the raw *sqlite.Conn.
+func setAuthorizer(sc *sql.Conn, auth func(op int, arg1, arg2, arg3, arg4 string) int) error {
+	return sc.Raw(func(dc any) error {
 		c, ok := dc.(*sqlite.Conn)
 		if !ok {
 			return fmt.Errorf("backend: connection is not a *sqlite.Conn (%T)", dc)
 		}
-		if readOnly {
-			c.RegisterAuthorizer(denyWrites)
-		} else {
-			c.RegisterAuthorizer(denyAttachDetach)
-		}
+		c.RegisterAuthorizer(auth)
 		return nil
-	}); err != nil {
-		return err
-	}
-	pragma := "PRAGMA query_only = OFF"
-	if readOnly {
-		pragma = "PRAGMA query_only = ON"
-	}
-	_, err := sc.ExecContext(ctx, pragma)
-	return err
+	})
 }
 
 // Backend opens exactly one *sqlite.DB for a logical database. Open is called

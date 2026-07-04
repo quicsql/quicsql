@@ -1,88 +1,11 @@
 package httpapi
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"math"
-	"strconv"
-
-	"quicsql.net/engine"
+	"quicsql.net/internal/wire"
 )
 
-// hValue marshals an engine.Value in Hrana's tagged form and back. Integers are
-// carried as JSON STRINGS (precision-safe past 2^53); blobs are base64.
-//
-// Counterpart: encodeValue/decodeArg (codec.go) is the native bare-JSON form.
-// Both switch on engine.Kind and must be updated together if a Kind is added.
-type hValue struct{ v engine.Value }
-
-func (h hValue) MarshalJSON() ([]byte, error) {
-	switch v := h.v; v.Kind {
-	case engine.KindInt:
-		return json.Marshal(map[string]string{"type": "integer", "value": strconv.FormatInt(v.Int, 10)})
-	case engine.KindFloat:
-		if math.IsInf(v.Float, 0) || math.IsNaN(v.Float) {
-			return []byte(`{"type":"null"}`), nil // JSON floats can't carry ±Inf/NaN
-		}
-		return json.Marshal(struct {
-			Type  string  `json:"type"`
-			Value float64 `json:"value"`
-		}{"float", v.Float})
-	case engine.KindText:
-		return json.Marshal(map[string]string{"type": "text", "value": v.Text})
-	case engine.KindBlob:
-		return json.Marshal(map[string]string{"type": "blob", "base64": base64.StdEncoding.EncodeToString(v.Blob)})
-	default:
-		return []byte(`{"type":"null"}`), nil
-	}
-}
-
-func (h *hValue) UnmarshalJSON(b []byte) error {
-	var raw struct {
-		Type   string          `json:"type"`
-		Value  json.RawMessage `json:"value"`
-		Base64 string          `json:"base64"`
-	}
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return err
-	}
-	switch raw.Type {
-	case "null":
-		h.v = engine.Null()
-	case "integer":
-		var s string
-		if err := json.Unmarshal(raw.Value, &s); err != nil {
-			return err
-		}
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return fmt.Errorf("hrana: bad integer value: %w", err)
-		}
-		h.v = engine.Int(n)
-	case "float":
-		var f float64
-		if err := json.Unmarshal(raw.Value, &f); err != nil {
-			return err
-		}
-		h.v = engine.Float(f)
-	case "text":
-		var s string
-		if err := json.Unmarshal(raw.Value, &s); err != nil {
-			return err
-		}
-		h.v = engine.Text(s)
-	case "blob":
-		data, err := base64.StdEncoding.DecodeString(raw.Base64)
-		if err != nil {
-			return fmt.Errorf("hrana: bad blob base64: %w", err)
-		}
-		h.v = engine.Blob(data)
-	default:
-		return fmt.Errorf("hrana: unknown value type %q", raw.Type)
-	}
-	return nil
-}
+// The Hrana tagged value codec lives in package wire (wire.HranaValue), shared with
+// the client so the two cannot drift. The envelope types below carry it directly.
 
 // --- request / response envelopes ---
 
@@ -149,16 +72,16 @@ type simpleResp struct {
 // --- statement / result ---
 
 type hStmt struct {
-	SQL       *string     `json:"sql"`
-	SQLID     *int32      `json:"sql_id"`
-	Args      []hValue    `json:"args"`
-	NamedArgs []hNamedArg `json:"named_args"`
-	WantRows  *bool       `json:"want_rows"`
+	SQL       *string           `json:"sql"`
+	SQLID     *int32            `json:"sql_id"`
+	Args      []wire.HranaValue `json:"args"`
+	NamedArgs []hNamedArg       `json:"named_args"`
+	WantRows  *bool             `json:"want_rows"`
 }
 
 type hNamedArg struct {
-	Name  string `json:"name"`
-	Value hValue `json:"value"`
+	Name  string          `json:"name"`
+	Value wire.HranaValue `json:"value"`
 }
 
 type hCol struct {
@@ -167,10 +90,10 @@ type hCol struct {
 }
 
 type hStmtResult struct {
-	Cols             []hCol     `json:"cols"`
-	Rows             [][]hValue `json:"rows"`
-	AffectedRowCount int64      `json:"affected_row_count"`
-	LastInsertRowid  *string    `json:"last_insert_rowid"`
+	Cols             []hCol              `json:"cols"`
+	Rows             [][]wire.HranaValue `json:"rows"`
+	AffectedRowCount int64               `json:"affected_row_count"`
+	LastInsertRowid  *string             `json:"last_insert_rowid"`
 	// Truncated reports that the row set was capped by the max-rows limit. It is a
 	// quicSQL extension to the Hrana result (the spec has no such field).
 	Truncated bool `json:"truncated,omitempty"`
@@ -225,8 +148,8 @@ type cursorStepBegin struct {
 }
 
 type cursorRow struct {
-	Type string   `json:"type"` // "row"
-	Row  []hValue `json:"row"`
+	Type string            `json:"type"` // "row"
+	Row  []wire.HranaValue `json:"row"`
 }
 
 type cursorStepEnd struct {

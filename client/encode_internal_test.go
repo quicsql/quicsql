@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"quicsql.net/internal/wire"
 )
 
 // TestEncodeTimeConsistent locks in the H6 fix: the native (encodeRequest) and
@@ -15,8 +17,8 @@ func TestEncodeTimeConsistent(t *testing.T) {
 	want := ts.Format(time.RFC3339Nano)
 
 	h := encodeHValue(ts)
-	if h["type"] != "text" || h["value"] != want {
-		t.Fatalf("encodeHValue(time) = %v, want {text, %q}", h, want)
+	if h.V.Kind != wire.KindText || h.V.Text != want {
+		t.Fatalf("encodeHValue(time) = %+v, want text %q", h.V, want)
 	}
 
 	body, err := encodeRequest("SELECT ?", []any{ts})

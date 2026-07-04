@@ -157,7 +157,11 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 
 	metrics := obs.NewRegistry()
 	metrics.SetGauge("quicsql_active_sessions", func() int64 { return int64(sessions.Count()) })
-	metrics.SetGauge("quicsql_databases", func() int64 { return int64(len(backends)) })
+	// Sample via reg.List() (which reads the registry map under its mutex), not
+	// len(backends): the backends map is shared by reference with the registry and
+	// is mutated under that mutex by runtime create/detach, so an unlocked len() here
+	// races the control plane during a scrape.
+	metrics.SetGauge("quicsql_databases", func() int64 { return int64(len(reg.List())) })
 	limiter := limits.New(cfg.Limits.Rate.PerPrincipalRPS, cfg.Limits.MaxConcurrentPerDB)
 
 	eng := engine.New(cfg.Limits.MaxRows, cfg.Limits.MaxResultBytes)
@@ -272,8 +276,12 @@ func reconcile(seeds []config.Database, store *meta.Store, dataDir string, log *
 		add(db)
 	}
 	for _, db := range created {
-		if !config.ValidDBName(db.Name) || !config.KnownBackends[db.Backend] {
-			log.Warn("quicsql: skipping invalid meta-store database entry", "db", db.Name, "backend", db.Backend)
+		// Full per-database validation (name, backend, mode, tx_lock, pragmas_preset,
+		// vault vocabulary) — the same checks a seed and an admin create pass — so a
+		// meta entry with e.g. a typo'd mode is skipped rather than silently reopened
+		// read-write-create on every restart.
+		if err := config.ValidateDatabase(db); err != nil {
+			log.Warn("quicsql: skipping invalid meta-store database entry", "db", db.Name, "err", err)
 			continue
 		}
 		// An on-disk backend's path must stay within data_dir, mirroring the
