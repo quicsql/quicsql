@@ -26,6 +26,11 @@
 // build a *client.Client directly (WithClientCert / WithEd25519) and pass it to
 // OpenConnectorClient for those.
 //
+// A DSN that carries a credential is refused on a channel that would expose it:
+// the plaintext transports (h1, h2c) or h2/h3 with insecure=1 (unverified TLS).
+// Use verified TLS or a unix socket, or set allow_insecure_auth=1 to override on a
+// trusted local/dev link.
+//
 // Transactions are supported: BeginTx opens a session-pinned Hrana stream so that
 // every statement in the transaction (and SAVEPOINT nesting) runs on the same
 // server-side connection. Autocommit statements use the faster stateless endpoint.
@@ -79,13 +84,22 @@ func openConn(dsn string) (driver.Conn, error) {
 func OpenConnector(dsn string) (driver.Connector, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("quicsql: bad DSN %q: %w", dsn, err)
+		// Both the %q arg and url.Parse's own *url.Error embed the raw DSN, which
+		// may carry ?token=/password. Redact the arg and unwrap to the inner reason
+		// (which omits the URL) so a mistyped secret-bearing DSN never reaches a log.
+		reason := err
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			reason = ue.Err
+		}
+		return nil, fmt.Errorf("quicsql: bad DSN %q: %w", redactDSN(dsn), reason)
 	}
 	if u.Scheme != "quicsql" {
 		return nil, fmt.Errorf("quicsql: DSN scheme must be \"quicsql\", got %q", u.Scheme)
 	}
 	q := u.Query()
 	insecure := q.Get("insecure") == "1" || q.Get("insecure") == "true"
+	hasCredential := q.Get("token") != "" || q.Get("user") != ""
 	var opts []client.Option
 	if t := q.Get("token"); t != "" {
 		opts = append(opts, client.WithBearer(t))
@@ -102,6 +116,21 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 	transport := q.Get("transport")
 	if transport == "" {
 		transport = "h1"
+	}
+
+	// Fail closed if a credential would ride an unverified or cleartext channel: a
+	// bearer token / password sent over h1 or h2c (plaintext), or over h2/h3 with
+	// insecure=1 (unverified TLS, so MITM-readable), is exposed on the wire. A DSN
+	// is often one opaque string to the caller (e.g. liteorm's sqlite.Open(dsn)),
+	// so we refuse rather than silently leak. allow_insecure_auth=1 is the explicit
+	// opt-out for trusted local/dev links. (unix sockets are local and exempt.)
+	if hasCredential && !(q.Get("allow_insecure_auth") == "1" || q.Get("allow_insecure_auth") == "true") {
+		switch {
+		case transport == "h1" || transport == "h2c":
+			return nil, fmt.Errorf("quicsql: refusing to send a credential over cleartext transport=%q; use h2/h3 over verified TLS or a unix socket, or set allow_insecure_auth=1 to override", transport)
+		case (transport == "h2" || transport == "h3") && insecure:
+			return nil, fmt.Errorf("quicsql: refusing to send a credential over transport=%q with insecure=1 (unverified TLS); use a verified certificate (WithRootCA) or set allow_insecure_auth=1 to override", transport)
+		}
 	}
 	var mk func() *client.Client
 	switch transport {
@@ -123,6 +152,30 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 		return nil, fmt.Errorf("quicsql: unknown transport %q (want h1|h2c|h2|h3|unix)", transport)
 	}
 	return &connector{db: db, mk: mk, ownClient: true}, nil
+}
+
+// redactDSN strips secrets from a DSN before it is embedded in an error message:
+// URL userinfo (password) and the sensitive query params (token/password/key/
+// secret). database/sql opens are lazy, so a malformed secret-bearing DSN surfaces
+// as an error on first use that a consumer's statement logger may record verbatim —
+// this keeps the bearer token out of that log. An unparseable DSN (which may still
+// contain a token) collapses to a placeholder rather than being echoed.
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "<redacted DSN>"
+	}
+	if u.User != nil {
+		u.User = url.User(u.User.Username()) // drop any password
+	}
+	q := u.Query()
+	for _, k := range []string{"token", "password", "key", "secret"} {
+		if q.Has(k) {
+			q.Set(k, "REDACTED")
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.Redacted() // also masks a userinfo password
 }
 
 // OpenConnectorClient wraps a pre-built *client.Client (for auth a DSN cannot

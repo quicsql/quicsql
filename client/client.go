@@ -40,6 +40,13 @@ type Client struct {
 	edPubLine string // ed25519 authorized_keys line
 	edPriv    ed25519.PrivateKey
 
+	// maxResponse caps the size (bytes) of a server-supplied response body the
+	// client will materialize. The server is a trust boundary; without a cap a
+	// malicious or buggy server could force an unbounded client-side allocation
+	// (BlobRead, changeset invert/concat, Export, and query/pipeline results all
+	// return fully-read bodies). 0 means unbounded (opt-out).
+	maxResponse int64
+
 	// Keyring challenge cache. The server's challenge is stateless and NOT
 	// single-use — it validates by HMAC + a short TTL, with no consumed-nonce
 	// tracking — so one fetched challenge may sign many requests within its
@@ -62,13 +69,20 @@ const challengeReuseWindow = 45 * time.Second
 type Option func(*clientOpts)
 
 type clientOpts struct {
-	token     string
-	user, pw  string
-	edPubLine string
-	edPriv    ed25519.PrivateKey
-	cert      *tls.Certificate
-	rootCA    *x509.CertPool
+	token       string
+	user, pw    string
+	edPubLine   string
+	edPriv      ed25519.PrivateKey
+	cert        *tls.Certificate
+	rootCA      *x509.CertPool
+	maxResponse int64
 }
+
+// DefaultMaxResponse is the client-side ceiling on a single server-supplied
+// response body (1 GiB). It bounds a client allocation a hostile/buggy server
+// could otherwise force; raise it with WithMaxResponse for genuinely large blobs
+// or exports, or pass WithMaxResponse(0) to disable the cap entirely.
+const DefaultMaxResponse int64 = 1 << 30
 
 // WithBearer sends "Authorization: Bearer <token>" on every request.
 func WithBearer(token string) Option { return func(o *clientOpts) { o.token = token } }
@@ -90,6 +104,12 @@ func WithClientCert(cert tls.Certificate) Option {
 func WithRootCA(pool *x509.CertPool) Option {
 	return func(o *clientOpts) { o.rootCA = pool }
 }
+
+// WithMaxResponse caps the size (bytes) of a server-supplied response body the
+// client will read into memory — BlobRead, changeset invert/concat, Export, and
+// query/pipeline results. Passing n<=0 disables the cap (unbounded). Unset, the
+// client uses DefaultMaxResponse.
+func WithMaxResponse(n int64) Option { return func(o *clientOpts) { o.maxResponse = n } }
 
 // WithEd25519 authenticates via the keyring challenge/response: the client
 // fetches a challenge from /_auth/challenge and signs it with priv, caching and
@@ -159,7 +179,7 @@ func noErr(f func()) func() error {
 }
 
 func apply(opts []Option) *clientOpts {
-	o := &clientOpts{}
+	o := &clientOpts{maxResponse: DefaultMaxResponse}
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -176,7 +196,26 @@ func bind(base string, hc *http.Client, closeFn func() error, o *clientOpts) *Cl
 	c := &Client{base: base, hc: hc, closer: closeFn}
 	c.token, c.user, c.pw = o.token, o.user, o.pw
 	c.edPubLine, c.edPriv = o.edPubLine, o.edPriv
+	c.maxResponse = o.maxResponse
 	return c
+}
+
+// readBody reads a server-supplied response body, enforcing the client's
+// maxResponse cap (see WithMaxResponse). It reads one byte past the cap so an
+// exactly-at-limit body still succeeds while an over-cap one is rejected before
+// the whole (potentially huge) body is buffered.
+func (c *Client) readBody(resp *http.Response) ([]byte, error) {
+	if c.maxResponse <= 0 {
+		return io.ReadAll(resp.Body)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, c.maxResponse+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > c.maxResponse {
+		return nil, fmt.Errorf("quicsql: server response exceeds the %d-byte client cap (raise it with client.WithMaxResponse)", c.maxResponse)
+	}
+	return raw, nil
 }
 
 // Close releases the client's transport resources (idle connections, QUIC
@@ -261,7 +300,7 @@ func (c *Client) request(ctx context.Context, method, path, contentType string, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := c.readBody(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +430,7 @@ func (c *Client) do(ctx context.Context, db, sql string, args []any) (*Result, e
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.readBody(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +535,7 @@ func (c *Client) fetchChallenge(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.readBody(resp)
 	if err != nil {
 		return "", err
 	}

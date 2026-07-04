@@ -136,20 +136,23 @@ docker_manifests:
       - "ghcr.io/quicsql/quicsql:{{ .Version }}-amd64"
       - "ghcr.io/quicsql/quicsql:{{ .Version }}-arm64"
 
-# Homebrew cask pushed to the tap repo (casks are the current GoReleaser path
-# for pre-built binaries, replacing the deprecated `brews` formula). `brew
-# install` of a cask is macOS-only, so Linux users install via `go install`, a
-# release binary, or the container image. Gated: with no
-# HOMEBREW_TAP_GITHUB_TOKEN the cask is still generated but not uploaded, so a
-# release never fails for want of the tap. To enable `brew install
-# quicsql/tap/quicsql`, create the quicsql/homebrew-tap repo and set the
-# HOMEBREW_TAP_GITHUB_TOKEN secret (a PAT with contents:write on that repo).
-homebrew_casks:
+# Homebrew FORMULA pushed to the tap repo — a formula, not a cask, because
+# `brew services` only manages formulae with a `service` block, and running
+# the server under launchd (macOS) / systemd (Linux) is the point:
+# `brew services start quicsql`. GoReleaser deprecates `brews` (soft v2.10,
+# full v2.16) in favor of `homebrew_casks`, but casks cannot declare services,
+# so this stays a formula until GoReleaser v3 forces a rethink. Upsides vs the
+# cask it replaced: works on Homebrew-on-Linux too, and needs no quarantine
+# xattr hook (formula downloads never get the attribute). Gated: with no
+# HOMEBREW_TAP_GITHUB_TOKEN the formula is still generated but not uploaded,
+# so a release never fails for want of the tap.
+brews:
   - name: quicsql
     repository:
       owner: quicsql
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
     skip_upload: '{{ if .Env.HOMEBREW_TAP_GITHUB_TOKEN }}false{{ else }}true{{ end }}'
     homepage: "https://github.com/quicsql/quicsql"
     description: "CGo-free SQLite network server (native JSON + libSQL Hrana)"
@@ -157,19 +160,50 @@ homebrew_casks:
     commit_author:
       name: goreleaser-bot
       email: bot@quicsql.net
-    # Strip the macOS quarantine attribute so the unsigned binary runs without
-    # a Gatekeeper prompt.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/quicsql"]
-          end
+    install: |
+      bin.install "quicsql"
+    # Seed a minimal localhost-only config on first install: the service block
+    # points at it, and without one launchd would crash-loop the service on a
+    # missing file. Guarded so an edited config is never overwritten.
+    post_install: |
+      (var/"quicsql").mkpath
+      (var/"log").mkpath
+      unless (etc/"quicsql/quicsql.yaml").exist?
+        (etc/"quicsql").mkpath
+        (etc/"quicsql/quicsql.yaml").write <<~EOS
+          # quicSQL config, seeded by Homebrew — localhost-only HTTP/1.1, no TLS,
+          # no auth, no databases yet. Docs: https://github.com/quicsql/quicsql
+          # After editing: brew services restart quicsql
+          server:
+            data_dir: #{var}/quicsql
+          listeners:
+            - {name: h1, transport: h1, address: 127.0.0.1:7775}
+        EOS
+      end
+    service: |
+      run [opt_bin/"quicsql", "-config", etc/"quicsql/quicsql.yaml"]
+      keep_alive true
+      working_dir var/"quicsql"
+      log_path var/"log/quicsql.log"
+      error_log_path var/"log/quicsql.log"
+    test: |
+      system "#{bin}/quicsql", "-version"
+    caveats: |
+      Config: #{etc}/quicsql/quicsql.yaml (edit, then `brew services restart quicsql`)
+      Data:   #{var}/quicsql
+      Logs:   #{var}/log/quicsql.log
+
+      Run as a background service:
+        brew services start quicsql
 
 release:
   github:
     owner: quicsql
     name: quicsql
+  # Make workflow re-runs idempotent: a failed publish leaves a partial
+  # release, and the retry would otherwise 422 (already_exists) on every
+  # asset the first attempt managed to upload.
+  replace_existing_artifacts: true
 
 snapshot:
   # Local `goreleaser release --snapshot` builds get an unambiguous dev version.

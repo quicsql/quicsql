@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -218,7 +217,7 @@ func (c *Client) pipeline(ctx context.Context, db string, baton *string, request
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.readBody(resp)
 	if err != nil {
 		return nil, err
 	}
