@@ -88,8 +88,7 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 		// may carry ?token=/password. Redact the arg and unwrap to the inner reason
 		// (which omits the URL) so a mistyped secret-bearing DSN never reaches a log.
 		reason := err
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			reason = ue.Err
 		}
 		return nil, fmt.Errorf("quicsql: bad DSN %q: %w", redactDSN(dsn), reason)

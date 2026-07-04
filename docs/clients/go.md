@@ -42,10 +42,16 @@ import (
 )
 
 //   sql.Open("sqlite", "file:app.db")   → a local SQLite file
-db, _ := sql.Open("sqlite", "quicsql://127.0.0.1:7775/app?transport=h1&token="+tok)
+db, _ := sql.Open("sqlite", "quicsql://127.0.0.1:7777/app?transport=h2&token="+tok)
 
 tx, _ := db.BeginTx(ctx, nil) // transparently opens a Hrana session
 ```
+
+The driver refuses to send a credential over a channel that would expose it —
+the plaintext transports (`h1`, `h2c`) or `h2`/`h3` with `insecure=1` (unverified
+TLS) — so a token rides verified TLS (above) or a unix socket. On a trusted
+local/dev link with the self-signed dev cert, add `allow_insecure_auth=1` to opt
+in knowingly.
 
 For credentials a DSN can't carry (mTLS, keyring), build a `*client.Client`
 and hand it to `sqldriver.OpenConnectorClient` — see the

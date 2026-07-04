@@ -187,7 +187,9 @@ func driverSection(ctx context.Context, ck *checker, addr string) {
 	section("database/sql driver (quicsql:// over TLS)")
 	// A DSN can't carry an mTLS cert, so the driver path uses bearer over TLS with
 	// insecure=1 for the dev cert (use OpenConnectorClient for CA/mTLS, as elsewhere).
-	dsn := "quicsql://" + addr + "/app?transport=h2&insecure=1&token=" + showcase.Token
+	// The driver refuses a credential over an unverified channel by default; this is a
+	// trusted local link with the dev cert, so allow_insecure_auth=1 opts in knowingly.
+	dsn := "quicsql://" + addr + "/app?transport=h2&insecure=1&allow_insecure_auth=1&token=" + showcase.Token
 	db, err := sql.Open("quicsql", dsn)
 	if err == nil {
 		defer db.Close()

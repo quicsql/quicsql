@@ -64,12 +64,12 @@ Both sides derive the SAME fixed dev credentials (CA, mTLS client cert, keyring 
   ```go
   import _ "quicsql.net/client/sqldriver"
 
-  db, _ := sql.Open("quicsql", "quicsql://127.0.0.1:7775/users?transport=h1&token=<bearer>")
+  db, _ := sql.Open("quicsql", "quicsql://127.0.0.1:7777/users?transport=h2&token=<bearer>")
   var n int
   db.QueryRowContext(ctx, "SELECT count(*) FROM users").Scan(&n)
   ```
 
-  One scheme (`quicsql`), transport as a parameter: `?transport=h1|h2c|h2|h3|unix` (default `h1`). Credentials go in query params (`?token=` or `?user=&password=`); `?insecure=1` skips cert verification for the dev cert; a unix DSN is `quicsql:///<db>?transport=unix&socket=/path`. **Transactions are supported** — `BeginTx` pins a libSQL Hrana session so `BEGIN … COMMIT` and SAVEPOINT nesting run on one server connection; autocommit statements use the faster stateless endpoint. Importing the driver also teaches gosqlite's built-in `sqlite` driver to open the same DSN, so `sql.Open("sqlite", "quicsql://…")` works too.
+  One scheme (`quicsql`), transport as a parameter: `?transport=h1|h2c|h2|h3|unix` (default `h1`). Credentials go in query params (`?token=` or `?user=&password=`); `?insecure=1` skips cert verification for the dev cert; a unix DSN is `quicsql:///<db>?transport=unix&socket=/path`. A DSN carrying a credential is refused over a channel that would expose it (`h1`/`h2c`, or `insecure=1`) — send it over verified TLS or a unix socket, or add `allow_insecure_auth=1` to opt in on a trusted dev link. **Transactions are supported** — `BeginTx` pins a libSQL Hrana session so `BEGIN … COMMIT` and SAVEPOINT nesting run on one server connection; autocommit statements use the faster stateless endpoint. Importing the driver also teaches gosqlite's built-in `sqlite` driver to open the same DSN, so `sql.Open("sqlite", "quicsql://…")` works too.
 
 - **LiteORM** (`liteorm.org/dialect/sqlite`) — the full ORM and query builder run against a remote server: `sqlite.Open(dsn)` opens a local path or, for a `quicsql://` DSN, a remote server (or `WrapDB(*sql.DB)` to adapt a client you built yourself, e.g. for mTLS/keyring). Migrations, CRUD, the query builder, transactions, and SQLite constraint-error classification all work unchanged; over the wire, vector/full-text/hybrid search runs as SQL against the server's vec0/fts5 sidecars, changesets drive the SESSION extension server-side, and large objects transfer whole (streaming/partial blob I/O needs a local handle). The runnable LiteORM-over-quicSQL tour lives in the LiteORM repo's examples.
 
