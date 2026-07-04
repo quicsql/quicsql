@@ -34,7 +34,7 @@ Existing **libSQL / Turso clients work as-is**: quicSQL serves the Hrana `v2`/`v
 
 - **🔐 It networks the databases nothing else can — including encrypted vaults.** gosqlite gives you a live, file-backed **encrypted + compressed** SQLite container ([`vfs/vault`](https://pkg.go.dev/gosqlite.org/vfs/vault)): multi-recipient keyslots, tamper-evident storage, crash-safe key rotation. But such a container is only safe under a **single owner** — you can't just hand the file to N machines. quicSQL *is* that owner: it opens the vault once and multiplexes every client through it, so an encrypted database becomes a shared network service without ever weakening what's written to disk. No other SQLite server does this in pure Go.
 
-- **📦 Batteries included — auth, authz, control plane, observability.** Not "SQLite behind an HTTP handler you have to secure yourself." quicSQL ships a real access model: six authentication methods (no-auth, Unix peer credentials, bearer token, HTTP-basic password, **mTLS**, and an **ed25519 challenge/response** that reuses the same key that unlocks a vault), a principal → capability authorization layer with per-database grants and **read-only enforced in the engine** (not by parsing SQL), a `/_admin` control plane (create / detach / list databases, plus vault maintenance — compact, reclaim, trim, snapshot), a meta store with an audit log, an OpenMetrics `/_metrics` endpoint, a slow-query log, per-principal rate limits, per-database concurrency caps, and statement / transaction timeouts that interrupt a runaway query.
+- **📦 Batteries included — auth, authz, control plane, observability.** Not "SQLite behind an HTTP handler you have to secure yourself." quicSQL ships a real access model: six authentication methods (no-auth, Unix peer credentials, bearer token, HTTP-basic password, **mTLS**, and an **ed25519 challenge/response** that reuses the same key that unlocks a vault), a principal → capability authorization layer with per-database grants and **read-only enforced in the engine** (not by parsing SQL), a `/_admin` control plane (create / detach / list databases, plus vault maintenance — compact, reclaim, trim, snapshot), a meta store with an audit log, an Prometheus-text `/_metrics` endpoint, a slow-query log, per-principal rate limits, per-database concurrency caps, and statement / transaction timeouts that interrupt a runaway query.
 
 - **🌐 Every transport, one handler — up to HTTP/3.** The identical `http.Handler` serves HTTP/1.1, cleartext h2c, HTTP/2 over TLS, **HTTP/3 over QUIC**, and Unix domain sockets. Put credential methods behind TLS, keep an admin socket local with peer-credential auth, and let mobile/edge clients ride QUIC — same server, same semantics.
 
@@ -56,10 +56,10 @@ Existing **libSQL / Turso clients work as-is**: quicSQL serves the Hrana `v2`/`v
 - **[Authorization in depth](docs/auth-and-authz.md)** — a `none < read-only < read-write < admin` capability model with per-database and wildcard (`*`) grants. Read-only isn't a suggestion: a read-only principal runs on a borrowed connection put in `PRAGMA query_only` **plus** a write-denying authorizer, so DML, DDL, header writes, and `VACUUM` are all refused at the engine.
 - **[The Hrana pipeline](docs/hrana.md)** — `execute` / `batch` / interactive transactions over baton-pinned sessions (one server-side connection per baton), `store_sql`, and batch step conditions — the libSQL wire protocol, served natively.
 - **A native JSON API** — `POST /<db>/query` with `{sql, args}` or a `statements` batch (one explicit transaction, all-or-nothing), integers exact on the wire, blobs boxed as `{"base64": …}`, results bounded by row/byte caps so a huge `SELECT` can't OOM the server.
-- **A control plane at `/_admin`** — runtime create / detach / list databases (persisted to a meta store and reconciled on restart), vault maintenance (offline compact, online reclaim, trim, encrypted snapshot), introspection (info / stats / sessions / kill), and an audit log — every route gated by a named server-admin (open mode never applies to the control plane).
+- **A control plane at `/_admin`** — runtime create / detach / list databases (persisted to a meta store and reconciled on restart), vault maintenance (offline compact, online reclaim, trim, encrypted snapshot), introspection (info / databases / sessions / kill), and an audit log — every route gated by a named server-admin (open mode never applies to the control plane).
 - **Changesets & blobs over the wire** — apply / invert / concat SQLite session changesets, and stream large objects into a `blobstore` (`create` / `write` / `read` / `size` / `delete`) with bounded memory.
 - **A Go client + `database/sql` driver** — [`client`](https://pkg.go.dev/quicsql.net/client) speaks every transport (`H1` / `H2C` / `H2TLS` / `H3` / `Unix`) with `Query` / `Exec` / `Batch` / `OpenStream` / changeset / blob / export; [`client/sqldriver`](https://pkg.go.dev/quicsql.net/client/sqldriver) registers a `database/sql` driver so ordinary Go code reaches a remote database by DSN alone. It dispatches under gosqlite's `"sqlite"` name (change `file:app.db` to `quicsql://host/app` and your existing code points at a server — no driver swap), and under an explicit `"quicsql"` name too.
-- **Safety rails** — `/_metrics` (OpenMetrics), a params-redacted slow-query log, per-principal rate limiting, per-database concurrency admission caps, and statement / transaction timeouts that interrupt a runaway or disconnected query.
+- **Safety rails** — `/_metrics` (Prometheus text), a params-redacted slow-query log, per-principal rate limiting, per-database concurrency admission caps, and statement / transaction timeouts that interrupt a runaway or disconnected query.
 
 ## Declarative models over the network: LiteORM
 
@@ -73,7 +73,7 @@ import (
 )
 
 // A local file in dev, a quicSQL server in prod — only the DSN changes:
-db, _ := sqlite.Open("quicsql://127.0.0.1:7777/app?transport=h2&token=…")
+db, _ := sqlite.Open("quicsql://db.example.com:7777/app?transport=h2&token=…")
 defer db.Close()
 orm.AutoMigrate[User](ctx, db) // runs the DDL on the server
 ```

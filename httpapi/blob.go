@@ -105,13 +105,15 @@ func (h *Handler) handleBlob(w http.ResponseWriter, r *http.Request, db, endpoin
 		if !ok {
 			return
 		}
-		boundBodyRead(w)
 		wtr, err := st.Writer(ctx, id)
 		if err != nil {
 			blobFail(w, "open writer", err)
 			return
 		}
-		n, werr := copyToWriterAt(wtr, io.LimitReader(r.Body, h.maxBlob+1))
+		// A blob write streams up to the large blob cap; use a per-chunk idle deadline
+		// (streamBody) rather than the one-shot boundBodyRead, so a big-but-progressing
+		// upload isn't cut off at a fixed wall-clock deadline.
+		n, werr := copyToWriterAt(wtr, streamBody(w, io.LimitReader(r.Body, h.maxBlob+1)))
 		_ = wtr.Close()
 		if werr != nil {
 			blobFail(w, "write", werr)

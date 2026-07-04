@@ -95,6 +95,14 @@ func (h *Handler) isServerAdmin(r *http.Request) bool {
 // a server-admin administers every database; otherwise a holder of an `admin`
 // grant administers that database. It is the single source for the authz-filtered
 // list (databases/stats/sessions) and the per-op check (canAdminDB).
+//
+// Note: a wildcard `*: admin` grant makes CanAdmin true for the anonymous
+// principal too, so per-database maintenance (compact/reclaim/trim/snapshot) on
+// that database can reach an unauthenticated caller. This is the documented
+// wildcard-matches-everyone semantic; its blast radius is bounded — server-admin
+// operations (create/detach) never collapse to anonymous, and snapshot writes only
+// within data_dir. Don't grant `*: admin` on a database you don't want anyone to
+// be able to compact/snapshot.
 func (h *Handler) adminFilter(r *http.Request) func(db string) bool {
 	admin := h.isServerAdmin(r)
 	p := authz.FromContext(r.Context())
@@ -178,6 +186,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// filesystem location.
 	if config.UsesPath(db.Backend) && db.Path != "" {
 		if _, ok := h.contained(db.Path); !ok {
+			h.auditFail(r, "create", db.Name, "path escapes data_dir: "+db.Path)
 			writeErr(w, http.StatusBadRequest, "database path must be relative and within data_dir")
 			return
 		}
@@ -185,6 +194,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	be, err := backend.For(db, h.sec, h.dataDir)
 	if err != nil {
 		h.log.Error("quicsql/admin: build backend", "db", db.Name, "err", err)
+		h.auditFail(r, "create", db.Name, "build backend")
 		writeErr(w, http.StatusBadRequest, "cannot build backend for database")
 		return
 	}
@@ -201,6 +211,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if _, release, err := h.reg.Get(r.Context(), db.Name); err != nil {
 		_ = h.reg.Remove(db.Name)
 		h.log.Error("quicsql/admin: open new database", "db", db.Name, "err", err)
+		h.auditFail(r, "create", db.Name, "open failed")
 		writeErr(w, http.StatusBadRequest, "database could not be opened")
 		return
 	} else {
@@ -251,12 +262,15 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 	}
 	switch err := h.reg.Remove(req.Database); {
 	case errors.Is(err, registry.ErrUnknownDB):
+		h.auditFail(r, "detach", req.Database, "unknown database")
 		writeErr(w, http.StatusNotFound, "unknown database")
 		return
 	case errors.Is(err, registry.ErrBusy):
+		h.auditFail(r, "detach", req.Database, "database busy")
 		writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
 		return
 	case err != nil:
+		h.auditFail(r, "detach", req.Database, "remove failed")
 		writeErr(w, http.StatusInternalServerError, "cannot detach database")
 		return
 	}

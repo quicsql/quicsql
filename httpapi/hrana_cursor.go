@@ -40,7 +40,7 @@ func (h *Handler) handleCursor(w http.ResponseWriter, r *http.Request, dbName st
 	boundBodyRead(w)
 	body, err := h.readBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body")
+		writeReadBodyErr(w, err) // 413 for an over-cap body, 400 otherwise
 		return
 	}
 	var req cursorReq
@@ -63,6 +63,12 @@ func (h *Handler) handleCursor(w http.ResponseWriter, r *http.Request, dbName st
 	// the prelude is the stream's first line — and the session stays busy until
 	// the deferred Baton call: the reaper/Kill won't touch the pinned connection
 	// mid-stream, and Resume refuses the peeked baton until this request is done.
+	//
+	// Unlike handlePipeline, there is intentionally no panic-close of the session:
+	// a cursor always leaves its stream open for the client to Resume via the baton,
+	// so closing it here would be wrong on the normal path. A panic on a freshly
+	// opened stream leaves it idle-but-alive; the idle reaper reclaims it, so it is
+	// self-healing rather than a permanent leak.
 	baton := h.sessions.PeekBaton(sess)
 	defer h.sessions.Baton(sess) // marks the request finished; the baton stays current
 

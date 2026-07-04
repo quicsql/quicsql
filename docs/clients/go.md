@@ -42,7 +42,7 @@ import (
 )
 
 //   sql.Open("sqlite", "file:app.db")   → a local SQLite file
-db, _ := sql.Open("sqlite", "quicsql://127.0.0.1:7777/app?transport=h2&token="+tok)
+db, _ := sql.Open("sqlite", "quicsql://db.example.com:7777/app?transport=h2&token="+tok)
 
 tx, _ := db.BeginTx(ctx, nil) // transparently opens a Hrana session
 ```
@@ -71,7 +71,7 @@ import (
     _ "quicsql.net/client/sqldriver"
 )
 
-db, _ := sqlite.Open("quicsql://127.0.0.1:7777/app?transport=h2&token=" + tok)
+db, _ := sqlite.Open("quicsql://db.example.com:7777/app?transport=h2&token=" + tok)
 defer db.Close()
 orm.AutoMigrate[User](ctx, db)
 ```

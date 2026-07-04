@@ -73,9 +73,11 @@ func (r *Registry) SetGauge(name string, sample func() int64) {
 	r.mu.Unlock()
 }
 
-// WriteOpenMetrics renders the registry as Prometheus/OpenMetrics text. Series
-// are emitted in sorted order so the output is stable.
-func (r *Registry) WriteOpenMetrics(w io.Writer) {
+// WritePrometheus renders the registry in the Prometheus text exposition format
+// (served as text/plain; version=0.0.4). It is deliberately NOT OpenMetrics (which
+// needs application/openmetrics-text and a # EOF trailer). Series are emitted in
+// sorted order so the output is stable.
+func (r *Registry) WritePrometheus(w io.Writer) {
 	r.mu.Lock()
 	// Snapshot under the lock; sample gauges after releasing it (a sampler may take
 	// its own locks — don't nest under r.mu).

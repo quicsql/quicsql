@@ -170,7 +170,7 @@ A subtle but important point: quicSQL does **not** enforce read-only by parsing 
 
 `admin` is the top level, and it means two things depending on where it comes from:
 
-- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, inspect stats and sessions, kill a session, and run vault maintenance (compact, reclaim, trim, snapshot). These operations live under `/_admin` (admin-only).
+- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, list databases and sessions, kill a session, and run vault maintenance (compact, reclaim, trim, snapshot). These operations live under `/_admin` (admin-only).
 - A **per-database admin** is a principal holding an `admin`-level grant on a specific database. It may administer *that database only* — e.g. run vault maintenance on it — but cannot create or detach databases server-wide.
 
 ```yaml

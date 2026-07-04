@@ -7,8 +7,9 @@ package config
 
 import "time"
 
-// Config is the whole server configuration. Only the Phase 0 subset is wired to
-// behavior today; the remaining sections are parsed so the schema is stable.
+// Config is the whole server configuration. Every section is wired to behavior
+// (see load.go's knownTopLevel) except `wire_compression` and `observability`,
+// which are parsed but inert (they warn on use) so the schema stays stable.
 type Config struct {
 	Server       Server                `yaml:"server" json:"server"`
 	Secrets      []SecretSource        `yaml:"secrets" json:"secrets"`
@@ -39,6 +40,7 @@ type ControlPlane struct {
 // log so a silently-inert section isn't mistaken for a working one.
 func (c *Config) Warnings() []string { return c.warnings }
 
+// Server holds server-wide settings: the data directory and the meta store.
 type Server struct {
 	DataDir   string    `yaml:"data_dir" json:"data_dir"`
 	MetaStore MetaStore `yaml:"meta_store" json:"meta_store"`
@@ -65,6 +67,8 @@ type SecretSource struct {
 	Endpoint string `yaml:"endpoint" json:"endpoint"`
 }
 
+// Routing selects how a request's target database is resolved — by URL path, by
+// Host subdomain, or a configured default.
 type Routing struct {
 	ByPath     bool   `yaml:"by_path" json:"by_path"`
 	ByHost     bool   `yaml:"by_host" json:"by_host"`
@@ -72,6 +76,8 @@ type Routing struct {
 	DefaultDB  string `yaml:"default_db" json:"default_db"`
 }
 
+// Listener is one bound network endpoint: its transport, address, TLS profile, and
+// the auth methods it accepts.
 type Listener struct {
 	Name       string   `yaml:"name" json:"name"`
 	Transport  string   `yaml:"transport" json:"transport"` // h1 | h2 | h2c | h3 | unix
@@ -98,17 +104,23 @@ type TLSProfile struct {
 	Refresh    time.Duration `yaml:"refresh" json:"refresh"`         // qip reload interval
 }
 
+// Auth is the authentication configuration: the named principals and their
+// credential methods, plus the server-wide SQL policy.
 type Auth struct {
 	AuthorizedKeys string      `yaml:"authorized_keys" json:"authorized_keys"`
 	Principals     []Principal `yaml:"principals" json:"principals"`
 	SQLPolicy      SQLPolicy   `yaml:"sql_policy" json:"sql_policy"`
 }
 
+// Principal is one named identity and the credential methods (one map per method)
+// it may authenticate with.
 type Principal struct {
 	Name    string           `yaml:"name" json:"name"`
 	Methods []map[string]any `yaml:"methods" json:"methods"`
 }
 
+// SQLPolicy gates dangerous SQL surface (ATTACH, load_extension) and lists the
+// extensions enabled per connection.
 type SQLPolicy struct {
 	AllowAttach        bool     `yaml:"allow_attach" json:"allow_attach"`
 	AllowLoadExtension bool     `yaml:"allow_load_extension" json:"allow_load_extension"`
@@ -134,6 +146,8 @@ type Database struct {
 	Grants        []Grant        `yaml:"grants" json:"grants"`
 }
 
+// Pool holds a database's connection-pool settings (max open conns, tx lock mode,
+// busy timeout).
 type Pool struct {
 	MaxOpen     int           `yaml:"max_open" json:"max_open"`
 	TxLock      string        `yaml:"tx_lock" json:"tx_lock"` // deferred | immediate | exclusive
@@ -174,11 +188,15 @@ type VaultCreate struct {
 	DirSegmentPages int      `yaml:"dir_segment_pages" json:"dir_segment_pages"`
 }
 
+// Grant maps a principal (or the "*" wildcard) to a capability level on a database.
 type Grant struct {
 	Principal string `yaml:"principal" json:"principal"`
 	Level     string `yaml:"level" json:"level"` // none | read-only | read-write | admin
 }
 
+// Limits holds the server-wide resource limits: result/body/blob sizes, statement
+// and transaction timeouts, per-database session and concurrency caps, idle-handle
+// eviction, and per-principal rate limiting.
 type Limits struct {
 	MaxRows            int           `yaml:"max_rows" json:"max_rows"`
 	MaxResultBytes     int64         `yaml:"max_result_bytes" json:"max_result_bytes"`
@@ -201,6 +219,8 @@ type Rate struct {
 	PerPrincipalRPS float64 `yaml:"per_principal_rps" json:"per_principal_rps"` // token-bucket refill rate (0 = unlimited)
 }
 
+// Logging configures log output: the format and the slow-query log (with its
+// param-redaction default).
 type Logging struct {
 	Format string `yaml:"format" json:"format"` // json | text
 	// ExpandParams opts INTO logging bound-parameter values (expanded SQL). The

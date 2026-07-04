@@ -261,7 +261,11 @@ func resultFromExecute(r hpResult) (*Result, error) {
 	sr := exec.Result
 	res := &Result{RowsAffected: sr.AffectedRowCount, Truncated: sr.Truncated}
 	if sr.LastInsertRowid != nil {
-		res.LastInsertID, _ = strconv.ParseInt(*sr.LastInsertRowid, 10, 64)
+		id, err := strconv.ParseInt(*sr.LastInsertRowid, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("quicsql: bad last_insert_rowid %q: %w", *sr.LastInsertRowid, err)
+		}
+		res.LastInsertID = id
 	}
 	res.Columns = make([]string, len(sr.Cols))
 	for i, col := range sr.Cols {

@@ -10,6 +10,14 @@
 # Docker and reach the host as host.docker.internal. That exposure is bounded:
 # principals exist, so open mode is off and every request must present the token.
 # Don't copy the 0.0.0.0 bind into production configs without real credentials.
+#
+# CLEARTEXT DEMO: this sends the bearer token over plain HTTP so the minimal
+# language SDKs (python/node/php) stay dependency-free. The server logs a
+# cleartext-auth warning on startup for exactly this reason — in production put a
+# TLS listener in front (see examples/charged-server for the TLS/mTLS/keyring
+# setup). Note the Go database/sql driver REFUSES a token over h1 by design; to
+# point it at this demo add allow_insecure_auth=1 to the DSN, e.g.
+#   quicsql://127.0.0.1:7775/app?transport=h1&token=dev-token&allow_insecure_auth=1
 
 server:
   data_dir: ./data

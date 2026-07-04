@@ -66,6 +66,11 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleKill force-closes a session by id (server-admin only). A session with a
 // request in flight is refused (409) — it is bounded by the statement timeout.
+//
+// Note the deliberate asymmetry: kill is server-admin-only, while listing sessions
+// and running maintenance are open to a per-database `admin` grant. This is
+// fail-safe — kill is the more disruptive operation (it can abort another
+// principal's connection), so it is held to the stricter capability.
 func (h *Handler) handleKill(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "use POST")
@@ -89,8 +94,10 @@ func (h *Handler) handleKill(w http.ResponseWriter, r *http.Request) {
 	}
 	switch h.sessions.Kill(req.Session) {
 	case session.KillNotFound:
+		h.auditFail(r, "kill", "", "no such session: "+req.Session)
 		writeErr(w, http.StatusNotFound, "no such session")
 	case session.KillBusy:
+		h.auditFail(r, "kill", "", "session busy: "+req.Session)
 		writeErr(w, http.StatusConflict, "session has a request in flight; it will end at the statement timeout")
 	default:
 		h.audit(r, "kill", "", req.Session)

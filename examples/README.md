@@ -64,7 +64,7 @@ Both sides derive the SAME fixed dev credentials (CA, mTLS client cert, keyring 
   ```go
   import _ "quicsql.net/client/sqldriver"
 
-  db, _ := sql.Open("quicsql", "quicsql://127.0.0.1:7777/users?transport=h2&token=<bearer>")
+  db, _ := sql.Open("quicsql", "quicsql://db.example.com:7777/users?transport=h2&token=<bearer>")
   var n int
   db.QueryRowContext(ctx, "SELECT count(*) FROM users").Scan(&n)
   ```

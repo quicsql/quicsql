@@ -3,8 +3,29 @@ package sqldriver_test
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 )
+
+// TestNamedParamsRejected proves the driver rejects a named parameter (the wire
+// endpoints bind positionally, so a silent coercion to ordinal would mis-bind).
+func TestNamedParamsRejected(t *testing.T) {
+	h1, _ := startServer(t)
+	ctx := context.Background()
+	db, err := sql.Open("quicsql", "quicsql://"+h1+"/app?transport=h1")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.QueryContext(ctx, "SELECT :x", sql.Named("x", 1))
+	if err == nil {
+		t.Fatal("expected a named parameter to be rejected")
+	}
+	if !strings.Contains(err.Error(), "named parameter") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 // TestFloatBindsReal is the CODEC-1 end-to-end guard: an
 // integral float64 (100.0) bound through the driver must store as REAL both on the

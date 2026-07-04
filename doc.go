@@ -20,7 +20,7 @@
 // authenticated-writer), a control plane at /_admin (runtime create / detach /
 // list databases and vault maintenance — offline compact, online reclaim, trim,
 // snapshot — with a meta store and audit log), and observability + safety rails:
-// a /_metrics OpenMetrics endpoint, /_admin introspection (info / stats /
+// a /_metrics Prometheus-text endpoint, /_admin introspection (info / databases /
 // sessions / kill), a slow-query log (driver TraceProfile, params redacted by
 // default — logging.expand_params opts into expanded SQL), a
 // per-principal rate limit and per-database concurrency cap, and statement /

@@ -146,3 +146,39 @@ func (s *Store) Audit(principal, action, db, detail string) {
 		s.log.Error("quicsql/meta: audit write failed", "action", action, "db", db, "err", err)
 	}
 }
+
+// AuditEntry is one row of the admin audit log.
+type AuditEntry struct {
+	At        int64
+	Principal string
+	Action    string
+	DB        string
+	Detail    string
+}
+
+// AuditEntries returns the most recent audit records, newest first (up to limit).
+// Nil-safe: a stateless deployment (no meta store) has no audit log, so it returns
+// nil. It backs the /_admin audit view and lets tests assert that denied/failed
+// control-plane attempts are recorded, not only successes.
+func (s *Store) AuditEntries(limit int) ([]AuditEntry, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT at, principal, action, db, detail FROM audit ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.At, &e.Principal, &e.Action, &e.DB, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

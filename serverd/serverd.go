@@ -59,6 +59,7 @@ const (
 	warmTimeout             = 30 * time.Second
 	defaultStatementTimeout = 30 * time.Second
 	defaultTxIdleTimeout    = 30 * time.Second
+	defaultMaxTxLifetime    = 5 * time.Minute
 	reapInterval            = 15 * time.Second
 )
 
@@ -131,7 +132,10 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 	warmCancel()
 
 	reaperCtx, stopReaper := context.WithCancel(context.Background())
-	sessions, err := session.NewStore(orDefault(cfg.Limits.TxIdleTimeout, defaultTxIdleTimeout), cfg.Limits.MaxTxLifetime, cfg.Limits.MaxSessionsPerDB)
+	// The daemon defaults both session timeouts HERE (one layer), so they don't get
+	// silently overridden by NewStore's own fallbacks — which remain only as a safety
+	// net for direct/library callers (e.g. tests).
+	sessions, err := session.NewStore(orDefault(cfg.Limits.TxIdleTimeout, defaultTxIdleTimeout), orDefault(cfg.Limits.MaxTxLifetime, defaultMaxTxLifetime), cfg.Limits.MaxSessionsPerDB)
 	if err != nil {
 		stopReaper()
 		_ = reg.Close()

@@ -33,11 +33,11 @@ transport/      serve.go / tls.go — start the handler on h1 / h2c / h2-TLS / h
 auth/           auth.go (authenticate → Principal), methods, challenge.go (ed25519 challenge/response), peercred_*
 authz/          Level (none<ro<rw<admin) + Policy (per-db grants, wildcard, open mode); transport-neutral
 session/        Store of baton-pinned sessions; read-only pinning; the reaper; SESSION capture handle
-admin/          /_admin control plane: create/detach/list, stats/sessions/kill, vault maintenance (admin-gated)
+admin/          /_admin control plane: create/detach/list, sessions/kill, vault maintenance (admin-gated)
 meta/           the runtime registry + audit + idempotency store (vault-backed by default)
 secret/         "source:name" resolver (env / file / kms) for keys, tokens, identities
 limits/         per-principal rate limit + per-db concurrency cap + statement/tx timeouts
-obs/            /_metrics (OpenMetrics), slow-query log
+obs/            /_metrics (Prometheus text), slow-query log
 client/         the Go client (H1/H2C/H2TLS/H3/Unix, Query/Exec/Batch/OpenStream, changeset/blob/export)
 client/sqldriver/  the database/sql driver ("quicsql", quicsql:// DSN) + OpenConnectorClient for mTLS/keyring
 extensions/     the curated, network-safe extension bundle (regexp, fts5, vec0, spellfix1, rtree, …)

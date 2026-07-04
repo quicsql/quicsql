@@ -64,6 +64,7 @@ func Serve(log *slog.Logger, cfg *config.Config, handler http.Handler, opts Opti
 }
 
 func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, handler http.Handler, opts Options) error {
+	warnCleartextAuth(log, lc)
 	// Apply this listener's auth middleware around the shared handler.
 	if opts.Wrap != nil {
 		handler = opts.Wrap(lc, handler)
@@ -222,6 +223,30 @@ func withAltSvc(next http.Handler, value string) http.Handler {
 func warnSelfSigned(log *slog.Logger, name string, p config.TLSProfile) {
 	if p.Mode == "self_signed" {
 		log.Warn("quicsql: serving a self-signed (dev-only) TLS certificate — do not use in production", "listener", name)
+	}
+}
+
+// warnCleartextAuth flags a listener that accepts a secret-bearing auth method
+// (bearer / password / keyring) over a cleartext transport (h1/h2c): the credential
+// travels in the clear. It is a warning, not an error — an operator may knowingly
+// run this on a trusted network (the auth demo does) — and it mirrors the client
+// driver's refusal to send a credential over such a channel. Keyring is called out
+// specially: its per-request signature is not only exposed but replayable within
+// the challenge TTL, so cleartext voids its security model. (mtls/peercred/none
+// don't send a wire secret.)
+func warnCleartextAuth(log *slog.Logger, lc config.Listener) {
+	if lc.Transport != "h1" && lc.Transport != "h2c" {
+		return
+	}
+	for _, m := range lc.Auth {
+		switch m {
+		case "bearer", "password":
+			log.Warn("quicsql: listener accepts a credential over a cleartext transport — the token/password is exposed on the wire; prefer TLS or a unix socket",
+				"listener", lc.Name, "transport", lc.Transport, "method", m)
+		case "keyring":
+			log.Warn("quicsql: listener accepts keyring auth over a cleartext transport — the ed25519 signature is exposed AND replayable within the challenge TTL; use TLS or a unix socket in production",
+				"listener", lc.Name, "transport", lc.Transport)
+		}
 	}
 }
 

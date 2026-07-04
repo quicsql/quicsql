@@ -33,7 +33,7 @@ From the Go client, admin calls go through the same authenticated client (`clien
 logging: { slow_threshold: 200ms, expand_params: false }   # redact params by default
 ```
 
-- `GET /_metrics` — OpenMetrics; scrape it. Gauges include `quicsql_active_sessions` (if it climbs and never falls, something opens Hrana streams without closing them — see the `transactions-and-hrana` skill).
+- `GET /_metrics` — Prometheus text exposition; scrape it. Gauges include `quicsql_active_sessions` (if it climbs and never falls, something opens Hrana streams without closing them — see the `transactions-and-hrana` skill).
 - `GET /_health` — liveness, no auth.
 - The slow-query log fires above `slow_threshold`; bound parameters are redacted unless `expand_params: true`.
 

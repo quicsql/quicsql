@@ -186,9 +186,16 @@ func (h *Handler) audit(r *http.Request, action, db, detail string) {
 	h.store.Audit(h.principal(r), action, db, detail)
 }
 
-// auditDeny records a rejected control-plane attempt (forbidden or failed) so the
-// trail captures who tried what — not only what succeeded. Suffixing the action
-// with ".denied" keeps denials greppable and distinct from completed actions.
+// auditDeny records a rejected control-plane attempt (forbidden) so the trail
+// captures who tried what — not only what succeeded. Suffixing the action with
+// ".denied" keeps denials greppable and distinct from completed actions.
 func (h *Handler) auditDeny(r *http.Request, action, db, reason string) {
 	h.store.Audit(h.principal(r), action+".denied", db, reason)
+}
+
+// auditFail records a control-plane attempt that passed authorization but was
+// rejected downstream (bad input, a path escape, an open/persist error). Suffixed
+// ".failed" so it is distinct from both completed actions and ".denied" refusals.
+func (h *Handler) auditFail(r *http.Request, action, db, reason string) {
+	h.store.Audit(h.principal(r), action+".failed", db, reason)
 }

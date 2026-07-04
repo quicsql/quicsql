@@ -50,8 +50,15 @@ func (h *Handler) handleExport(w http.ResponseWriter, r *http.Request, db string
 	// image before writing). page_count*page_size is the on-disk image size.
 	if h.maxExport > 0 {
 		var size int64
+		// Fail closed if the size can't be determined: a probe error must not fall
+		// through to an unbounded Serialize (which materializes the whole image in RAM).
 		if err := dbh.Handle.QueryRowContext(r.Context(),
-			"SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&size); err == nil && size > h.maxExport {
+			"SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&size); err != nil {
+			h.log.Error("quicsql: export size probe", "db", db, "err", err)
+			writeErr(w, http.StatusInternalServerError, "export: could not determine database size")
+			return
+		}
+		if size > h.maxExport {
 			writeErr(w, http.StatusRequestEntityTooLarge, "database too large to export")
 			return
 		}

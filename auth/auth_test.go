@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"quicsql.net/config"
+	"quicsql.net/internal/wire"
 	"quicsql.net/secret"
 )
 
@@ -134,7 +135,7 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	sig := ed25519.Sign(priv, keyringSigningInput(chal, http.MethodPost, "/x/query"))
+	sig := ed25519.Sign(priv, wire.KeyringSigningInput(chal, http.MethodPost, "/x/query", ""))
 
 	r := httptest.NewRequest(http.MethodPost, "/x/query", nil)
 	r.Header.Set("X-Quicsql-Key", keyLine)

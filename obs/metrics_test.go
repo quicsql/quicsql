@@ -15,7 +15,7 @@ func TestRegistryOpenMetrics(t *testing.T) {
 	r.SetGauge("quicsql_active_sessions", func() int64 { return 3 })
 
 	var b strings.Builder
-	r.WriteOpenMetrics(&b)
+	r.WritePrometheus(&b)
 	out := b.String()
 
 	for _, want := range []string{

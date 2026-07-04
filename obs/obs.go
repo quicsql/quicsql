@@ -48,5 +48,5 @@ func (Nop) Forget(string)                        {}
 // Exposer is implemented by a Metrics sink that can render itself as
 // OpenMetrics/Prometheus text (the /_metrics endpoint checks for it).
 type Exposer interface {
-	WriteOpenMetrics(w io.Writer)
+	WritePrometheus(w io.Writer)
 }

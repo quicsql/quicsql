@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -124,22 +126,30 @@ const dialTimeout = 5 * time.Second
 
 // H1 talks plain HTTP/1.1 to addr (host:port).
 func H1(addr string, opts ...Option) *Client {
-	return finish("http://"+addr, &http.Client{Timeout: 30 * time.Second}, nil, opts)
+	o := apply(opts)
+	warnInsecureCredential("h1", false, o)
+	// Own the transport (rather than sharing http.DefaultTransport) so Close()
+	// releases this client's idle connections, matching H2C/H3/Unix.
+	t := &http.Transport{}
+	return bind("http://"+addr, &http.Client{Transport: t, Timeout: 30 * time.Second}, noErr(t.CloseIdleConnections), o)
 }
 
 // H2C talks cleartext HTTP/2 (prior knowledge) to addr (host:port).
 func H2C(addr string, opts ...Option) *Client {
+	o := apply(opts)
+	warnInsecureCredential("h2c", false, o)
 	t := &http.Transport{}
 	var p http.Protocols
 	p.SetUnencryptedHTTP2(true)
 	t.Protocols = &p
-	return finish("http://"+addr, &http.Client{Transport: t, Timeout: 30 * time.Second}, noErr(t.CloseIdleConnections), opts)
+	return bind("http://"+addr, &http.Client{Transport: t, Timeout: 30 * time.Second}, noErr(t.CloseIdleConnections), o)
 }
 
 // H2TLS talks HTTP/2 over TLS to addr; insecure skips certificate verification
 // (for the dev self-signed cert). WithClientCert enables mTLS.
 func H2TLS(addr string, insecure bool, opts ...Option) *Client {
 	o := apply(opts)
+	warnInsecureCredential("h2", insecure, o)
 	t := &http.Transport{
 		TLSClientConfig:   tlsConfig(insecure, []string{"h2", "http/1.1"}, o),
 		ForceAttemptHTTP2: true,
@@ -151,6 +161,7 @@ func H2TLS(addr string, insecure bool, opts ...Option) *Client {
 // WithClientCert enables mTLS.
 func H3(addr string, insecure bool, opts ...Option) *Client {
 	o := apply(opts)
+	warnInsecureCredential("h3", insecure, o)
 	t := &http3.Transport{TLSClientConfig: tlsConfig(insecure, []string{"h3"}, o)}
 	return bind("https://"+addr, &http.Client{Transport: t, Timeout: 30 * time.Second}, t.Close, o)
 }
@@ -187,6 +198,28 @@ func apply(opts []Option) *clientOpts {
 	return o
 }
 
+func (o *clientOpts) hasCredential() bool {
+	return o.token != "" || o.user != "" || o.edPubLine != ""
+}
+
+// warnInsecureCredential logs a warning when a client is built to send a credential
+// (bearer / basic / keyring) over a channel that would expose it: a cleartext
+// transport (h1/h2c), or unverified TLS (insecure). It mirrors the DSN driver's
+// refusal, but the direct API only WARNS — a caller here chose both the transport
+// and the credential explicitly, so the guard is advisory, not a hard stop. mTLS
+// certs (o.cert) are not a wire secret and don't trigger it; unix is local.
+func warnInsecureCredential(transport string, insecure bool, o *clientOpts) {
+	if !o.hasCredential() {
+		return
+	}
+	switch {
+	case transport == "h1" || transport == "h2c":
+		slog.Warn("quicsql/client: sending a credential over a cleartext transport — it is exposed on the wire; prefer TLS or a unix socket", "transport", transport)
+	case insecure:
+		slog.Warn("quicsql/client: sending a credential over unverified TLS (insecure) — it is exposed to a man-in-the-middle; verify the certificate with WithRootCA", "transport", transport)
+	}
+}
+
 // finish applies options and binds them to a Client (for the non-TLS transports,
 // where options can't affect the transport).
 func finish(base string, hc *http.Client, closeFn func() error, opts []Option) *Client {
@@ -209,7 +242,13 @@ func (c *Client) readBody(resp *http.Response) ([]byte, error) {
 	if c.maxResponse <= 0 {
 		return io.ReadAll(resp.Body)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, c.maxResponse+1))
+	// Read one byte past the cap to detect an over-cap body, guarding against
+	// overflow if the cap is set at (or near) MaxInt64.
+	limit := c.maxResponse
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +522,7 @@ func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 		if err != nil {
 			return err
 		}
-		sig := ed25519.Sign(c.edPriv, keyringSigningInput(chal, req.Method, req.URL.Path))
+		sig := ed25519.Sign(c.edPriv, wire.KeyringSigningInput(chal, req.Method, req.URL.Path, req.URL.RawQuery))
 		req.Header.Set("X-Quicsql-Key", c.edPubLine)
 		req.Header.Set("X-Quicsql-Challenge", chal)
 		req.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
@@ -493,14 +532,6 @@ func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return nil
-}
-
-// keyringSigningInput is the exact byte string the ed25519 challenge/response
-// signs: the server's challenge bound to this request's method and path. The
-// server reconstructs and verifies the identical bytes in auth.tryKeyring — the
-// two MUST stay in sync.
-func keyringSigningInput(challenge, method, path string) []byte {
-	return []byte(challenge + "\n" + method + "\n" + path)
 }
 
 // challenge returns a keyring challenge to sign: the cached one if it is still

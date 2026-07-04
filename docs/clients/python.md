@@ -15,6 +15,10 @@ dialect. For zero dependencies, the stdlib and the native JSON API do fine.
 pip install libsql
 ```
 
+> The `http://` URL below sends the token in the clear — fine on a trusted loopback
+> for local development, but in production point the client at an `https://` (TLS)
+> endpoint so the bearer token isn't exposed on the wire.
+
 ```python
 import libsql
 

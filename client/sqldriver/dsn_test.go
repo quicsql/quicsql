@@ -24,6 +24,19 @@ func TestDSNParseErrorRedactsSecret(t *testing.T) {
 	}
 }
 
+// TestDSNRejectsUserinfo proves a DSN carrying URL userinfo is rejected (the
+// driver reads credentials only from query params, so userinfo would otherwise be
+// silently dropped and bypass the credential-transport guard).
+func TestDSNRejectsUserinfo(t *testing.T) {
+	_, err := sqldriver.OpenConnector("quicsql://alice:secret@h/db?transport=h2")
+	if err == nil {
+		t.Fatal("expected a DSN with userinfo to be rejected")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("rejection leaked the userinfo password: %q", err.Error())
+	}
+}
+
 // TestDSNRefusesCredentialOverInsecureTransport proves the driver fails closed
 // when a credential would ride a cleartext or unverified channel (follow-up
 // item 2), while still allowing verified TLS, unix sockets, credential-free DSNs,

@@ -68,8 +68,12 @@ func (h *Handler) handleChangesetInvert(w http.ResponseWriter, r *http.Request, 
 	defer done()
 	boundBodyRead(w)
 	cs, err := h.readBody(r)
-	if err != nil || len(cs) == 0 {
-		writeErr(w, http.StatusBadRequest, "empty or unreadable changeset")
+	if err != nil {
+		writeReadBodyErr(w, err) // 413 for an over-cap body, 400 otherwise
+		return
+	}
+	if len(cs) == 0 {
+		writeErr(w, http.StatusBadRequest, "empty changeset")
 		return
 	}
 	out, err := h.onConn(r, db, func(c *sqlite.Conn) (any, error) { return c.InvertChangeset(cs) })
@@ -129,7 +133,7 @@ func (h *Handler) onConn(r *http.Request, db string, fn func(*sqlite.Conn) (any,
 		return nil, err
 	}
 	defer release()
-	conn, err := dbh.Handle.DB.Conn(r.Context())
+	conn, err := dbh.Handle.Conn(r.Context())
 	if err != nil {
 		return nil, err
 	}

@@ -69,6 +69,26 @@ func TestAuditIsBestEffort(t *testing.T) {
 	st.Audit("root", "detach", "sales", "")
 }
 
+// TestAuditEntriesRecordsDenials proves the audit log captures a denied/failed
+// control-plane attempt (a `.denied`/`.failed` action), not only successes, and
+// that AuditEntries reads them back newest-first.
+func TestAuditEntriesRecordsDenials(t *testing.T) {
+	st := openStore(t)
+	st.Audit("root", "create", "sales", "vault")
+	st.Audit("bob", "create.denied", "", "not server-admin")
+
+	entries, err := st.AuditEntries(10)
+	if err != nil {
+		t.Fatalf("AuditEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	if e := entries[0]; e.Action != "create.denied" || e.Principal != "bob" || e.Detail != "not server-admin" {
+		t.Fatalf("denial not recorded correctly: %+v", e)
+	}
+}
+
 func TestPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	sec, _ := secret.New(nil)

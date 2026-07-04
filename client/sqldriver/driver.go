@@ -96,6 +96,13 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 	if u.Scheme != "quicsql" {
 		return nil, fmt.Errorf("quicsql: DSN scheme must be \"quicsql\", got %q", u.Scheme)
 	}
+	// The driver takes credentials from query params, not URL userinfo. A DSN like
+	// quicsql://user:pw@host/db would otherwise send NO credential (silently
+	// unauthenticated) AND slip past the credential-transport guard below — reject it
+	// so the mistake is loud, not silent.
+	if u.User != nil {
+		return nil, errors.New("quicsql: put credentials in query params (?token= or ?user=&password=), not the URL userinfo (user:pw@host)")
+	}
 	q := u.Query()
 	insecure := q.Get("insecure") == "1" || q.Get("insecure") == "true"
 	hasCredential := q.Get("token") != "" || q.Get("user") != ""
@@ -123,7 +130,8 @@ func OpenConnector(dsn string) (driver.Connector, error) {
 	// is often one opaque string to the caller (e.g. liteorm's sqlite.Open(dsn)),
 	// so we refuse rather than silently leak. allow_insecure_auth=1 is the explicit
 	// opt-out for trusted local/dev links. (unix sockets are local and exempt.)
-	if hasCredential && !(q.Get("allow_insecure_auth") == "1" || q.Get("allow_insecure_auth") == "true") {
+	allowInsecureAuth := q.Get("allow_insecure_auth") == "1" || q.Get("allow_insecure_auth") == "true"
+	if hasCredential && !allowInsecureAuth {
 		switch {
 		case transport == "h1" || transport == "h2c":
 			return nil, fmt.Errorf("quicsql: refusing to send a credential over cleartext transport=%q; use h2/h3 over verified TLS or a unix socket, or set allow_insecure_auth=1 to override", transport)
@@ -439,18 +447,19 @@ type rows struct {
 	i   int
 }
 
-// errTruncated is surfaced through rows.Err() when the server capped the result
-// set (row or byte limit): the delivered rows are a prefix of the real result,
-// so reporting a plain io.EOF would let the caller mistake a partial answer for a
-// complete one.
-var errTruncated = errors.New("quicsql: result truncated by the server's row/byte cap; the returned rows are incomplete")
+// ErrTruncated is surfaced through rows.Err() when the server capped the result
+// set (row or byte limit): the delivered rows are a prefix of the real result, so
+// reporting a plain io.EOF would let the caller mistake a partial answer for a
+// complete one. It is exported so a consumer can classify a capped result with
+// errors.Is rather than string-matching.
+var ErrTruncated = errors.New("quicsql: result truncated by the server's row/byte cap; the returned rows are incomplete")
 
 func (r *rows) Columns() []string { return r.res.Columns }
 func (r *rows) Close() error      { return nil }
 func (r *rows) Next(dest []driver.Value) error {
 	if r.i >= len(r.res.Rows) {
 		if r.res.Truncated {
-			return errTruncated
+			return ErrTruncated
 		}
 		return io.EOF
 	}

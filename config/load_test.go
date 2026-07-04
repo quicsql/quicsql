@@ -71,6 +71,9 @@ func TestValidateAuth(t *testing.T) {
 		{"unknown listener method", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"magic"}}}}, true},
 		{"peercred off unix", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"peercred"}}}}, true},
 		{"mtls without tls", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"mtls"}}}}, true},
+		// keyring over cleartext is config-valid but warned at startup (see
+		// transport.warnCleartextAuth), not a hard error — the auth demo runs it.
+		{"keyring over cleartext h1", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"keyring"}}}}, false},
 		{"duplicate principal", &Config{Auth: Auth{Principals: []Principal{{Name: "a"}, {Name: "a"}}}}, true},
 		{"empty principal name", &Config{Auth: Auth{Principals: []Principal{{Name: ""}}}}, true},
 		{"unknown credential method", &Config{Auth: Auth{Principals: []Principal{

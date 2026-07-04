@@ -29,6 +29,7 @@ import (
 	"quicsql.net/authz"
 	"quicsql.net/config"
 	"quicsql.net/internal/httpjson"
+	"quicsql.net/internal/wire"
 	"quicsql.net/secret"
 )
 
@@ -375,22 +376,15 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	if err != nil {
 		return nil, true, errInvalidCredential
 	}
-	// Verify the signature over the challenge BOUND to this request's method and
-	// path, not the bare challenge: a signature captured off a cleartext listener
-	// (or a header-logging proxy) then can't be replayed onto a different — e.g.
-	// more privileged — request within the challenge's TTL.
-	if !keyring.VerifyState([]ed25519.PublicKey{cred.pub}, keyringSigningInput(chal, r.Method, r.URL.Path), sigBytes) {
+	// Verify the signature over the challenge BOUND to this request's method, path,
+	// and raw query (wire.KeyringSigningInput), not the bare challenge: a captured
+	// signature then can't be replayed onto a different operation target within the
+	// challenge's TTL. Running keyring over a cleartext transport (where the signature
+	// is observable, hence replayable onto the same path) is warned about at startup.
+	if !keyring.VerifyState([]ed25519.PublicKey{cred.pub}, wire.KeyringSigningInput(chal, r.Method, r.URL.Path, r.URL.RawQuery), sigBytes) {
 		return nil, true, errInvalidCredential
 	}
 	return &authz.Principal{Name: cred.name, Method: "keyring"}, true, nil
-}
-
-// keyringSigningInput is the exact byte string the ed25519 challenge/response
-// signs and verifies: the server's challenge bound to the request's method and
-// path. The client (client.authenticate) MUST build the identical bytes — keep
-// the two in sync.
-func keyringSigningInput(challenge, method, path string) []byte {
-	return []byte(challenge + "\n" + method + "\n" + path)
 }
 
 func (a *Authenticator) tryPeercred(r *http.Request) (*authz.Principal, bool) {

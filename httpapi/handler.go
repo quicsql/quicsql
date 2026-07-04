@@ -59,6 +59,12 @@ type Handler struct {
 	// ops don't re-open (and re-run the idempotent CREATE TABLE) per request, and
 	// so a provisioned store's options survive across ops. Keyed like the local
 	// lob cache (by db handle), so a reopened database gets a fresh entry.
+	//
+	// Entries are evicted only when the handle closes (forgetBlobStores, via the
+	// registry close hook). On a long-lived handle whose idle reaper is disabled,
+	// provisioning many distinct store names accumulates entries; the amplification
+	// is small (each name is a real, write-capability-gated table) and bounded by the
+	// number of distinct stores a database actually uses, so no size cap is applied.
 	blobStores sync.Map
 }
 
@@ -157,8 +163,8 @@ func New(reg *registry.Registry, eng *engine.Engine, route config.Routing, opts 
 	return h
 }
 
-// handleMetrics renders the metrics registry in OpenMetrics/Prometheus text. It
-// exposes only aggregate counts (and database names as labels), no secrets.
+// handleMetrics renders the metrics registry in the Prometheus text exposition
+// format. It exposes only aggregate counts (and database names as labels), no secrets.
 // Unlike /_health it is NOT whitelisted by the auth middleware, so it is subject
 // to the listener's auth — scrape it on a none/localhost listener, and keep it
 // off a public listener if database names are sensitive.
@@ -170,7 +176,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	w.WriteHeader(http.StatusOK)
-	e.WriteOpenMetrics(w)
+	e.WritePrometheus(w)
 }
 
 // meter applies the admission limiter and, for an admitted request, counts it and
@@ -348,9 +354,31 @@ const bodyReadDeadline = 30 * time.Second
 // boundBodyRead sets a per-request read deadline so a slow-trickle body can't
 // hold a stream open indefinitely. This covers the h2/h2c/h3 case where a
 // connection-level ReadTimeout can't be used (it would kill legitimate
-// multiplexed streams); on h1 it complements the server ReadTimeout.
+// multiplexed streams); on h1 it complements the server ReadTimeout. Suited to the
+// bounded (buffered) endpoints; a large STREAMED body uses boundedStreamReader.
 func boundBodyRead(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadDeadline))
+}
+
+// boundedStreamReader wraps a streamed request body (a blob write, up to the large
+// blob cap) so the read deadline is refreshed BEFORE each Read. This bounds the
+// idle/trickle time between chunks — not the total transfer time — so a large but
+// steadily-progressing upload isn't severed at a fixed wall-clock deadline the way
+// a one-shot boundBodyRead would sever it.
+type boundedStreamReader struct {
+	r  io.Reader
+	rc *http.ResponseController
+}
+
+func (b boundedStreamReader) Read(p []byte) (int, error) {
+	_ = b.rc.SetReadDeadline(time.Now().Add(bodyReadDeadline))
+	return b.r.Read(p)
+}
+
+// streamBody wraps the request body for a streamed upload with the per-chunk idle
+// deadline (see boundedStreamReader).
+func streamBody(w http.ResponseWriter, r io.Reader) io.Reader {
+	return boundedStreamReader{r: r, rc: http.NewResponseController(w)}
 }
 
 // errBodyTooLarge is returned by readBody when the request body exceeds the
