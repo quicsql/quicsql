@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestRegistryOpenMetrics(t *testing.T) {
+func TestRegistryPrometheus(t *testing.T) {
 	r := NewRegistry()
 	r.IncRequests("sales", "app")
 	r.IncRequests("sales", "app")

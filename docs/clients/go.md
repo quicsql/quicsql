@@ -29,6 +29,13 @@ st.Exec(ctx, "COMMIT", nil)
 full-database export are one call each — see
 [pkg.go.dev/quicsql.net/client](https://pkg.go.dev/quicsql.net/client).
 
+Those whole-response reads — a blob, an inverted or concatenated changeset, an
+export, a query result — are buffered under a client-side ceiling,
+`DefaultMaxResponse` (1 GiB), that bounds what a hostile or buggy server can make
+the client allocate. A body over the cap fails with `server response exceeds the
+N-byte client cap`; `client.WithMaxResponse(n)` raises it for genuinely large
+blobs or exports, and `WithMaxResponse(0)` removes it entirely.
+
 ## `database/sql`
 
 The driver registers under gosqlite's `sqlite` name **and** as `quicsql`, so a
@@ -52,6 +59,18 @@ the plaintext transports (`h1`, `h2c`) or `h2`/`h3` with `insecure=1` (unverifie
 TLS) — so a token rides verified TLS (above) or a unix socket. On a trusted
 local/dev link with the self-signed dev cert, add `allow_insecure_auth=1` to opt
 in knowingly.
+
+Credentials ride query params (`?token=` or `?user=&password=`), never URL
+userinfo: a `quicsql://user:pw@host/db` DSN is rejected outright, since it would
+send no credential yet slip past that transport guard. A unix socket has no host,
+so its DSN carries the path instead —
+`quicsql:///app?transport=unix&socket=/run/quicsql/sql.sock`. Statements bind
+positionally: use `?` placeholders with ordered args; a named parameter is
+rejected rather than silently mis-bound. And when the server caps a result set at
+its row or byte limit, the delivered rows are a prefix of the real result and
+`rows.Err()` returns `sqldriver.ErrTruncated` (not `io.EOF`), so
+`errors.Is(rows.Err(), sqldriver.ErrTruncated)` keeps a partial answer from
+passing for a complete one.
 
 For credentials a DSN can't carry (mTLS, keyring), build a `*client.Client`
 and hand it to `sqldriver.OpenConnectorClient` — see the

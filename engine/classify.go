@@ -28,7 +28,11 @@ var ErrDenied = errors.New("statement not permitted by server policy")
 func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, error) {
 	switch strings.ToUpper(firstToken(s.SQL)) {
 	case "ATTACH", "DETACH":
-		return nil, fmt.Errorf("%w: ATTACH/DETACH is disabled", ErrDenied)
+		// Denied by default; an attach-enabled session (server-admin, dev-only) sets
+		// AllowAttach and the connection's permitAttach authorizer does the gating.
+		if !s.AllowAttach {
+			return nil, fmt.Errorf("%w: ATTACH/DETACH is disabled", ErrDenied)
+		}
 	}
 	if isReadOnly(s.SQL) || hasReturning(s.SQL) {
 		return e.Query(ctx, q, s)

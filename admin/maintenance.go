@@ -39,6 +39,7 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.reg.Backend(req.Database) == nil {
+		h.auditFail(r, req.Op, req.Database, "unknown database")
 		writeErr(w, http.StatusNotFound, "unknown database")
 		return
 	}
@@ -50,6 +51,7 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 	case "snapshot":
 		h.snapshot(w, r, req)
 	default:
+		h.auditFail(r, req.Op, req.Database, "unknown maintenance op")
 		writeErr(w, http.StatusBadRequest, "unknown maintenance op")
 	}
 }
@@ -61,21 +63,25 @@ func (h *Handler) offlineCompact(w http.ResponseWriter, r *http.Request, req mai
 	be := h.reg.Backend(req.Database)
 	compacter, ok := be.(backend.OfflineCompacter)
 	if !ok {
+		h.auditFail(r, "compact", req.Database, "backend does not support offline compact")
 		writeErr(w, http.StatusBadRequest, "offline compact is only supported for vault databases")
 		return
 	}
 	release, err := h.reg.Reserve(req.Database)
 	if err != nil {
 		if errors.Is(err, registry.ErrBusy) {
+			h.auditFail(r, "compact", req.Database, "database busy")
 			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
 			return
 		}
+		h.auditFail(r, "compact", req.Database, "reserve failed")
 		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
 		return
 	}
 	defer release()
 	if err := compacter.CompactOffline(); err != nil {
 		h.log.Error("quicsql/admin: offline compact", "db", req.Database, "err", err)
+		h.auditFail(r, "compact", req.Database, "compact failed")
 		writeErr(w, http.StatusInternalServerError, "compact failed")
 		return
 	}
@@ -89,11 +95,13 @@ func (h *Handler) onlineReclaim(w http.ResponseWriter, r *http.Request, req main
 	be := h.reg.Backend(req.Database)
 	reclaimer, ok := be.(backend.OnlineReclaimer)
 	if !ok {
+		h.auditFail(r, req.Op, req.Database, "backend does not support online reclaim")
 		writeErr(w, http.StatusBadRequest, "online reclaim is only supported for vault databases")
 		return
 	}
 	_, releaseRef, err := h.reg.Get(r.Context(), req.Database) // keep the container open
 	if err != nil {
+		h.auditFail(r, req.Op, req.Database, "open failed")
 		h.writeGetErr(w, req.Database, err)
 		return
 	}
@@ -107,6 +115,7 @@ func (h *Handler) onlineReclaim(w http.ResponseWriter, r *http.Request, req main
 	}
 	if err != nil {
 		h.log.Error("quicsql/admin: online reclaim", "db", req.Database, "op", req.Op, "err", err)
+		h.auditFail(r, req.Op, req.Database, "reclaim failed")
 		writeErr(w, http.StatusInternalServerError, "reclaim failed")
 		return
 	}
@@ -130,11 +139,13 @@ func (h *Handler) onlineReclaim(w http.ResponseWriter, r *http.Request, req main
 func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
 	dest, ok := h.contained(req.Dest)
 	if !ok {
+		h.auditFail(r, "snapshot", req.Database, "dest escapes data_dir: "+req.Dest)
 		writeErr(w, http.StatusBadRequest, "snapshot dest must be a path within data_dir")
 		return
 	}
 	dbh, releaseRef, err := h.reg.Get(r.Context(), req.Database)
 	if err != nil {
+		h.auditFail(r, "snapshot", req.Database, "open failed")
 		h.writeGetErr(w, req.Database, err)
 		return
 	}
@@ -142,23 +153,27 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenan
 	data, err := sqlite.Serialize(r.Context(), dbh.Handle.DB)
 	if err != nil {
 		h.log.Error("quicsql/admin: serialize snapshot", "db", req.Database, "err", err)
+		h.auditFail(r, "snapshot", req.Database, "serialize failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot failed")
 		return
 	}
 	// O_EXCL: refuse to overwrite or follow a symlink onto an existing file.
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
+		h.auditFail(r, "snapshot", req.Database, "dest exists or cannot be created: "+dest)
 		writeErr(w, http.StatusConflict, "snapshot dest already exists or cannot be created")
 		return
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		h.log.Error("quicsql/admin: write snapshot", "db", req.Database, "err", err)
+		h.auditFail(r, "snapshot", req.Database, "write failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot write failed")
 		return
 	}
 	if err := f.Close(); err != nil {
 		h.log.Error("quicsql/admin: close snapshot", "db", req.Database, "err", err)
+		h.auditFail(r, "snapshot", req.Database, "write failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot write failed")
 		return
 	}

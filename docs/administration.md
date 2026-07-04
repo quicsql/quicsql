@@ -142,7 +142,7 @@ granularity-15s.
 |---|---|---|---|
 | `compact` | vault | offline-in-place | dense rewrite of the container into minimal size |
 | `compact_online` | vault | online | returns freed blocks to the OS; `"max_bytes"` caps the pass |
-| `trim` | vault | online | releases only the trailing free run — cheapest |
+| `trim` | vault | online | releases only the trailing free run — cheapest; `"max_bytes"` caps it too |
 | `snapshot` | **any** | online | serializes the whole logical database to `"dest"` |
 
 ```sh
@@ -151,9 +151,17 @@ curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance
 # → {"status":"compacted","database":"orders"}          (verified: 2 248 704 → 2 170 880 bytes)
 
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"orders","op":"compact_online","max_bytes":1048576}'
+# → {"status":"reclaimed","database":"orders","bytes_reclaimed":65536}
+
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
   -d '{"database":"orders","op":"snapshot","dest":"orders-backup.db"}'
 # → {"status":"snapshot","database":"orders","dest":"/var/lib/quicsql/orders-backup.db","bytes":2228224}
 ```
+
+The online reclaim ops (`compact_online`, `trim`) report how much they returned to
+the OS in `bytes_reclaimed`; both take an optional `"max_bytes"` to cap a single
+pass.
 
 Offline `compact` does **not** require downtime in the scheduling sense: it
 drains and reserves the idle handle in place (409 *"database busy"* if the
@@ -196,6 +204,55 @@ job, not the audit trail's.
 > error but never fails the operation), and with the control plane disabled
 > there is no audit at all.
 
+### Reading the audit log
+
+The reader must run **with the server stopped** (the meta store is a single-owner
+vault) and resolve the **same `meta_store.key`** the server used — reuse the
+server's `secrets` block so the reference resolves identically:
+
+```go
+package main
+
+import (
+	"fmt"
+	"log/slog"
+
+	"quicsql.net/config"
+	"quicsql.net/meta"
+	"quicsql.net/secret"
+)
+
+func main() {
+	// The same secret sources the server runs with, so meta_store.key resolves.
+	sec, err := secret.New([]config.SecretSource{
+		{Name: "keys", Type: "file", Dir: "/var/lib/quicsql/keys"},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// The same server.meta_store config: backend, path (relative to data_dir), key.
+	store, err := meta.Open(config.MetaStore{
+		Backend: "vault",           // "file" if you configured that
+		Path:    "_meta.vault",     // relative to data_dir
+		Key:     "keys:metakey",    // omit for an unencrypted meta store
+	}, sec, "/var/lib/quicsql", slog.Default())
+	if err != nil {
+		panic(err) // fails if the server is still running (single-owner) or the key is wrong
+	}
+	defer store.Close()
+
+	entries, err := store.AuditEntries(100) // newest first; a limit <= 0 defaults to 100
+	if err != nil {
+		panic(err)
+	}
+	for _, e := range entries {
+		fmt.Printf("at=%d principal=%s action=%s db=%s detail=%q\n",
+			e.At, e.Principal, e.Action, e.DB, e.Detail)
+	}
+}
+```
+
 ## Health, metrics, and the slow-query log
 
 **`GET /_health`** answers `{"status":"ok"}` with **no credentials** on any
@@ -230,13 +287,22 @@ duration summary. Watch rejections in the logs, not the metrics.
 logging:
   slow_threshold: 250ms   # log statements slower than this
   expand_params: false    # default: bound parameters are redacted
+  format: text            # json | text (default text) — the log output format
 ```
 
-Slow statements go to the server log as `INFO quicsql/slow duration_ms=… sql=…`
-with bound parameters shown as `?` unless you opt into `expand_params: true`.
-Two properties to know: the hook is installed **once per process** (changing the
-threshold means a restart), and an aggressive threshold will happily log the
-server's own meta-store statements alongside yours.
+`logging.format` selects the log output format: `json` emits structured JSON (one
+object per line, for a log pipeline), `text` (the default) emits slog's
+human-readable text. Both go to stderr. Slow statements go to the server log as
+`quicsql/slow duration_ms=… sql=…` with bound parameters shown as `?` unless you
+opt into `expand_params: true`. Two properties to know: the slow-log hook is
+installed **once per process** (changing the threshold means a restart), and an
+aggressive threshold will happily log the server's own meta-store statements
+alongside yours.
+
+> [!NOTE]
+> The top-level `wire_compression` and `observability` sections are **parsed but
+> not yet wired** — don't build tooling on them. They parse, and the daemon logs a
+> `present but not active yet` warning at startup, but nothing consumes them.
 
 ## The safety rails, and what tripping them looks like
 
@@ -256,21 +322,176 @@ statement timeout (`504`):
 | `limits.max_tx_lifetime` | 5m | absolute session cap, same reap path |
 | `limits.max_sessions_per_db` | 64 | `503 "too many open sessions"` |
 | `limits.max_blob_bytes` | 1 GiB | `413` on a streamed blob write |
+| `limits.max_export_bytes` | 1 GiB | `413` on a full-database `/export` that exceeds it |
 | `limits.idle_handle_timeout` | 0 (off) | idle handle closed, reopened on demand — note an idle-reaped **memory** database loses its contents |
 
-Full-database exports are additionally capped at 1 GiB with at most 4 running
-concurrently (fixed). And one monitoring gotcha that catches everyone: **SQL
+Full-database exports are additionally capped at `limits.max_export_bytes`
+(default 1 GiB), with at most 4 running concurrently (fixed). And one monitoring gotcha that catches everyone: **SQL
 errors are HTTP 200** with an `{"error": {...}}` envelope — only policy,
 timeout, and authorization failures map to 4xx/5xx. Alert on the error
 envelope, not the status code alone.
 
+## Running as a service
+
+The daemon is a single static binary with no runtime dependencies: run it under
+any supervisor as an **unprivileged user that owns `data_dir`**. A minimal,
+hardened systemd unit:
+
+```ini
+# /etc/systemd/system/quicsql.service
+[Unit]
+Description=quicSQL server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=quicsql
+Group=quicsql
+# systemd creates /var/lib/quicsql and chowns it to the service user; point
+# server.data_dir at it. StateDirectory keeps it writable under ProtectSystem.
+StateDirectory=quicsql
+ExecStart=/usr/local/bin/quicsql --config /etc/quicsql/quicsql.yaml
+NoNewPrivileges=true
+ProtectSystem=strict
+# SIGTERM (systemd's default stop signal) starts the graceful drain; give it
+# more than the 10s drain window so a busy shutdown isn't SIGKILLed mid-flight.
+TimeoutStopSec=20s
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Three behaviors make this safe:
+
+- **Non-root, owner-only files.** Run as a dedicated user; `data_dir` (databases,
+  WAL sidecars, the meta store, snapshots) must be writable by it. The daemon
+  additionally hardens its own umask to **0600** at startup, so those files are
+  created owner-only rather than world-readable under the common `umask 022` —
+  they can hold plaintext data and the audit log. (This is a daemon-only step;
+  an in-process `serverd.Run` embedder keeps its own umask.)
+- **Graceful shutdown on SIGINT/SIGTERM.** `Ctrl-C` or `systemctl stop` triggers
+  a drain bounded at **10 seconds**: in-flight requests finish within that
+  window, then shutdown proceeds in order — **listeners → sessions → registry →
+  meta store**: stop accepting, roll back open transactions and return their
+  pinned connections, checkpoint the WAL on each handle close, then close the
+  meta store. Nothing closes a resource still in use.
+- **Fail-fast start.** A bad config or a seed database that won't open aborts
+  startup with a non-zero exit (seed databases are opened eagerly, with a 30s
+  warm timeout, so a wedged backend fails loudly instead of hanging) — the
+  process never serves a half-initialized instance, so `Restart=on-failure` is
+  safe.
+
+## Running in Docker
+
+The shipped image (`ghcr.io/quicsql/quicsql`) is `distroless/static` **nonroot**
+(uid `65532`) — the CGo-free static binary needs no libc and **no shell**. It
+declares a `/data` volume and exposes the canonical ports, TCP **and** UDP:
+
+```sh
+docker run \
+  -v quicsql-data:/data \
+  -v ./quicsql.yaml:/etc/quicsql/quicsql.yaml:ro \
+  -v ./keys:/etc/quicsql/keys:ro \
+  -p 7775:7775 -p 7777:7777 -p 7777:7777/udp \
+  ghcr.io/quicsql/quicsql
+```
+
+- **Persist `/data`.** Point `server.data_dir` at `/data` (the image's `WORKDIR`,
+  so relative database `path`s resolve there). The meta store and every vault /
+  file container live under it — a fresh container with an empty volume starts
+  with no runtime-created databases and no audit history.
+- **Mount config and secrets read-only.** The default config path is
+  `/etc/quicsql/quicsql.yaml`; mount yours there (`:ro`). Mount any `file`
+  secret source's directory read-only too.
+- **Publish every port you enable — including `7777/udp`.** HTTP/3 rides QUIC
+  over UDP; publishing only `7777/tcp` silently drops h3 while h2 still works.
+  The image `EXPOSE`s `7775-7777/tcp` and `7777/udp`.
+- **No shell to exec into.** Debug from outside — the logs, `/_health`,
+  `/_metrics` — not `docker exec`. That absence is the hardening, not a gap.
+
+## Backup and restore
+
+The two backup artifacts are both the **decrypted logical SQLite image**, not the
+on-disk container: the [`snapshot`](#vault-maintenance) maintenance op (writes the
+image to a `dest` within `data_dir`) and [`GET /<db>/export`](clients/http-api.md)
+(streams the same image to a remote client). For a vault database both are
+**decrypted** — usable as a plain backup, but handle them as sensitive.
+
+Restore is **out-of-band**: there is deliberately **no `/import` route and no
+restore op**. You reintroduce a backup by serving the file, in one of three
+shapes:
+
+- **From a snapshot / export image → serve it as a `file` database.** The image
+  is an ordinary SQLite file. Place it under `data_dir` and either add a
+  `databases:` seed pointing at it or `POST /_admin/create` with
+  `{"database":{"name":"…","backend":"file","path":"restored.db"}}` — `create`
+  test-opens it, so a corrupt image is rejected up front. To restore *over* a
+  damaged database, `detach` it first, then `create` the name anew (create
+  revokes stale grants, so re-supply `grants`).
+- **Back into a vault (encrypted at rest).** The plain image **cannot** be opened
+  as a vault container. Provision a fresh `vault` database and load the data into
+  it over SQL (the snapshot served as a `file` DB is a convenient source), then
+  cut clients over to the vault.
+- **From a cold copy of the vault container.** A byte-for-byte `cp` of the
+  `.vault` file — taken **while the server was stopped** (the vault is
+  single-owner; never copy a live one) — restores as the *same* vault database:
+  put it back at its `path` and serve it with the same `key`/identity (the
+  keyslots travel inside the container). This is the only artifact that stays
+  encrypted end to end.
+
+Swapping files under `data_dir` requires the server **stopped**; serving a
+freshly-placed file through `POST /_admin/create` works while it runs.
+
+## Protecting the meta store
+
+The meta store — a vault container at `data_dir/_meta.vault` by default — holds
+two things the YAML config cannot: the databases **created at runtime** through
+the control plane, and the **audit log**. `server.meta_store.key` encrypts it at
+rest (a keyless vault meta store is plaintext and warned at startup). That key is
+load-bearing:
+
+- **Losing the key aborts startup.** With the control plane enabled, a meta store
+  that won't open (missing or wrong key) fails `serverd.Run` and the daemon exits
+  non-zero — it will not serve without its registry and audit trail.
+- **And it orphans every control-plane-created database.** Those live *only* as
+  rows in the meta store; without the key they are never reconciled, so they stop
+  being served even though their container files still sit under `data_dir`. Your
+  config `databases:` seeds don't depend on the meta store — but you can't reach
+  them until either the key is restored or the control plane is disabled, and
+  disabling it drops every runtime-created database.
+
+So: **back up `meta_store.key`** (it resolves from a secret source — commonly a
+file under the keys directory) alongside the meta store container and the vault
+databases it points at. The meta store is single-owner and there is **no
+key-rotation story yet** — choose the key once, and guard it like the vault keys
+it protects.
+
 ## Administering from the command line
 
-The [qsql CLI](https://github.com/quicsql/qsql) wraps this whole surface, with
-the same connection security flags as its shell (`--cert/--key/--ca/
---ed25519-key`). The admin token goes in `?token=` — bearer auth has no
-username, so `ops:token@…` userinfo is **not** a token (a `user:password@…`
-URL is HTTP Basic instead):
+Two different binaries — don't confuse them. The **`quicsql` daemon** (the server
+this guide is about) is not an admin tool: it takes only `--config` (default
+`quicsql.yaml`) and `--version`, has **no subcommands**, and does its work by
+serving. Everything above is driven over HTTP against `/_admin`, or with the
+separate `qsql` client below.
+
+```sh
+quicsql --config /etc/quicsql/quicsql.yaml   # the only meaningful invocation
+quicsql --version                            # prints "quicsql <version>" and exits
+```
+
+The version string is stamped at release time (`dev` in a local build). There is
+no `quicsql serve`/`quicsql admin` — the brand-named binary leaves room for
+future subcommands, but today the daemon's whole CLI is those two flags.
+
+The [qsql CLI](https://github.com/quicsql/qsql) is the admin client: it wraps
+this whole surface, with the same connection security flags as its shell
+(`--cert/--key/--ca/--ed25519-key`). The admin token goes in `?token=` — bearer
+auth has no username, so `ops:token@…` userinfo is **not** a token. In the
+external `qsql` CLI a `user:password@…` URL is HTTP Basic instead. (The in-repo
+`quicsql://` `database/sql` driver is stricter: it **rejects all URL userinfo**
+and reads credentials only from query params — `?token=` or `?user=&password=`.)
 
 ```sh
 qsql ping 'quicsql://db.example.com:7777?transport=h2&token=OPS_TOKEN'   # GET /_health

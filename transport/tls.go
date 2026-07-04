@@ -1,7 +1,7 @@
 // Package transport starts the quicSQL HTTP handler on every wire — HTTP/1.1,
 // cleartext HTTP/2 (h2c), HTTP/2 over TLS, HTTP/3 over QUIC, and Unix sockets —
 // all serving the identical http.Handler. TLS certificates come from operator
-// files or a dev self-signed generator (qip.sh is a later stretch).
+// files, a dev self-signed generator, or a qip.sh wildcard cert (see qip.go).
 package transport
 
 import (
@@ -31,7 +31,7 @@ const devCertValidity = 365 * 24 * time.Hour
 // client_ca on the profile enables mTLS: requireClient selects whether a client
 // certificate is mandatory (mtls is the only auth method) or optional (it sits
 // alongside other methods).
-func buildTLS(p config.TLSProfile, forH3, requireClient bool) (*tls.Config, error) {
+func (s *Set) buildTLS(p config.TLSProfile, forH3, requireClient bool) (*tls.Config, error) {
 	min, err := tlsMinVersion(p.MinVersion)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,15 @@ func buildTLS(p config.TLSProfile, forH3, requireClient bool) (*tls.Config, erro
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	case "qip":
-		return nil, fmt.Errorf("tls mode %q is a later stretch (use files or self_signed)", p.Mode)
+		// Auto-fetch a qip.sh wildcard cert (a real browser padlock for a private/
+		// loopback bind, no CA). Memoized per zone across listeners, with a renewer
+		// bound to the Set ctx. See qip.go for the security caveat (public key → not
+		// authentication).
+		q, err := s.qipCertFor(p)
+		if err != nil {
+			return nil, err
+		}
+		cfg.GetCertificate = q.get
 	case "":
 		return nil, fmt.Errorf("tls mode is required (files | self_signed)")
 	default:

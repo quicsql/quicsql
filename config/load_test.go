@@ -74,6 +74,9 @@ func TestValidateAuth(t *testing.T) {
 		// keyring over cleartext is config-valid but warned at startup (see
 		// transport.warnCleartextAuth), not a hard error — the auth demo runs it.
 		{"keyring over cleartext h1", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"keyring"}}}}, false},
+		{"logging.format json ok", &Config{Logging: Logging{Format: "json"}}, false},
+		{"logging.format text ok", &Config{Logging: Logging{Format: "text"}}, false},
+		{"logging.format invalid", &Config{Logging: Logging{Format: "xml"}}, true},
 		{"duplicate principal", &Config{Auth: Auth{Principals: []Principal{{Name: "a"}, {Name: "a"}}}}, true},
 		{"empty principal name", &Config{Auth: Auth{Principals: []Principal{{Name: ""}}}}, true},
 		{"unknown credential method", &Config{Auth: Auth{Principals: []Principal{

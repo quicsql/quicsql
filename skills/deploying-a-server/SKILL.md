@@ -57,6 +57,24 @@ srv.Shutdown(ctx)                                            // graceful drain; 
 
 `examples/charged-server` is the full worked example — vault encryption + compression, every transport and auth method, control plane, limits, a custom function — and the reference `charged.yaml` mirrors it for the daemon. Run it with `just charged -hosts your.host,IP`.
 
+## Running in production
+
+The daemon takes **only flags** — `--config` (default `quicsql.yaml`) and `--version` — and **no subcommands** (`quicsql` the daemon is a different binary from the `qsql` client CLI). Startup is **fail-fast**: a bad config or a seed database that won't open aborts with a non-zero exit rather than serving a half-broken instance. On `SIGINT`/`SIGTERM` it drains in-flight requests for up to **10s**, then stops sessions, the registry (WAL checkpoint), and the meta store, in that order. Run it under a supervisor (systemd) as an unprivileged user that owns `data_dir` — full unit and shutdown detail in the [administration guide](../../docs/administration.md#running-as-a-service).
+
+### Docker
+
+The published image (`ghcr.io/quicsql/quicsql`) is built on `gcr.io/distroless/static-debian12:nonroot` — the CGo-free static binary needs no libc and no shell; it runs as uid **65532**. Persist `/data` (the meta store and vault containers live there), mount the config read-only, and publish every port you enable — including **`7777/udp`** for h3/QUIC:
+
+```sh
+docker run \
+  -v quicsql-data:/data \
+  -v ./quicsql.yaml:/etc/quicsql/quicsql.yaml:ro \
+  -p 7775:7775 -p 7777:7777 -p 7777:7777/udp \
+  ghcr.io/quicsql/quicsql
+```
+
+Relative database `path`s resolve under `/data` (the image's `WORKDIR`). There is no shell in the image, so debug from the outside (logs, `/_health`, `/_metrics`), not `docker exec`.
+
 ## Then
 
 - **Pick backends** (file / in-memory / encrypted vault) → the `databases-and-backends` skill.

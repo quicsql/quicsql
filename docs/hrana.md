@@ -166,15 +166,23 @@ The response mirrors the request — one result per entry, in order:
     { "type": "ok", "response": { "type": "execute",
         "result": { "cols": [], "rows": [], "affected_row_count": 1, "last_insert_rowid": "1" } } },
     { "type": "ok", "response": { "type": "execute",
-        "result": { "cols": [ { "name": "count(*)" } ], "rows": [ [ { "type": "integer", "value": "1" } ] ] } } },
+        "result": { "cols": [ { "name": "count(*)" } ], "rows": [ [ { "type": "integer", "value": "1" } ] ],
+                    "affected_row_count": 0, "last_insert_rowid": null } } },
     { "type": "ok", "response": { "type": "close" } }
   ]
 }
 ```
 
+`affected_row_count` and `last_insert_rowid` are **always present** on an
+`execute` result, including for a read: a `SELECT` reports `affected_row_count: 0`
+and `last_insert_rowid: null`. When non-null, `last_insert_rowid` is a **string**
+(Hrana encodes 64-bit integers as strings, matching the tagged-value form).
+
 Arguments use Hrana's **tagged value** form: `{"type":"integer","value":"7"}` (integers are strings), `{"type":"text","value":"…"}`, `{"type":"float","value":1.5}`, `{"type":"blob","base64":"…"}`, `{"type":"null"}`. To run a transaction, omit the trailing `close`, take the `baton` from the response, and send it back in the next request's `"baton"` field; send `close` when you commit. Authentication is the same header you would use anywhere (`Authorization: Bearer …`, a client certificate, or the keyring challenge headers). Beyond `execute` and `close`, the server also accepts the Hrana `batch`, `sequence`, `describe`, `store_sql`, `close_sql`, and `get_autocommit` requests, plus quicSQL's `session_start` / `session_changeset` extensions for changeset capture. `describe` prepares the statement server-side and returns its real shape — the parameter list, the result columns with declared types, `is_explain`, `is_readonly` — without executing it; libSQL SDKs use exactly this to route a statement as a query or an execute.
 
 The `batch` request also has a **streaming variant**: `POST /<db>/v3/cursor` takes `{"baton": …, "batch": {"steps": […]}}` and answers with newline-separated JSON — first a prelude carrying the next baton, then one entry per line (`step_begin` with the step's columns, a `row` per result row, `step_end` with `affected_row_count` / `last_insert_rowid`, or `step_error` for a failed step) — so a large result arrives incrementally instead of as one document. Cursor requests share the pipeline's sessions and batons, honor the same step conditions, and are what Turso's `@tursodatabase/serverless` JavaScript driver speaks.
+
+Two quicSQL extensions to the wire are worth knowing. First, an `execute` result — and a cursor `step_end` — may carry a `truncated: true` field when the server's max-rows cap cut the result short. It is a quicSQL addition the Hrana spec doesn't define (absent unless set), mirroring the [native API](clients/http-api.md)'s `truncated`; narrow the query or raise the configured cap. Second, the bare `/<db>/v2` and `/<db>/v3` paths (no `/pipeline` or `/cursor` suffix) answer `200` with an empty body, for any method — they are the version-support probes the libSQL SDKs hit to decide which Hrana version to speak, so both versions are advertised as available.
 
 ## Observability
 

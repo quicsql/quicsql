@@ -122,8 +122,11 @@ func (h *Handler) stream(ctx context.Context, dbName string, baton *string, leve
 	}
 	// The session owns the registry ref for the stream's life (Open drops it,
 	// after the pinned conn, on Close/reap). A principal that cannot write gets a
-	// read-only pinned connection.
-	s, err := h.sessions.Open(ctx, dbh, release, principal.Name, !level.CanWrite())
+	// read-only pinned connection. ATTACH is enabled on this session only when the
+	// DEV-ONLY allow_attach switch is on AND the principal is a server-admin AND the
+	// session is a writer — otherwise the pinned conn keeps the default deny-ATTACH.
+	allowAttach := h.attachAllowed && level.CanWrite() && h.serverAdmins[principal.Name]
+	s, err := h.sessions.Open(ctx, dbh, release, principal.Name, !level.CanWrite(), allowAttach)
 	if err != nil {
 		release()
 		return nil, err
@@ -332,7 +335,9 @@ func (h *Handler) execStmt(ctx context.Context, sess *session.Session, st hStmt)
 	}
 	ctx, cancel := h.withTimeout(ctx)
 	defer cancel()
-	res, err := h.eng.Run(ctx, sess.Conn(), stmtFromHrana(sqlText, st))
+	stmt := stmtFromHrana(sqlText, st)
+	stmt.AllowAttach = sess.AllowsAttach() // DEV-ONLY: lift the ATTACH denial for a gated session
+	res, err := h.eng.Run(ctx, sess.Conn(), stmt)
 	if err != nil {
 		return nil, err
 	}

@@ -24,6 +24,17 @@ import (
 
 const shutdownGrace = 10 * time.Second
 
+// newLogger builds the process logger from the configured logging.format: "json"
+// emits structured JSON (for a log pipeline), "text" or "" emits the default
+// human-readable text. Output goes to stderr so stdout stays clean. Config
+// validation has already rejected any other value.
+func newLogger(format string) *slog.Logger {
+	if format == "json" {
+		return slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, nil))
+}
+
 // version is the build version, stamped at release time via
 // -ldflags "-X main.version=<tag>" (see .goreleaser.yaml); "dev" otherwise.
 var version = "dev"
@@ -39,12 +50,18 @@ func main() {
 		return
 	}
 
+	// Bootstrap logger for config-load errors — we don't know the configured format
+	// until the config parses.
 	log := slog.Default()
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Error("quicsql: load config", "err", err)
 		os.Exit(1)
 	}
+	// Now build the real logger from logging.format (json | text) and make it the
+	// process default so every component (including the slow-query log) uses it.
+	log = newLogger(cfg.Logging.Format)
+	slog.SetDefault(log)
 	srv, err := serverd.Run(cfg, log)
 	if err != nil {
 		log.Error("quicsql: start", "err", err)

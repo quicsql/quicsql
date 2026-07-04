@@ -167,6 +167,8 @@ defer c.Close()
 
 A DSN cannot carry a certificate and a private key, so the `database/sql` driver reaches mTLS by building this `*client.Client` and handing it to `sqldriver.OpenConnectorClient(c, "app")` — see the [Hrana guide](hrana.md) and the driver docs.
 
+mTLS also sidesteps the driver's credential guards. Those guards refuse a text credential (`?token=`/`?user=`) sent over a cleartext or unverified channel — see [the auth guide](auth-and-authz.md) — but a client certificate is public material verified at the handshake, not a secret sent in a header, so it triggers neither the DSN refusal nor the raw-constructor warning. The one rule that still bites you here is the ordinary TLS one: keep `insecure=false` / never pass `true` to `H2TLS`/`H3`. mTLS proves the *client* to the server; verifying the server's own certificate is still your job, and skipping it hands the channel (and any data on it) to a man-in-the-middle.
+
 ## Testing from the command line
 
 `curl` speaks mTLS, so you can validate the whole chain without writing code:

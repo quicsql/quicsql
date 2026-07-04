@@ -66,10 +66,16 @@ A batch returns one result per statement, in order:
 
 ## Errors
 
-Transport-level problems use HTTP status codes: `401` (bad/missing
-credentials), `403` (authorization denied — e.g. a write from a read-only
-principal), `404` (unknown database), `413` (body too large), `504`
-(statement timeout). The body always carries the envelope:
+Transport-level problems use HTTP status codes: `400` (malformed request —
+invalid JSON, an unknown field, or setting both `sql` and `statements`), `401`
+(bad/missing credentials), `403` (authorization denied — e.g. a write from a
+read-only principal), `404` (unknown database), `405` (wrong method — `/query`
+is POST-only), `413` (body too large), `429` (the caller hit its rate limit),
+`503` (the database is momentarily busy — the per-database concurrency cap, or a
+database briefly unavailable during a control-plane operation), and `504`
+(statement timeout). The [Hrana](../hrana.md) pipeline and cursor endpoints add
+`501` when interactive sessions are disabled on the server. The body always
+carries the envelope:
 
 ```json
 { "error": { "message": "no such table: userz", "code": 1, "extended_code": 1 } }
@@ -98,6 +104,119 @@ your language which wraps it.
 
 Beyond `/query`, each database also serves `/export` (a full database
 snapshot), `/changeset/*` (SQLite session changesets), and `/blob/*` (streamed
-large objects) — see the [server docs](../databases.md). Server-scoped
-endpoints (`/_health`, `/_metrics`, `/_admin/*`) are documented in the
-[auth guide](../auth-and-authz.md).
+large objects) — specified [below](#beyond-query). Server-scoped endpoints live
+elsewhere: `/_health` (unauthenticated liveness) is in the
+[auth guide](../auth-and-authz.md), and `/_metrics` (Prometheus) and `/_admin/*`
+(the control plane) are in [administration](../administration.md).
+
+## Beyond `/query`
+
+The same per-database URL prefix carries three more endpoints for work the
+single-shot JSON path can't express: a full-database snapshot, SQLite session
+changesets, and streamed large objects. They share the auth, routing, and
+admission (`429`/`503`) behavior of `/query`; each adds its own body shape and
+status codes.
+
+### `/export` — a full database snapshot
+
+```
+GET /<db>/export
+Authorization: Bearer <token>
+```
+
+Returns the entire database as one SQLite file image
+(`application/octet-stream`) — the same bytes a file-level backup would hold —
+with `Content-Disposition: attachment; filename="<db>.sqlite"`. **Read access is
+enough:** a principal who can read every row via SQL gains nothing extra from a
+bulk copy. A vault (encrypted) database is serialized **decrypted**, exactly as
+its readers already see it — the client can't ask for the on-disk form. It is
+GET-only (`405` otherwise), and there is no companion `/import` endpoint.
+
+The image is materialized whole in RAM before it streams, so two limits guard
+the process:
+
+- A database whose image exceeds the export cap (default **1 GiB**,
+  `limits.max_export_bytes`) is refused with `413`.
+- At most **4** exports run at once across the whole server (independent of the
+  per-database concurrency cap, since each holds a full image in memory). A
+  request beyond that waits for a slot; if its own request context is cancelled
+  or times out while waiting, it returns `503` ("too many concurrent exports").
+
+### `/changeset/*` — SQLite session changesets
+
+These move **changesets** — the binary diff SQLite's
+[session extension](https://www.sqlite.org/sessionintro.html) records — between
+databases, the backbone of a simple logical-replication or undo workflow. All
+three are POST.
+
+| Endpoint | Access | Request body | Response |
+|---|---|---|---|
+| `POST /<db>/changeset/apply` | write | raw changeset bytes | `{"status":"ok"}` |
+| `POST /<db>/changeset/invert` | read | raw changeset bytes | inverted changeset (`application/octet-stream`) |
+| `POST /<db>/changeset/concat` | read | JSON `{"a":"<base64>","b":"<base64>"}` | concatenated changeset (`application/octet-stream`) |
+
+Mind the **body-format asymmetry**: `apply` and `invert` take the changeset as
+the **raw request body** (the exact bytes); `concat` takes a **JSON** object
+whose two changesets are **base64-encoded** — it carries two of them, so it
+can't use a raw body. `apply` requires **write** access (it mutates the database
+on a fresh connection); `invert` and `concat` are pure transforms that read and
+write nothing, so **read** access suffices.
+
+Errors beyond the shared codes: an empty body is `400` ("empty changeset"); a
+malformed `concat` body is `400` (bad JSON, or a value that isn't valid base64);
+a changeset SQLite rejects (wrong schema, corrupt) is `422`; a body over the
+shared request-body cap (`limits.max_request_bytes`, default 8 MiB — not the
+larger blob cap) is `413`.
+
+**The capture → apply flow (replication).** You *capture* a changeset over
+[Hrana](../hrana.md): open a stream, send a `session_start` request (optionally
+naming the tables to track), run your writes, then send `session_changeset`,
+which returns the accumulated changeset as **base64**. To replicate it onto
+another database (or another server), base64-**decode** it and POST the raw
+bytes to that database's `/changeset/apply`. `invert` yields a changeset's undo;
+`concat` merges two captures into one.
+
+### `/blob/*` — streamed large objects
+
+For objects too big to round-trip through a `BLOB` column, quicSQL exposes
+gosqlite's **blobstore**: chunked, optionally compressed and deduplicated
+objects, each addressed by a numeric **id** inside a named **store**. A blob
+write and read **stream**, so a single object is bounded by the large-object cap
+(default **1 GiB**, `limits.max_blob_bytes`), not the small JSON body cap.
+
+Every call takes `?store=<name>` (a valid identifier — invalid or missing is
+`400`); the per-object ops also take `?id=<n>` (missing → `400 "missing ?id="`,
+non-numeric → `400 "invalid ?id="`).
+
+| Endpoint | Method | Access | Query | Response |
+|---|---|---|---|---|
+| `/<db>/blob/provision` | POST | write | `?store=` + options | `{"status":"ok"}` |
+| `/<db>/blob/create` | POST | write | `?store=` | `{"id":<n>}` |
+| `/<db>/blob/write` | POST | write | `?store=&id=` | `{"size":<n>}` |
+| `/<db>/blob/read` | GET | read | `?store=&id=` | raw bytes (`application/octet-stream`) |
+| `/<db>/blob/size` | GET | read | `?store=&id=` | `{"size":<n>}` |
+| `/<db>/blob/delete` | POST | write | `?store=&id=` | `{"status":"ok"}` |
+
+The typical lifecycle: `provision` a store once with the layout you want,
+`create` to mint an id, `write` the bytes (the body streams; a rewrite that
+shrinks the object truncates it to the new length), then `read`/`size` as needed
+and `delete` when done. `create`/`write`/`delete` need write access;
+`read`/`size` need only read; wrong method is `405` (writes POST, reads GET). A
+store that was never provisioned is created with defaults on first write, so
+`provision` is optional — but reading from a store that doesn't exist is `404`.
+
+**Provisioning options** are query params on `/blob/provision`; they fix the
+store's storage layout, and every object created in it afterward honors them:
+
+| Param | Values | Effect |
+|---|---|---|
+| `chunk` | positive integer | chunk size, in bytes |
+| `compress` | `fastest` `fast` `default` `better` `best` | per-chunk compression level |
+| `dedup` | `1` | deduplicate identical chunks |
+
+**Status codes:** `400` (invalid/missing `?store=` or `?id=`); `403` (a write
+from a read-only principal); `404` (unknown database; a store that doesn't exist
+on a read; or an unknown object id); `405` (wrong method); `413` (a write over
+`max_blob_bytes`); `422` (the blobstore operation itself failed — a provision,
+store open on a write, create, write, read, size, or delete error). The shared
+`429`/`503` admission codes apply as everywhere.

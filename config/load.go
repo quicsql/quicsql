@@ -219,6 +219,11 @@ func (c *Config) Validate() error {
 	if err := c.validateAuth(); err != nil {
 		return err
 	}
+	switch c.Logging.Format {
+	case "", "text", "json":
+	default:
+		return fmt.Errorf("config: logging.format %q invalid (want text|json)", c.Logging.Format)
+	}
 	return nil
 }
 
@@ -417,7 +422,11 @@ func (c *Config) validateTransports() error {
 	}
 	for name, p := range c.TLS {
 		switch p.Mode {
-		case "self_signed", "qip":
+		case "self_signed":
+		case "qip":
+			if !validQIPZone(p.Subdomain) {
+				return fmt.Errorf("config: tls profile %q qip subdomain %q must be a DNS zone name (letters, digits, '.', '-')", name, p.Subdomain)
+			}
 		case "files":
 			if p.Cert == "" || p.Key == "" {
 				return fmt.Errorf("config: tls profile %q (files) needs cert and key", name)
@@ -434,4 +443,21 @@ func (c *Config) validateTransports() error {
 		}
 	}
 	return nil
+}
+
+// validQIPZone reports whether a qip subdomain is a safe DNS zone name. Empty is OK
+// (it defaults to i.qip.sh); otherwise only DNS-label characters are allowed, so a
+// stray path segment or URL can't be spliced into the qip.sh cert-fetch URL.
+func validQIPZone(zone string) bool {
+	if zone == "" {
+		return true
+	}
+	for _, r := range zone {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

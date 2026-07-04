@@ -39,6 +39,15 @@ type Options struct {
 type Set struct {
 	http []*http.Server
 	h3   []h3Listener
+	// ctx bounds background goroutines a listener may start (the qip.sh cert
+	// renewer); cancel fires on Shutdown so they stop with the servers.
+	ctx    context.Context
+	cancel context.CancelFunc
+	log    *slog.Logger
+	// qip memoizes the fetched qip.sh certificate per zone, so listeners sharing a
+	// qip profile (e.g. h2 + h3 on the same port) reuse one fetch and one renewer
+	// instead of double-fetching. Populated only during the sequential Serve loop.
+	qip map[string]*qipCert
 }
 
 // h3Listener pairs a QUIC HTTP/3 server with its UDP conn: quic-go does NOT
@@ -53,7 +62,8 @@ type h3Listener struct {
 // the same handler (wrapped per-listener by opts.Wrap when set). On a mid-startup
 // failure it tears down what it started and returns the error.
 func Serve(log *slog.Logger, cfg *config.Config, handler http.Handler, opts Options) (*Set, error) {
-	set := &Set{}
+	set := &Set{log: log}
+	set.ctx, set.cancel = context.WithCancel(context.Background())
 	for _, lc := range cfg.Listeners {
 		if err := set.start(log, cfg, lc, handler, opts); err != nil {
 			set.Shutdown(context.Background())
@@ -128,6 +138,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 			return err
 		}
 		warnSelfSigned(log, lc.Name, p)
+		warnQIPExposed(log, lc.Name, p, lc.Address)
 		tc.NextProtos = []string{"h2", "http/1.1"}
 		ln, err := net.Listen("tcp", lc.Address)
 		if err != nil {
@@ -150,6 +161,7 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 			return err
 		}
 		warnSelfSigned(log, lc.Name, p)
+		warnQIPExposed(log, lc.Name, p, lc.Address)
 		tc.NextProtos = []string{"h3"}
 		conn, err := net.ListenPacket("udp", lc.Address) // bind synchronously to surface errors
 		if err != nil {
@@ -182,7 +194,7 @@ func (s *Set) tlsFor(cfg *config.Config, lc config.Listener) (*tls.Config, confi
 	// A client cert is REQUIRED only when mtls is the listener's sole auth method;
 	// alongside other methods it is optional (VerifyClientCertIfGiven) so bearer /
 	// keyring clients can still connect.
-	tc, err := buildTLS(p, lc.Transport == "h3", onlyAuthMethod(lc, "mtls"))
+	tc, err := s.buildTLS(p, lc.Transport == "h3", onlyAuthMethod(lc, "mtls"))
 	return tc, p, err
 }
 
@@ -284,6 +296,9 @@ func h2Server(h http.Handler, connCtx func(context.Context, net.Conn) context.Co
 // server sends GOAWAY and drains (Shutdown, not the abrupt Close) before its UDP
 // conn is closed to release the port.
 func (s *Set) Shutdown(ctx context.Context) {
+	if s.cancel != nil {
+		s.cancel() // stop the qip.sh renewer (and any other lifetime goroutine)
+	}
 	for _, srv := range s.http {
 		_ = srv.Shutdown(ctx)
 	}

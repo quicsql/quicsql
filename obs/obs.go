@@ -1,5 +1,5 @@
 // Package obs is the observability seam. Live today: the Metrics interface with
-// an OpenMetrics Registry (served at /_metrics), alongside the slow-query log
+// a Prometheus-text metrics Registry (served at /_metrics), alongside the slow-query log
 // (driver TraceProfile — see backend.InstallSlowLog) and the admin audit log
 // (meta store). The Channels type below is a seam for later work: routing each
 // structured channel to its own sink (file, per-database file, syslog) and the
@@ -30,7 +30,7 @@ func Default() *Channels {
 	return &Channels{Server: l, Conn: l, SQLExec: l, SQLSlow: l, SQLAudit: l, SQLError: l}
 }
 
-// Metrics is the counter/latency sink. Phase 7 backs it with an OpenMetrics
+// Metrics is the counter/latency sink. Phase 7 backs it with a Prometheus-text
 // exporter; Nop is the Phase 0 default.
 type Metrics interface {
 	IncRequests(db, principal string)
@@ -46,7 +46,7 @@ func (Nop) ObserveLatency(string, time.Duration) {}
 func (Nop) Forget(string)                        {}
 
 // Exposer is implemented by a Metrics sink that can render itself as
-// OpenMetrics/Prometheus text (the /_metrics endpoint checks for it).
+// Prometheus text (the /_metrics endpoint checks for it).
 type Exposer interface {
 	WritePrometheus(w io.Writer)
 }

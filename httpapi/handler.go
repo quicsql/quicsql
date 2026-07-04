@@ -55,6 +55,11 @@ type Handler struct {
 	stmtTO    time.Duration // per-request statement timeout (0 = none)
 	log       *slog.Logger
 	sessions  *session.Store // Hrana interactive-transaction streams (nil = disabled)
+	// attachAllowed is the DEV-ONLY auth.sql_policy.allow_attach switch; serverAdmins
+	// is the control_plane.admins set. ATTACH is permitted on a pinned session only
+	// when attachAllowed AND the opening principal is a server-admin (see stream()).
+	attachAllowed bool
+	serverAdmins  map[string]bool
 	// blobStores caches an opened *blobstore.Store per (db handle, name) so blob
 	// ops don't re-open (and re-run the idempotent CREATE TABLE) per request, and
 	// so a provisioned store's options survive across ops. Keyed like the local
@@ -114,6 +119,23 @@ func WithLogger(l *slog.Logger) Option {
 // WithSessions enables the Hrana pipeline endpoints, backed by the given store.
 func WithSessions(s *session.Store) Option {
 	return func(h *Handler) { h.sessions = s }
+}
+
+// WithAttach enables the DEV-ONLY ATTACH switch (auth.sql_policy.allow_attach). When
+// allowed, ATTACH/DETACH are permitted on a pinned Hrana session — but only for a
+// principal named in serverAdmins (control_plane.admins). The autocommit path and
+// non-server-admins stay denied. Off (the default) leaves the sandbox unconditional.
+func WithAttach(allowed bool, serverAdmins []string) Option {
+	return func(h *Handler) {
+		h.attachAllowed = allowed
+		h.serverAdmins = make(map[string]bool, len(serverAdmins))
+		for _, a := range serverAdmins {
+			if a == "" {
+				continue // never let an empty name match the anonymous principal
+			}
+			h.serverAdmins[a] = true
+		}
+	}
 }
 
 // WithPolicy sets the authorization policy. Without it the handler defaults to

@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -53,6 +54,7 @@ type Session struct {
 	dbName    string
 	principal string // the principal that opened the stream (baton is bound to it)
 	readOnly  bool   // pinned conn carries the write-denying authorizer
+	attach    bool   // DEV-ONLY: pinned conn permits ATTACH/DETACH (server-admin only)
 	created   time.Time
 	lastUsed  time.Time
 	busy      bool
@@ -99,6 +101,10 @@ func (s *Session) TakeCapture() *sqlite.Session {
 
 // DBName is the database this session is bound to.
 func (s *Session) DBName() string { return s.dbName }
+
+// AllowsAttach reports whether this session may run ATTACH/DETACH (DEV-ONLY;
+// server-admin writer sessions when auth.sql_policy.allow_attach is on).
+func (s *Session) AllowsAttach() bool { return s.attach }
 
 // Principal is the name of the principal that opened this session.
 func (s *Session) Principal() string { return s.principal }
@@ -159,7 +165,7 @@ func NewStore(ttl, maxLife time.Duration, max int) (*Store, error) {
 // life (a read-only principal's interactive transaction cannot write). The
 // returned session is marked busy (a request is about to run on it); the caller
 // clears that via Baton/Close.
-func (st *Store) Open(ctx context.Context, db *registry.DB, release func(), principal string, readOnly bool) (*Session, error) {
+func (st *Store) Open(ctx context.Context, db *registry.DB, release func(), principal string, readOnly, allowAttach bool) (*Session, error) {
 	st.mu.Lock()
 	if st.perDB[db.Name] >= st.max {
 		st.mu.Unlock()
@@ -173,8 +179,19 @@ func (st *Store) Open(ctx context.Context, db *registry.DB, release func(), prin
 		st.releaseSlot(db.Name)
 		return nil, err
 	}
-	if readOnly {
+	// allowAttach is DEV-ONLY and only reaches here for a server-admin writer session
+	// (httpapi gates it); it permits ATTACH/DETACH on this pinned connection, cleaned
+	// up by ClearAttach on close. A read-only session never enables it.
+	attach := allowAttach && !readOnly
+	switch {
+	case readOnly:
 		if err := backend.SetConnMode(ctx, conn, true); err != nil {
+			_ = conn.Close()
+			st.releaseSlot(db.Name)
+			return nil, err
+		}
+	case attach:
+		if err := backend.SetConnAttach(ctx, conn); err != nil {
 			_ = conn.Close()
 			st.releaseSlot(db.Name)
 			return nil, err
@@ -192,7 +209,7 @@ func (st *Store) Open(ctx context.Context, db *registry.DB, release func(), prin
 	now := time.Now()
 	s := &Session{
 		id: id, gen: 1, conn: conn, release: release, dbName: db.Name,
-		principal: principal, readOnly: readOnly,
+		principal: principal, readOnly: readOnly, attach: attach,
 		created: now, lastUsed: now, busy: true, sql: map[int32]string{},
 	}
 	st.sessions[id] = s
@@ -398,7 +415,7 @@ func (st *Store) closeLocked(id [idLen]byte) {
 	// return the conn to the pool, then drop the registry ref. All best-effort (a
 	// no-tx ROLLBACK just errors). Tracked by st.closing so CloseAll can wait.
 	st.closing.Add(1)
-	go func(c *sql.Conn, release func(), readOnly bool, capture *sqlite.Session) {
+	go func(c *sql.Conn, release func(), readOnly, attach bool, capture *sqlite.Session) {
 		defer st.closing.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), closeRollbackTimeout)
 		defer cancel()
@@ -406,17 +423,29 @@ func (st *Store) closeLocked(id [idLen]byte) {
 			_ = capture.Close() // close the SESSION handle before its connection
 		}
 		_, _ = c.ExecContext(ctx, "ROLLBACK")
-		if readOnly {
+		switch {
+		case readOnly:
 			// Restore base mode on a fresh context, not the ROLLBACK's (which a slow
 			// rollback may have already consumed): a failed restore would return a
 			// still-read-only conn to the pool, breaking a later borrower's writes.
 			_ = backend.SetConnMode(context.Background(), c, false)
+		case attach:
+			// DETACH everything and restore the deny-ATTACH authorizer BEFORE the conn
+			// returns to the pool, so an attachment from this session can't leak onto a
+			// later borrower. Fresh context, same rationale as the read-only restore.
+			if err := backend.ClearAttach(context.Background(), c); err != nil {
+				// Cleanup was incomplete — a DETACH failed (e.g. a stuck transaction the
+				// ROLLBACK couldn't clear) or the deny authorizer couldn't be restored.
+				// Either leaves a fail-open connection: poison it so database/sql
+				// DISCARDS it instead of returning the leaked attachment to the pool.
+				_ = c.Raw(func(any) error { return driver.ErrBadConn })
+			}
 		}
 		_ = c.Close()
 		if release != nil {
 			release()
 		}
-	}(s.conn, s.release, s.readOnly, s.TakeCapture())
+	}(s.conn, s.release, s.readOnly, s.attach, s.TakeCapture())
 }
 
 // StartReaper runs a background loop that closes idle / over-lifetime sessions

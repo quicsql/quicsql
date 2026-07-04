@@ -6,6 +6,11 @@ type Statement struct {
 	SQL   string
 	Args  []Value
 	Named []NamedArg
+	// AllowAttach lifts Run's textual ATTACH/DETACH denial for THIS statement,
+	// deferring to the connection's authorizer instead. Set only by the Hrana path
+	// for a DEV-ONLY attach-enabled session (server-admin); that connection carries
+	// the permitAttach authorizer. The native/autocommit path never sets it.
+	AllowAttach bool
 }
 
 // NamedArg binds a value to a named SQLite parameter (:name / @name / $name).

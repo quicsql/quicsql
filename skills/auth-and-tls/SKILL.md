@@ -28,6 +28,8 @@ auth:
 
 The server stores only hashes/public keys, never the raw secret. A **present-but-wrong credential is a 401** — never downgraded to anonymous. `peercred: { uid: 1000 }` works only on a Unix socket. `none` admits the anonymous principal.
 
+The server **warns loudly at startup** (it does not refuse) when a cleartext listener (`h1`/`h2c`) accepts a secret-bearing method — `bearer`, `password`, or `keyring`; move that port to TLS or a Unix socket. `keyring` gets its own warning: a cleartext keyring signature is not just exposed but replayable within the challenge's lifetime (the challenge is not single-use), so cleartext voids its security model. `mtls`/`peercred`/`none` send no wire secret and are not flagged.
+
 ## Authorization (per-database grants)
 
 ```yaml
@@ -68,3 +70,5 @@ cl := client.H2TLS("host:7777", false, client.WithRootCA(pool),
 ```
 
 `false` = verify the server (never skip in production). A `database/sql` DSN can carry `?token=` or `?user=&password=`, but **not** mTLS/keyring — for those build a `*client.Client` and pass it to `sqldriver.OpenConnectorClient`. mTLS is the zero-per-request choice for key-based identity at volume.
+
+The DSN driver guards credentials, with two **hard errors**: (1) a `?token=`/`?user=` DSN over cleartext (`transport=h1`/`h2c`) or unverified TLS (`h2`/`h3` with `insecure=1`) is **refused** — override with `allow_insecure_auth=1` for a trusted local/dev link (a `unix` socket is exempt); (2) URL userinfo (`quicsql://user:pw@host/db`) is **rejected** — credentials go in query params, never `user:pw@host`. The raw `client.H1/H2C/H2TLS/H3` constructors apply the same transport check but only **warn** (the caller chose transport + credential explicitly). An mTLS cert is public material, so it triggers neither guard.

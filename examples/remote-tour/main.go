@@ -307,7 +307,7 @@ func observability(ctx context.Context, ck *checker, addr string, pool *x509.Cer
 	section("observability (/_metrics)")
 	hc := adminHTTP(pool, cert)
 	code, body := getURL(ctx, hc, "https://"+addr+"/_metrics")
-	ck.expect("scrape /_metrics (OpenMetrics)", code == 200 && strings.Contains(body, "quicsql_requests_total"), fmt.Sprintf("HTTP %d", code))
+	ck.expect("scrape /_metrics (Prometheus text)", code == 200 && strings.Contains(body, "quicsql_requests_total"), fmt.Sprintf("HTTP %d", code))
 }
 
 // --- helpers ---

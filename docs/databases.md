@@ -194,7 +194,7 @@ The defaults are fine for most databases — reach for these only when tuning a 
 
 ### Maintenance
 
-A vault reclaims space through the control plane (`/_admin`, admin only): offline **compact** (rewrite densely), online **reclaim** and **trim** (return freed blocks to the OS on the live handle), and **snapshot**. See the control-plane docs; grant a principal `admin` on the database (or make it a server-admin) to run these.
+A vault reclaims space through the control plane (`/_admin`, admin only), each a maintenance `op`: offline **compact** (the `compact` op — rewrite densely), online **reclaim** and **trim** (the `compact_online` and `trim` ops — return freed blocks to the OS on the live handle), and **snapshot** (`snapshot`). See the control-plane docs; grant a principal `admin` on the database (or make it a server-admin) to run these.
 
 ## Tuning any database — pragmas & pool
 
@@ -220,6 +220,55 @@ databases:
 
 Recognized pragma keys include `journal_mode`, `synchronous`, `auto_vacuum`, `temp_store`, `foreign_keys`, `cache_size`, and `busy_timeout`; anything else is passed through as a raw pragma. `pool.busy_timeout` is the typed, authoritative timeout — prefer it over a `busy_timeout` in the pragmas map.
 
+## Locking down the SQL surface — `auth.sql_policy`
+
+Beyond the per-database `grants`, a server-wide **SQL policy** under `auth:` controls the single most dangerous corner of the SQL surface — attaching other database files. It defaults to the locked-down setting, so the out-of-the-box posture is a default-deny sandbox:
+
+```yaml
+auth:
+  sql_policy:
+    allow_attach: false            # default; set true (DEV ONLY) to permit ATTACH/DETACH for server-admins on sessions
+  principals:
+    - { name: app, methods: [ { bearer: { token_hash: "<sha256-of-token>" } } ] }
+```
+
+### `allow_attach` — the dev-only ATTACH switch
+
+`ATTACH`/`DETACH` let a query open other database files on the server's filesystem — the classic way out of the sandbox. By default quicSQL denies them **unconditionally** at statement-compile time on every connection (even one hidden inside a multi-statement script).
+
+`allow_attach: true` is a **development-only** switch that lifts this — but narrowly:
+
+- **Server-admins only.** ATTACH is permitted only for a principal named in `control_plane.admins`. Ordinary read-write/admin-grant principals stay denied.
+- **Interactive sessions only.** It works only on a **pinned Hrana session** (an interactive transaction — `BeginTx` in `database/sql`, or an `OpenStream`), never on the stateless autocommit `/<db>/query` endpoint. That's both because a shared-pool ATTACH would leak the attachment to a later request on the same connection, and because on the pool an `ATTACH` and the query that uses it can land on different connections. The attachment is DETACHed automatically when the session closes.
+- **Loud.** The daemon logs a startup warning whenever `allow_attach` is on.
+
+> **⚠️ It disables the filesystem sandbox for server-admins.** An `ATTACH` target is any path the server process can read/write (paths are relative to the server's working directory). Never enable this in production, and only with fully-trusted server-admins.
+
+**Example** — enable it, then a server-admin joins across databases from an interactive transaction:
+
+```yaml
+# quicsql.yaml (dev)
+auth:
+  sql_policy: { allow_attach: true }
+  principals:
+    - { name: dev, methods: [ { bearer: { token_hash: "<sha256-of-dev-token>" } } ] }
+databases:
+  - { name: main, backend: file, path: main.db, grants: [ { principal: dev, level: admin } ] }
+control_plane: { enabled: true, admins: [dev] }   # "dev" is a server-admin
+```
+
+```go
+// database/sql — BeginTx pins the session; ATTACH + join, all on one connection.
+db, _ := sql.Open("sqlite", "quicsql://db.example.com:7777/main?transport=h2&token="+devToken)
+tx, _ := db.BeginTx(ctx, nil)
+tx.ExecContext(ctx, `ATTACH DATABASE 'reports.db' AS r`)
+rows, _ := tx.QueryContext(ctx, `SELECT u.name, r.total FROM users u JOIN r.summary r ON r.uid = u.id`)
+// ... use rows ...
+tx.Commit() // the ATTACH is torn down when the session ends
+```
+
+`load_extension` is deliberately **not** configurable — loading an arbitrary shared library over the network would be remote code execution — and the extension set is fixed at compile time by the curated `quicsql.net/extensions` bundle (regexp, fts5, vec0, …). Principals and per-database `grants` are covered in the [auth & authz guide](auth-and-authz.md).
+
 ## Supplying secrets
 
 Any key field on a vault (`key`, `identities`, `masters`, `write_as`, `create.recipients`, …) is a **`source:name` reference**, resolved at startup from a declared secret source — so raw key material never lives inline in the config:
@@ -232,6 +281,7 @@ secrets:
 
 - `type: file` — `name` is a filename inside the source's `dir` (reads escaping the dir via `..` are rejected).
 - `type: env` — `name` is an environment variable.
+- `type: kms` (with an `endpoint`) — **reserved and not yet implemented**; a key reference resolved through a `kms` source fails at startup. Use `file` or `env`.
 
 How the referenced bytes are interpreted depends on the field: a `key` is the **raw cipher key** (32 bytes for adiantum, 64 for aes-xts); an `identity` is an **OpenSSH private key** (or a passphrase); a `recipient` is an **authorized_keys public line** (or a passphrase); `masters`/`writers`/`sign_with`/`write_as` are **ed25519 SSH keys** (public line or private key). A broken reference fails at startup, not on first request. (The server's own encrypted meta store uses the same references — see the config for `meta_store.key`.)
 

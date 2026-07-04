@@ -18,8 +18,9 @@
 // config (plain file, read-only, private and shared in-memory, vfs/mvcc and
 // vfs/memdb, and vfs/vault plain / compressed / encrypted / multi-recipient /
 // authenticated-writer), a control plane at /_admin (runtime create / detach /
-// list databases and vault maintenance — offline compact, online reclaim, trim,
-// snapshot — with a meta store and audit log), and observability + safety rails:
+// list databases and vault maintenance — offline compact, online reclaim
+// (compact_online) and trim, snapshot — with a meta store and audit log), and
+// observability + safety rails:
 // a /_metrics Prometheus-text endpoint, /_admin introspection (info / databases /
 // sessions / kill), a slow-query log (driver TraceProfile, params redacted by
 // default — logging.expand_params opts into expanded SQL), a

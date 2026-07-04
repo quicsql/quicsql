@@ -58,7 +58,7 @@ Both sides derive the SAME fixed dev credentials (CA, mTLS client cert, keyring 
 
 `gosqlite.org` itself is a driver for **local** SQLite; it is not a network client. To reach the server from Go:
 
-- **`quicsql.net/client`** — a thin client for the native-JSON API, one constructor per transport (`H1`, `H2C`, `H2TLS`, `H3`, `Unix`) with auth options (`WithBearer`, `WithBasicAuth`, `WithClientCert`, `WithEd25519`). This is what both demos use.
+- **`quicsql.net/client`** — a thin client for the native-JSON API, one constructor per transport (`H1`, `H2C`, `H2TLS`, `H3`, `Unix`) with auth/TLS options (`WithBearer`, `WithBasicAuth`, `WithClientCert`, `WithEd25519`, `WithRootCA` to verify a private/dev CA) — plus `WithMaxResponse`, which raises the 1 GiB client-side ceiling on a buffered blob/export/result body. This is what both demos use.
 - **`quicsql.net/client/sqldriver`** — registers a `database/sql` driver named `quicsql`, so ordinary `database/sql` code connects to a remote database exactly like a local one:
 
   ```go

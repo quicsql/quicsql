@@ -512,8 +512,8 @@ func (c *Client) do(ctx context.Context, db, sql string, args []any) (*Result, e
 // authenticate attaches the client's single credential to req. For the ed25519
 // challenge/response the challenge is cached and reused within its window (so a
 // burst does not pay a fetch each), but the signature is computed per request
-// over the challenge BOUND to the request's method and path — so a captured
-// signature can't be replayed onto a different request (see keyringSigningInput
+// over the challenge BOUND to the request's method, path, and query — so a captured
+// signature can't be replayed onto a different request (see wire.KeyringSigningInput
 // and auth.tryKeyring, which must build the identical bytes).
 func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 	switch {

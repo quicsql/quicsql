@@ -28,7 +28,7 @@ quicsql://host:7777/db?transport=h3&insecure=1   # HTTP/3 over QUIC (shares the 
 quicsql:///db?transport=unix&socket=/run/quicsql/sql.sock
 ```
 
-Credentials a URL can carry: `?token=<bearer>` **or** `?user=<u>&password=<p>`. **mTLS and the ed25519 keyring cannot live in a DSN** — build a client (below) and hand it to `sqldriver.OpenConnectorClient(cl, "app")`, then `sql.OpenDB(...)`.
+Credentials a URL can carry: `?token=<bearer>` **or** `?user=<u>&password=<p>` — but the driver **refuses** to send either over a channel that would expose it: cleartext `h1`/`h2c`, or `h2`/`h3` with `insecure=1` (unverified TLS). Send credentials over verified TLS (`h2`/`h3`) or a unix socket; on a trusted dev link, add `allow_insecure_auth=1` to opt in knowingly. **mTLS and the ed25519 keyring cannot live in a DSN** — build a client (below) and hand it to `sqldriver.OpenConnectorClient(cl, "app")`, then `sql.OpenDB(...)`.
 
 ## The client library (full surface)
 

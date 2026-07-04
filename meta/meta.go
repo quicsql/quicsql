@@ -158,7 +158,7 @@ type AuditEntry struct {
 
 // AuditEntries returns the most recent audit records, newest first (up to limit).
 // Nil-safe: a stateless deployment (no meta store) has no audit log, so it returns
-// nil. It backs the /_admin audit view and lets tests assert that denied/failed
+// nil. It backs the offline audit reader and lets tests assert that denied/failed
 // control-plane attempts are recorded, not only successes.
 func (s *Store) AuditEntries(limit int) ([]AuditEntry, error) {
 	if s == nil {

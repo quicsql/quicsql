@@ -48,7 +48,7 @@ func TestResumeConsumesBatonAndRejectsReplay(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}, "", false)
+	s, err := st.Open(context.Background(), db, func() {}, "", false, false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestResumeBindingChecksDoNotConsume(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}, "owner", false)
+	s, err := st.Open(context.Background(), db, func() {}, "owner", false, false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestResumeRefusesBusySession(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}, "", false) // busy=true
+	s, err := st.Open(context.Background(), db, func() {}, "", false, false) // busy=true
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestResumeExpiry(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}, "", false)
+	s, err := st.Open(context.Background(), db, func() {}, "", false, false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestReaperRollsBackAndReleases(t *testing.T) {
 	defer cleanup()
 	released := make(chan struct{})
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() { close(released) }, "", false)
+	s, err := st.Open(context.Background(), db, func() { close(released) }, "", false, false)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestReaperSkipsInFlightSession(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Millisecond, time.Minute, 10)
-	s, err := st.Open(context.Background(), db, func() {}, "", false) // busy=true (a request is "in flight")
+	s, err := st.Open(context.Background(), db, func() {}, "", false, false) // busy=true (a request is "in flight")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -192,10 +192,10 @@ func TestOpenTooMany(t *testing.T) {
 	db, cleanup := testDB(t)
 	defer cleanup()
 	st, _ := NewStore(time.Minute, time.Minute, 1)
-	if _, err := st.Open(context.Background(), db, func() {}, "", false); err != nil {
+	if _, err := st.Open(context.Background(), db, func() {}, "", false, false); err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	if _, err := st.Open(context.Background(), db, func() {}, "", false); err != ErrTooMany {
+	if _, err := st.Open(context.Background(), db, func() {}, "", false, false); err != ErrTooMany {
 		t.Fatalf("second Open: want ErrTooMany, got %v", err)
 	}
 }

@@ -23,19 +23,46 @@ Reached over any authenticated transport, as an admin principal:
 
 - **Databases** — create a database at runtime, detach one, list them (filtered to what the caller may administer). A created database is persisted in the meta store and survives restart.
 - **Introspection** — per-database stats, live sessions, and kill a session.
-- **Vault maintenance** — offline **compact** (rewrite densely), online **reclaim** and **trim** (return freed blocks to the OS on the live handle), **snapshot**.
+- **Vault maintenance** — offline **compact** (rewrite densely), online **reclaim** (wire op `compact_online`) and **trim** (return freed blocks to the OS on the live handle), **snapshot**.
 
 From the Go client, admin calls go through the same authenticated client (`client.Export`, `client.ApplyChangeset`, `BlobProvision`, and the control-plane helpers); over the wire they are ordinary authenticated requests to `/_admin/…`.
 
 ## Metrics and the slow log
 
 ```yaml
-logging: { slow_threshold: 200ms, expand_params: false }   # redact params by default
+logging:
+  slow_threshold: 200ms   # >0 enables the slow log at this duration
+  expand_params: false    # redact bound params by default
+  format: text            # json | text (default text) — log output format (json for a log pipeline)
 ```
 
-- `GET /_metrics` — Prometheus text exposition; scrape it. Gauges include `quicsql_active_sessions` (if it climbs and never falls, something opens Hrana streams without closing them — see the `transactions-and-hrana` skill).
+- `GET /_metrics` — Prometheus text exposition (format 0.0.4); scrape it. Gauges include `quicsql_active_sessions` (if it climbs and never falls, something opens Hrana streams without closing them — see the `transactions-and-hrana` skill).
 - `GET /_health` — liveness, no auth.
 - The slow-query log fires above `slow_threshold`; bound parameters are redacted unless `expand_params: true`.
+- `logging.format: json` emits structured JSON logs (one object per line) to stderr; `text` (default) is human-readable.
+
+Scrape it from Prometheus (a loopback listener with `auth: [none]` is the intended target — `/_metrics` has no capability check beyond the listener's auth):
+
+```yaml
+scrape_configs:
+  - job_name: quicsql
+    static_configs:
+      - targets: ['127.0.0.1:7775']
+    metrics_path: /_metrics
+```
+
+One alert worth having — a Hrana session leak shows up as `quicsql_active_sessions` climbing and never falling (streams opened without `Close`):
+
+```yaml
+groups:
+  - name: quicsql
+    rules:
+      - alert: QuicsqlSessionLeak
+        expr: quicsql_active_sessions > 100 and deriv(quicsql_active_sessions[15m]) > 0
+        for: 15m
+        annotations:
+          summary: "active Hrana sessions climbing without release (client not closing streams)"
+```
 
 ## Limits (protect the server)
 

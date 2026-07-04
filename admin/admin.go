@@ -200,9 +200,11 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.reg.Add(db.Name, be); err != nil {
 		if errors.Is(err, registry.ErrExists) {
+			h.auditFail(r, "create", db.Name, "already exists")
 			writeErr(w, http.StatusConflict, "database already exists")
 			return
 		}
+		h.auditFail(r, "create", db.Name, "register failed")
 		writeErr(w, http.StatusInternalServerError, "cannot register database")
 		return
 	}
@@ -225,6 +227,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		if err := h.store.Put(db); err != nil {
 			_ = h.reg.Remove(db.Name)
 			h.log.Error("quicsql/admin: persist database", "db", db.Name, "err", err)
+			h.auditFail(r, "create", db.Name, "persist failed")
 			writeErr(w, http.StatusInternalServerError, "database could not be persisted")
 			return
 		}

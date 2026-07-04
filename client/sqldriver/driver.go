@@ -475,8 +475,10 @@ func (r *rows) Next(dest []driver.Value) error {
 	return nil
 }
 
-// toDriverValue maps a client cell (json.Number from the native path;
-// int64/float64/string/[]byte/nil from the Hrana path) to a driver.Value.
+// toDriverValue maps a client cell to a driver.Value. Both wire paths now decode
+// through the shared wire codec, yielding int64/float64/string/[]byte/nil, which
+// pass through unchanged. The json.Number branch is retained only as a defensive
+// fallback (older/alternate decoders) and is dead for the current codec.
 func toDriverValue(v any) driver.Value {
 	switch t := v.(type) {
 	case json.Number:

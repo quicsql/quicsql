@@ -11,7 +11,7 @@ import (
 
 // Registry is the in-process metrics sink: request counters and latency sums per
 // database, plus named gauges sampled on scrape. It satisfies Metrics and renders
-// OpenMetrics/Prometheus text. It is safe for concurrent use.
+// Prometheus text. It is safe for concurrent use.
 //
 // A single mutex guards the per-request counter bumps — fine at POC and moderate
 // load (the critical section is one map write); shard by database or switch to

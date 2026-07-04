@@ -187,6 +187,70 @@ func setAuthorizer(sc *sql.Conn, auth func(op int, arg1, arg2, arg3, arg4 string
 	})
 }
 
+// permitAttach is the authorizer for a DEV-ONLY attach-enabled session: it permits
+// every action, including ATTACH/DETACH, overriding the process-global
+// denyAttachDetach. It is installed by SetConnAttach ONLY on a pinned session
+// connection whose principal is a server-admin, and ONLY when auth.sql_policy
+// .allow_attach is on. The connection's grant already made it write-capable, so no
+// further restriction applies.
+func permitAttach(_ int, _, _, _, _ string) int { return sqlite.SQLITE_OK }
+
+// SetConnAttach puts a pinned session connection into attach-enabled mode: ATTACH/
+// DETACH are permitted (the sandbox is off for this connection). The caller MUST be
+// a server-admin on a writer session, and MUST call ClearAttach before the
+// connection returns to the pool so no attachment leaks to a later borrower.
+func SetConnAttach(ctx context.Context, sc *sql.Conn) error {
+	return setAuthorizer(sc, permitAttach)
+}
+
+// ClearAttach reverses SetConnAttach before a connection returns to the pool: it
+// DETACHes every database attached during the session (so the attachment cannot
+// leak onto the shared pool), then restores the default deny-ATTACH authorizer.
+// Best-effort on the detach (a failure is returned but the authorizer is still
+// restored, so no NEW attach is possible after this).
+func ClearAttach(ctx context.Context, sc *sql.Conn) error {
+	detachErr := detachAll(ctx, sc)
+	if err := setAuthorizer(sc, denyAttachDetach); err != nil {
+		return err
+	}
+	return detachErr
+}
+
+// detachAll DETACHes every attached database on the connection (everything in
+// PRAGMA database_list except the built-in main/temp schemas).
+func detachAll(ctx context.Context, sc *sql.Conn) error {
+	rows, err := sc.QueryContext(ctx, "PRAGMA database_list")
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name != "main" && name != "temp" {
+			names = append(names, name)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Best-effort: attempt EVERY detach even if one fails, so a single stuck or
+	// locked attachment can't strand the rest still attached on the pooled conn.
+	// Return the first error so ClearAttach's caller learns cleanup was incomplete
+	// and can discard the connection instead of returning it to the pool.
+	var firstErr error
+	for _, n := range names {
+		if _, err := sc.ExecContext(ctx, `DETACH DATABASE "`+strings.ReplaceAll(n, `"`, `""`)+`"`); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // Backend opens exactly one *sqlite.DB for a logical database. Open is called
 // once per process by the registry; a single Close on the returned handle tears
 // down the pool and any VFS the open registered.

@@ -179,6 +179,18 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		httpapi.WithMetrics(metrics),
 		httpapi.WithLimiter(limiter),
 	}
+	// Only override the export cap when configured — WithMaxExport(0) DISABLES the cap
+	// (unbounded in-RAM serialize), so an unset value must keep the handler's default.
+	if cfg.Limits.MaxExportBytes > 0 {
+		handlerOpts = append(handlerOpts, httpapi.WithMaxExport(cfg.Limits.MaxExportBytes))
+	}
+	if cfg.Auth.SQLPolicy.AllowAttach {
+		log.Warn("quicsql: auth.sql_policy.allow_attach is ON — ATTACH/DETACH are permitted for server-admins on interactive sessions, disabling the filesystem sandbox for them. DEV ONLY; do not enable in production")
+		if len(cfg.ControlPlane.Admins) == 0 {
+			log.Warn("quicsql: auth.sql_policy.allow_attach is ON but control_plane.admins is empty — no principal is a server-admin, so ATTACH stays denied (the switch is inert). Add an admin to use it")
+		}
+		handlerOpts = append(handlerOpts, httpapi.WithAttach(true, cfg.ControlPlane.Admins))
+	}
 	if cfg.ControlPlane.Enabled {
 		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))

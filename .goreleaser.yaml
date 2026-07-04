@@ -62,23 +62,32 @@ checksum:
 changelog:
   use: git
   sort: asc
-  # Conventional-commit-style grouping; anything unmatched lands in Other,
-  # so non-conventional messages still show up rather than vanish.
+  # NOTE: CHANGELOG.md is the canonical, hand-written release record (with the
+  # upgrade notes for breaking changes). These groups only shape GoReleaser's
+  # auto-generated GitHub release body from commit subjects.
+  #
+  # Conventional-commit-style grouping; anything unmatched lands in Other, so
+  # non-conventional messages still show up rather than vanish.
   groups:
     - title: Features
-      regexp: '^.*feat[(\w)]*:'
+      regexp: '^.*feat(\(.*\))?:'
       order: 0
     - title: Fixes
-      regexp: '^.*fix[(\w)]*:'
+      regexp: '^.*fix(\(.*\))?:'
       order: 1
+    - title: Refactors & internals
+      regexp: '^.*(refactor|perf|chore)(\(.*\))?:'
+      order: 2
     - title: Other
       order: 999
   filters:
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
+      # Match a bare type OR a scoped one (chore: and chore(core): alike). A scoped
+      # refactor/perf/chore that carries real user-facing weight is grouped above
+      # (order 2) rather than excluded, because these exclude only bare housekeeping.
+      - '^docs(\(.*\))?:'
+      - '^test(\(.*\))?:'
+      - '^ci(\(.*\))?:'
 
 # Docker images via the prebuilt-binary flow: GoReleaser copies the already
 # cross-compiled linux binary for each arch into a minimal build context next

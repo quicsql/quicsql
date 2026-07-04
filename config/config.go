@@ -119,12 +119,14 @@ type Principal struct {
 	Methods []map[string]any `yaml:"methods" json:"methods"`
 }
 
-// SQLPolicy gates dangerous SQL surface (ATTACH, load_extension) and lists the
-// extensions enabled per connection.
+// SQLPolicy holds the server-global SQL-surface controls. Only allow_attach is
+// wired: it is a DEV-ONLY switch that permits ATTACH/DETACH — and even then only on
+// a pinned Hrana session opened by a server-admin (see the admin/attach docs). Off,
+// ATTACH/DETACH are denied unconditionally. load_extension stays disabled with no
+// knob (loading an arbitrary shared library over the network is remote code
+// execution); the extension set is fixed at compile time by quicsql.net/extensions.
 type SQLPolicy struct {
-	AllowAttach        bool     `yaml:"allow_attach" json:"allow_attach"`
-	AllowLoadExtension bool     `yaml:"allow_load_extension" json:"allow_load_extension"`
-	EnabledExtensions  []string `yaml:"enabled_extensions" json:"enabled_extensions"`
+	AllowAttach bool `yaml:"allow_attach" json:"allow_attach"`
 }
 
 // Database is one registry entry: a logical name mapped to a physical open.
@@ -201,7 +203,8 @@ type Limits struct {
 	MaxRows            int           `yaml:"max_rows" json:"max_rows"`
 	MaxResultBytes     int64         `yaml:"max_result_bytes" json:"max_result_bytes"`
 	MaxRequestBytes    int64         `yaml:"max_request_bytes" json:"max_request_bytes"`
-	MaxBlobBytes       int64         `yaml:"max_blob_bytes" json:"max_blob_bytes"` // cap for a single streamed large object (0 = default)
+	MaxBlobBytes       int64         `yaml:"max_blob_bytes" json:"max_blob_bytes"`     // cap for a single streamed large object (0 = default)
+	MaxExportBytes     int64         `yaml:"max_export_bytes" json:"max_export_bytes"` // cap for a full-database /export image, materialized whole in RAM (0 = default 1 GiB)
 	StatementTimeout   time.Duration `yaml:"statement_timeout" json:"statement_timeout"`
 	TxIdleTimeout      time.Duration `yaml:"tx_idle_timeout" json:"tx_idle_timeout"`
 	MaxTxLifetime      time.Duration `yaml:"max_tx_lifetime" json:"max_tx_lifetime"`

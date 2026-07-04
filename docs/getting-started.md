@@ -78,6 +78,47 @@ Every listener serves the same endpoints: `POST /<db>/query` (native JSON),
 7777** (QUIC/UDP alongside h2's TLS/TCP, the way HTTPS shares :443; the h3
 listener's `advertise: true` emits `Alt-Svc` so clients auto-upgrade).
 
+### Routing: addressing a database by path or host
+
+Every request names one database. How the server derives that name from the
+request is an optional top-level `routing:` block:
+
+```yaml
+routing:
+  by_path: true                  # DB is the first path segment: /<db>/query (the default)
+  by_host: false                 # DB is a Host subdomain (needs host_suffix)
+  host_suffix: .db.example.com   # users.db.example.com → database "users"
+  default_db: ""                 # fall back to this DB when neither path nor host names one
+```
+
+Omit `routing:` entirely and path routing is on — `by_path` defaults to
+**true** when both `by_path` and `by_host` are unset, which is what the
+snippets above rely on (`/users/query`). Turn on `by_host` with a `host_suffix`
+to address databases by subdomain instead; set both and a database named in the
+path wins over the Host. `default_db` supplies the database when a request
+carries neither.
+
+### TLS profiles
+
+A `tls:` profile supplies a listener's certificate, via one of three modes:
+
+- **`files`** — `cert:`/`key:` PEM paths. The production choice (your own cert).
+- **`self_signed`** — the dev generator above: an in-memory cert for the listed
+  `hosts`. Clients see an untrusted-cert warning until they add an exception.
+- **`qip`** — auto-fetch a browser-trusted [qip.sh](https://qip.sh) wildcard cert
+  for a **private network or localhost**, with no CA setup. `subdomain` picks the
+  qip.sh zone (default `i.qip.sh`, whose `*.i.qip.sh` names resolve to 127.0.0.1);
+  `refresh` sets the cert-reload interval (default 12h). It needs outbound network
+  access at startup to fetch the cert.
+
+  > **Security caveat.** qip.sh publishes the certificate's private key *publicly*
+  > — that's how it hands out a trusted cert for a name anyone can point at their
+  > own loopback. So a `qip` cert gives you encryption and a valid padlock, but
+  > **not server authentication**: a man-in-the-middle on the same private network
+  > can serve the same cert and impersonate the server. Use it for localhost and
+  > trusted LANs; use `files` (your own cert) for anything untrusted parties can
+  > reach. The server logs a warning if a `qip` listener binds a non-loopback address.
+
 ## 2. Talk to it — from your language
 
 <!-- tabs:start -->

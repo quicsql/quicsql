@@ -104,19 +104,21 @@ client                                             server
   │  { "challenge": "…" }                             │  (no server-side state saved)
   │ ◀─────────────────────────────────────────────    │
   │                                                   │
-  │  sign challenge‖method‖path with the ed25519 key  │
+  │  sign challenge‖method‖path‖query (ed25519)       │
   │  POST /app/query                                  │
   │    X-Quicsql-Key:       ssh-ed25519 AAAA…         │
   │    X-Quicsql-Challenge: <the challenge>           │
   │    X-Quicsql-Signature: <base64 signature>        │
   │ ─────────────────────────────────────────────▶    │  1. re-check the challenge's HMAC + expiry
   │                                                   │  2. look up the key → principal
-  │                                                   │  3. verify the signature over challenge‖method‖path
+  │                                                   │  3. verify the signature over challenge‖method‖path‖query
   │  result                                           │
   │ ◀─────────────────────────────────────────────    │
 ```
 
-The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The signature is computed over the challenge **bound to the request's method and path**, so a captured signature cannot be replayed onto a different (e.g. more privileged) request; the challenge's short lifetime further bounds how long even the identical request could be replayed. Because the binding is per request — not per challenge — the client still caches and reuses one challenge across a burst of requests, signing each one separately. The client library does the whole dance for you before each request; you just supply the key. Keep the keyring method on a TLS or Unix-socket listener where the headers can't be sniffed off the wire in the first place.
+The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The signature is computed over the challenge **bound to the request's method, path, and raw query string**, so a captured signature cannot be replayed onto a different request — not onto a more privileged method or path, and not onto a different operation target expressed in the query (a signature captured for `?id=42` cannot be re-aimed at `?id=99`, nor a `?store=` swapped underneath it). The challenge's short lifetime further bounds how long even the *identical* request could be replayed. Because the binding is per request — not per challenge — the client still caches and reuses one challenge across a burst of requests, signing each one separately. The client library does the whole dance for you before each request; you just supply the key.
+
+Keep the keyring method on a TLS or Unix-socket listener. The query binding stops cross-target replay, but the request **body is deliberately not signed** — bodies stream (a blob write can be gigabytes), so neither side can pre-hash them. That leaves one residual vector, and only over cleartext: on an `h1`/`h2c` listener an observer sees the signature and can replay it onto the *same* method, path, and query with a *different* body — say a different statement to the same `/app/query` — for as long as the challenge lives, since the challenge is **not single-use**. Over TLS the signature never reaches the wire, so the vector closes. quicSQL therefore does not *forbid* keyring-over-cleartext (an operator may knowingly run it on a trusted network) but **warns loudly at startup** whenever a keyring method is bound to a cleartext listener — read that warning as "move this to TLS or a Unix socket."
 
 ### The anonymous principal
 
@@ -170,7 +172,7 @@ A subtle but important point: quicSQL does **not** enforce read-only by parsing 
 
 `admin` is the top level, and it means two things depending on where it comes from:
 
-- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, list databases and sessions, kill a session, and run vault maintenance (compact, reclaim, trim, snapshot). These operations live under `/_admin` (admin-only).
+- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, list databases and sessions, kill a session, and run vault maintenance — the `compact` (offline), `compact_online` (the online reclaim), `trim`, and `snapshot` ops. These operations live under `/_admin` (admin-only).
 - A **per-database admin** is a principal holding an `admin`-level grant on a specific database. It may administer *that database only* — e.g. run vault maintenance on it — but cannot create or detach databases server-wide.
 
 ```yaml
@@ -187,7 +189,7 @@ databases:
 
 Transport and auth are separate layers, but they interact in ways worth stating plainly:
 
-- **Cleartext transports (`h1`, `h2c`) carry credentials in the clear.** A bearer token or password sent over plain HTTP is visible to anyone on the path. Use them only on loopback or a trusted local socket. For anything crossing a network, put the listener behind a TLS profile (`h2`, `h3`).
+- **Cleartext transports (`h1`, `h2c`) carry credentials in the clear.** A bearer token or password sent over plain HTTP is visible to anyone on the path. Use them only on loopback or a trusted local socket. For anything crossing a network, put the listener behind a TLS profile (`h2`, `h3`). The server does not forbid this, but it **warns loudly at startup** whenever a cleartext listener accepts a secret-bearing method (`bearer`, `password`, or `keyring`) — a nudge to move that port to TLS. `keyring` gets its own, sterner warning: a cleartext keyring signature is not merely exposed but replayable within the challenge's lifetime (see the challenge walkthrough above). `mtls`, `peercred`, and `none` send no wire secret and are not flagged.
 - **mTLS is both transport and identity.** When a listener has a `client_ca` in its TLS profile and lists `mtls`, the client's certificate is verified against that CA (transport-level trust) *and* mapped to a principal by its subject CN or public-key hash (identity). A certificate that verifies against the CA but maps to no principal is rejected — trust and identity are checked independently. Alongside other methods, the client cert is optional, so bearer/keyring clients can still connect to the same port.
 - **`peercred` only exists on Unix sockets.** It reads the connecting process's user id from the kernel — there is no network equivalent, so it is same-machine only and never part of a remote story.
 
@@ -274,6 +276,23 @@ c := client.H2TLS("host:7777", false, client.WithRootCA(pool), client.WithEd2551
 
 Through the `database/sql` driver, a DSN can carry the two credentials expressible as text — `?token=<bearer>` or `?user=<u>&password=<p>` — but **mTLS and keyring cannot be written in a URL** (a certificate and a private key are not URL parameters). For those, build a `*client.Client` as above and hand it to `sqldriver.OpenConnectorClient`.
 
+#### The DSN refuses to leak a credential
+
+A DSN is often a single opaque string handed to a library — `sql.Open("quicsql", dsn)`, or an ORM's `Open(dsn)` — so the driver treats a credential inside it as something it must not put on a readable wire carelessly. Two rules are **hard errors** (they fail the `sql.Open`/first connection, they are not warnings):
+
+- **A credential over a cleartext or unverified channel is refused.** If the DSN carries a `?token=` or `?user=` and the transport is cleartext (`transport=h1` or `h2c`), or is `h2`/`h3` with `insecure=1` (TLS with certificate verification turned off, so a man-in-the-middle can read it), the open fails rather than sending the secret in the clear. Override it deliberately with `allow_insecure_auth=1` for a trusted local or dev link; a `unix` socket is local and never triggers the guard.
+
+  ```
+  quicsql://host:7775/app?transport=h1&token=SECRET                        → error  (cleartext)
+  quicsql://host:7777/app?transport=h2&insecure=1&user=a&password=b        → error  (unverified TLS)
+  quicsql://host:7775/app?transport=h1&token=SECRET&allow_insecure_auth=1  → allowed (you asked for it)
+  quicsql://host:7777/app?transport=h2&token=SECRET                        → allowed (verified TLS)
+  ```
+
+- **URL userinfo is rejected outright.** A DSN written `quicsql://user:pw@host/app` is refused — the credential goes in the query params (`?user=&password=`), never in the `user:pw@host` position. Left alone, userinfo would send *no* credential at all (silently unauthenticated) *and* slip past the cleartext guard above, so the driver makes the mistake loud instead of silent.
+
+The raw `*client.Client` constructors (`client.H1`, `H2C`, `H2TLS`, `H3`) apply the *same* transport check but only **warn**, they do not refuse: a caller reaching for the Go API chose both the transport and the credential explicitly, so the guard is advisory. The DSN path is stricter precisely because one opaque string hides those choices. (An mTLS client certificate — `WithClientCert` — is public material verified at the handshake, not a wire secret, so it triggers neither the refusal nor the warning.)
+
 ## Identity also scopes the rate limit
 
 Because every request carries a principal, quicSQL uses that identity for more than access decisions. The per-principal rate limit (`limits.rate.per_principal_rps`) gives each principal its own token bucket, so one noisy client cannot starve the others, and the slow-query and audit logs record *who* ran what. Authentication is the hinge the rest of the safety rails hang on.
@@ -314,7 +333,7 @@ A `401` also carries a `WWW-Authenticate: Bearer, Basic realm="quicsql"` header.
 
 **Public endpoints (no auth):** `GET /_health`, and `GET /_auth/challenge` on keyring-accepting listeners.
 
-**Secrets:** any hash/key field (`token_hash`, `password_hash`, `ed25519`, vault keys) may be inline or a `<source>:<name>` reference resolved at startup from a `secrets` source (`env` / `file` / `kms`), so plaintext never needs to live in the config file.
+**Secrets:** any hash/key field (`token_hash`, `password_hash`, `ed25519`, vault keys) may be inline or a `<source>:<name>` reference resolved at startup from a `secrets` source, so plaintext never needs to live in the config file. Two source types work today: `env` (reads the named environment variable) and `file` (reads `<dir>/<name>`, contained to `dir` — a `..` or absolute path that escapes is rejected). A third type, `kms`, is **reserved and not yet implemented**: a config may declare it (its `endpoint` field is parsed and held for the future backend), but resolving a `kms:` reference fails at startup with `ErrNotImplemented`. Do not depend on it yet.
 
 ## Related guides
 

@@ -22,6 +22,8 @@ db, _ := litesql.Open("quicsql://host:7777/app?transport=h2&token=SECRET")   // 
 defer db.Close()
 ```
 
+The `transport=h2` there is verified TLS, and that is required: the driver **refuses** to put a credential (`token`/`password`) on a cleartext transport (`h1`/`h2c`) or on `h2`/`h3` with `insecure=1`. Because `litesql.Open` takes one opaque DSN, that refusal is a loud error, not a silent leak — on a trusted dev link, `allow_insecure_auth=1` overrides.
+
 `db` is an ordinary `*liteorm.DB`. Everything LiteORM does — `orm.AutoMigrate`, `orm.NewRepo[T]`, `query.Select[T]`, `search.For[T]().Vector/FullText/Hybrid`, `changeset.Capture/Apply`, `lob` large objects, `liteorm.Transaction`, the `ErrUniqueViolation` sentinels — now runs as SQL on the server. The DSN is the same one the `using-quicsql` skill describes.
 
 ## When the DSN can't carry the credential (mTLS / keyring)

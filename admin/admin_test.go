@@ -241,7 +241,7 @@ func TestIntrospectionSessionsAndKill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	s, err := store.Open(context.Background(), dbh, release, "user", false)
+	s, err := store.Open(context.Background(), dbh, release, "user", false, false)
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestKillBusySessionRefused(t *testing.T) {
 	h := admin.New(reg, authz.NewPolicy(false), nil, store, sec, nil, "", []string{"root"}, time.Now(), nil)
 
 	dbh, release, _ := reg.Get(context.Background(), "app")
-	s, _ := store.Open(context.Background(), dbh, release, "user", false) // busy=true (not cleared)
+	s, _ := store.Open(context.Background(), dbh, release, "user", false, false) // busy=true (not cleared)
 	list := store.List(nil)
 	if len(list) != 1 {
 		t.Fatalf("want 1 session, got %d", len(list))
