@@ -59,3 +59,7 @@ Constructors: `H1(addr)`, `H2C(addr)`, `H2TLS(addr, insecure)`, `H3(addr, insecu
 - **Interactive transaction** (`BEGIN … COMMIT`, savepoints) → the driver's `db.BeginTx`, or `cl.OpenStream(db)`. Same skill.
 
 Depth: the [Hrana guide](../../docs/hrana.md) and the driver's package doc.
+
+## Live changes (the change feed)
+
+With the server's `changefeed: { enabled: true }`, every file/vault database streams committed row changes at `GET /<db>/changes` (SSE; read capability required): events `{seq, table, op, rowid}` — values never included, rollbacks never seen. Resume with `?since=<seq>`; `?tables=a,b` filters. From JS: `db.subscribe({tables, onChange, onReset})` (auto-reconnect + resume). Full guide: `docs/change-feed.md`.

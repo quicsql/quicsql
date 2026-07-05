@@ -22,6 +22,7 @@ type Config struct {
 	Limits       Limits                `yaml:"limits" json:"limits"`
 	Logging      Logging               `yaml:"logging" json:"logging"`
 	CORS         CORS                  `yaml:"cors" json:"cors"`
+	ChangeFeed   ChangeFeed            `yaml:"changefeed" json:"changefeed"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
 }
@@ -211,6 +212,21 @@ type VaultCreate struct {
 	PageSize        int      `yaml:"page_size" json:"page_size"`
 	BlockSize       int      `yaml:"block_size" json:"block_size"`
 	DirSegmentPages int      `yaml:"dir_segment_pages" json:"dir_segment_pages"`
+}
+
+// ChangeFeed enables the committed-change notification stream at
+// GET /<db>/changes (Server-Sent Events). Events carry table, operation, and
+// rowid — never column values — and are published only at COMMIT, so a rolled
+// back write is never seen. Requires databases with a stable on-disk path
+// (file, vault); private in-memory backends are skipped with a warning.
+type ChangeFeed struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Buffer is the per-database replay ring (default 1024 events): a subscriber
+	// that reconnects within this window resumes by sequence; older horizons get
+	// a `reset` event telling them to refetch.
+	Buffer int `yaml:"buffer" json:"buffer"`
+	// MaxSubscribers caps concurrent streams per database (default 128).
+	MaxSubscribers int `yaml:"max_subscribers" json:"max_subscribers"`
 }
 
 // Grant maps a principal (or the "*" wildcard) to a capability level on a database.

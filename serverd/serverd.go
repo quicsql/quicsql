@@ -45,6 +45,7 @@ import (
 	"quicsql.net/backend"
 	"quicsql.net/config"
 	"quicsql.net/engine"
+	"quicsql.net/feed"
 	"quicsql.net/httpapi"
 	"quicsql.net/limits"
 	"quicsql.net/meta"
@@ -121,6 +122,23 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		log.Warn("quicsql: " + warning)
 	}
 
+	// The change-feed broker's connection hook must exist BEFORE any database
+	// opens (like the security AutoHook), so no writing connection escapes
+	// observation. Databases without a stable path can't be observed.
+	var broker *feed.Broker
+	if cfg.ChangeFeed.Enabled {
+		broker = feed.New(cfg.ChangeFeed.Buffer, cfg.ChangeFeed.MaxSubscribers, log)
+		broker.Install()
+		for name, be := range backends {
+			if p, ok := be.(backend.Pather); ok {
+				broker.Register(name, p.Path())
+			} else {
+				log.Warn("quicsql: change feed unavailable (no stable path)", "db", name, "backend", be.Kind())
+			}
+		}
+		log.Info("quicsql: change feed enabled at /<db>/changes", "buffer", cfg.ChangeFeed.Buffer, "max_subscribers", cfg.ChangeFeed.MaxSubscribers)
+	}
+
 	reg := registry.New(backends, log)
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), warmTimeout)
 	if err := reg.Warm(warmCtx); err != nil {
@@ -191,8 +209,14 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		}
 		handlerOpts = append(handlerOpts, httpapi.WithAttach(true, cfg.ControlPlane.Admins))
 	}
+	if broker != nil {
+		handlerOpts = append(handlerOpts, httpapi.WithFeed(broker))
+	}
 	if cfg.ControlPlane.Enabled {
 		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
+		if broker != nil {
+			adminH.SetFeed(broker)
+		}
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
 		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))
 	}

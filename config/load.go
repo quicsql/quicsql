@@ -34,6 +34,7 @@ var EndpointTokens = map[string]bool{
 	"backup":    true, // /<db>/backup — streaming online backup (SQLite file)
 	"changeset": true, // /<db>/changeset/{apply,invert,concat}
 	"blob":      true, // /<db>/blob/{create,write,read,size,delete}
+	"changes":   true, // /<db>/changes — the SSE change feed
 }
 
 // KnownBackends is the single source of truth for valid `backend:` values,
@@ -141,7 +142,7 @@ func WithinDir(dir, p string) (string, bool) {
 var knownTopLevel = map[string]bool{
 	"server": true, "secrets": true, "routing": true, "tls": true, "listeners": true,
 	"auth": true, "databases": true, "control_plane": true, "limits": true, "logging": true,
-	"cors": true,
+	"cors": true, "changefeed": true,
 }
 
 var inertTopLevel = map[string]string{
@@ -204,6 +205,14 @@ func (c *Config) applyDefaults() {
 			c.CORS.MaxAge = 2 * time.Hour
 		}
 	}
+	if c.ChangeFeed.Enabled {
+		if c.ChangeFeed.Buffer == 0 {
+			c.ChangeFeed.Buffer = 1024
+		}
+		if c.ChangeFeed.MaxSubscribers == 0 {
+			c.ChangeFeed.MaxSubscribers = 128
+		}
+	}
 }
 
 // Validate catches the invariants Phase 0 depends on: unique, non-reserved
@@ -232,6 +241,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateCORS(); err != nil {
 		return err
+	}
+	if c.ChangeFeed.Buffer < 0 || c.ChangeFeed.MaxSubscribers < 0 {
+		return fmt.Errorf("config: changefeed buffer and max_subscribers must not be negative")
 	}
 	switch c.Logging.Format {
 	case "", "text", "json":

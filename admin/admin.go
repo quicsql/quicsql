@@ -40,7 +40,18 @@ type Handler struct {
 	admins   map[string]bool // server-admin principal names
 	started  time.Time
 	log      *slog.Logger
+	feedReg  FeedRegistry // change-feed registration for runtime create/detach (may be nil)
 }
+
+// FeedRegistry is the change-feed broker surface the control plane drives:
+// runtime-created databases become observable, detached ones stop.
+type FeedRegistry interface {
+	Register(name, path string)
+	Forget(name string)
+}
+
+// SetFeed wires the change-feed broker. Called once during serverd assembly.
+func (h *Handler) SetFeed(f FeedRegistry) { h.feedReg = f }
 
 // New builds the admin handler. admins are the server-admin principal names from
 // control_plane.admins; sessions (may be nil) backs the sessions/kill endpoints;
@@ -202,6 +213,9 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.reg.Add(db.Name, be); err != nil {
 		if errors.Is(err, registry.ErrExists) {
+			// The database already exists and is being served — do NOT touch the
+			// feed here (registering/forgetting would clobber the live feed of the
+			// existing database with the same name).
 			h.auditFail(r, "create", db.Name, "already exists")
 			writeErr(w, http.StatusConflict, "database already exists")
 			return
@@ -210,10 +224,22 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "cannot register database")
 		return
 	}
+	// Register the feed only after reg.Add succeeds (so a duplicate can't clobber
+	// the existing database's feed), but before reg.Get below opens the first
+	// connection — hooks install at connection open, and an unobserved first
+	// connection would write invisibly. reg.Add does not itself open a connection.
+	feedRollback := func() {}
+	if h.feedReg != nil {
+		if p, ok := be.(backend.Pather); ok {
+			h.feedReg.Register(db.Name, p.Path())
+			feedRollback = func() { h.feedReg.Forget(db.Name) }
+		}
+	}
 	// Verify it actually opens before we persist / grant, so a bad spec is rejected
 	// now rather than on a client's first request; drop it again on failure.
 	if _, release, err := h.reg.Get(r.Context(), db.Name); err != nil {
 		_ = h.reg.Remove(db.Name)
+		feedRollback()
 		h.log.Error("quicsql/admin: open new database", "db", db.Name, "err", err)
 		h.auditFail(r, "create", db.Name, "open failed")
 		writeErr(w, http.StatusBadRequest, "database could not be opened")
@@ -228,6 +254,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		db.Grants = req.Grants
 		if err := h.store.Put(db); err != nil {
 			_ = h.reg.Remove(db.Name)
+			feedRollback()
 			h.log.Error("quicsql/admin: persist database", "db", db.Name, "err", err)
 			h.auditFail(r, "create", db.Name, "persist failed")
 			writeErr(w, http.StatusInternalServerError, "database could not be persisted")
@@ -283,6 +310,9 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 	// not inherit stale privileges (Policy.Grant keeps the max level, so without
 	// this a re-created name would silently retain the old grants).
 	h.pol.Revoke(req.Database)
+	if h.feedReg != nil {
+		h.feedReg.Forget(req.Database) // closes its change-feed subscribers too
+	}
 	// Forget its metrics series so scrapes don't accrue detached databases.
 	if h.metrics != nil {
 		h.metrics.Forget(req.Database)

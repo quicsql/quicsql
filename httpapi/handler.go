@@ -19,6 +19,7 @@ import (
 	"quicsql.net/authz"
 	"quicsql.net/config"
 	"quicsql.net/engine"
+	"quicsql.net/feed"
 	"quicsql.net/internal/httpjson"
 	"quicsql.net/limits"
 	"quicsql.net/obs"
@@ -55,6 +56,7 @@ type Handler struct {
 	stmtTO    time.Duration // per-request statement timeout (0 = none)
 	log       *slog.Logger
 	sessions  *session.Store // Hrana interactive-transaction streams (nil = disabled)
+	feed      *feed.Broker   // committed-change broker for /<db>/changes (nil = disabled)
 	// attachAllowed is the DEV-ONLY auth.sql_policy.allow_attach switch; serverAdmins
 	// is the control_plane.admins set. ATTACH is permitted on a pinned session only
 	// when attachAllowed AND the opening principal is a server-admin (see stream()).
@@ -153,6 +155,12 @@ func WithPolicy(p *authz.Policy) Option {
 // leaves the control plane disabled — /_admin then 404s like any reserved path.
 func WithAdmin(a http.Handler) Option {
 	return func(h *Handler) { h.admin = a }
+}
+
+// WithFeed enables the /<db>/changes SSE endpoint, backed by the given broker.
+// Nil (the default) leaves the change feed disabled (404).
+func WithFeed(b *feed.Broker) Option {
+	return func(h *Handler) { h.feed = b }
 }
 
 // WithMetrics sets the metrics sink; when it also implements obs.Exposer, the
@@ -305,6 +313,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // Hrana version-support probe
 	case "/v2/cursor", "/v3/cursor":
 		h.handleCursor(w, r, db)
+	case "/changes":
+		h.handleChanges(w, r, db)
 	default:
 		writeErr(w, http.StatusNotFound, "unknown endpoint "+endpoint)
 	}
