@@ -110,6 +110,36 @@ func (c *Client) AdminSessions(ctx context.Context) ([]AdminSession, error) {
 	return body.Sessions, nil
 }
 
+// AdminPrincipal is one runtime-enrolled principal (GET /_admin/principals).
+type AdminPrincipal struct {
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	CreatedAt int64  `json:"created_at"`
+	LastSeen  int64  `json:"last_seen"`
+}
+
+// AdminPrincipals lists the runtime-enrolled principals (server-admin only).
+func (c *Client) AdminPrincipals(ctx context.Context) ([]AdminPrincipal, error) {
+	raw, err := c.request(ctx, http.MethodGet, "/_admin/principals", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Principals []AdminPrincipal `json:"principals"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, fmt.Errorf("quicsql: malformed /_admin/principals response: %w", err)
+	}
+	return body.Principals, nil
+}
+
+// AdminDeletePrincipal revokes one runtime-enrolled principal — its key, grants,
+// and (per auth.enroll.provision.on_revoke) its per-user database — together
+// (server-admin only). A busy per-user database is refused with 409.
+func (c *Client) AdminDeletePrincipal(ctx context.Context, name string) error {
+	return c.adminPost(ctx, "/_admin/principals/delete", map[string]any{"name": name})
+}
+
 // AdminMintEnrollCode mints a single-use enrollment code (server-admin only;
 // requires auth.enroll.codes.enabled). The returned code is shown only here —
 // hand it to one user, who enrolls with it exactly once before expiresAt (unix).

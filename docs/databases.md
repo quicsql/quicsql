@@ -153,7 +153,7 @@ databases:
         recipients: [ keys:catalog_a.pub ]  # who may unwrap the new container (public keys)
 ```
 
-To add a second holder, generate their keypair, add their `.pub` to `create.recipients` (at provisioning time), and give them their identity to list in `identities`. Raw-key mode and recipient mode are mutually exclusive — set `key` **or** `identities`, never both.
+To add a second holder, generate their keypair, add their `.pub` to `create.recipients` (at provisioning time), and give them their identity to list in `identities`. Raw-key mode and recipient mode are mutually exclusive — set `key` **or** `identities`, never both. To change the membership of an **existing** recipient-mode vault at runtime — add or remove recipients, or fully re-key — edit `create.recipients` and run the `members`/`rewrap`/`rekey` control-plane ops (see [vault key lifecycle](administration.md#vault-key-lifecycle-recipient-mode-vaults)).
 
 ### Authenticated writes and membership signing (advanced)
 

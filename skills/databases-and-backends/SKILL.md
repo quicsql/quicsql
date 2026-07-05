@@ -52,7 +52,7 @@ Generate the raw key: `openssl rand -out /etc/quicsql/secrets/catalog 32` (adian
 
 ## Secrets
 
-Any key field is a `source:name` reference resolved at startup from a `secrets:` source — `type: file` (a filename in `dir`) or `type: env` (an env var). A `key` is raw bytes; identities/recipients are SSH keys. Plaintext never lives in the config.
+Any key field is a `source:name` reference resolved at startup from a `secrets:` source — `type: file` (a filename in `dir`), `type: env` (an env var), or `type: kms` (an operator `command` that wraps a real KMS: it gets the reference name in `$QUICSQL_SECRET_NAME`, prints the key bytes to stdout, runs with no shell). A `key` is raw bytes; identities/recipients are SSH keys. Plaintext never lives in the config.
 
 ## Grants
 

@@ -47,10 +47,11 @@ For a public app with **zero shipped credentials**: generate an ed25519 key on-d
 
 ```ts
 const db = createClient({ url, auth: { ed25519: { publicKey: "ssh-ed25519 AAAA… me", privateKey } } });
-const { principal } = await db.enroll();   // POST /_auth/enroll → server-assigned name + templated grants
+const { principal } = await db.enroll();                 // policy: open
+const { principal } = await db.enroll({ token: "ec_…" }); // policy: token — redeem a single-use invite code
 ```
 
-`enroll()` is idempotent per key. Bring your own crypto with `auth: { signer }` (`{ publicKey, sign(msg) }`); `sshPublicKeyLine(rawBytes)` builds the `ssh-ed25519 …` line. Server side: the `auth-and-tls` skill and the [auth guide](../../docs/auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps).
+`enroll()` is idempotent per key. Pass `enroll({ token })` under `policy: token` — the browser's only path for a **single-use enrollment code** (`ec_…`, minted by an admin at `POST /_admin/enroll/codes`). Bring your own crypto with `auth: { signer }` (`{ publicKey, sign(msg) }`); `sshPublicKeyLine(rawBytes)` builds the `ssh-ed25519 …` line. `db.backup()` downloads the database as a `Uint8Array`. Server side: the `auth-and-tls` skill and the [auth guide](../../docs/auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps). Note: admin ops — minting codes, vault key lifecycle, provisioning management — are **Go-client / HTTP only**; `@quicsql/client` covers the data + self-service-auth plane.
 
 ## Live change feed
 

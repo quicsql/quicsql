@@ -119,10 +119,22 @@ Pass `auth: { signer }` — any `{ publicKey, sign(message) }` pair — to bring
 For **public apps with no backend and no shipped credential at all**, generate the key on-device and self-register it:
 
 ```ts
-const { principal } = await db.enroll();   // calls /_auth/enroll when the server has enrollment on
+const { principal } = await db.enroll();                 // open enrollment (policy: open)
+const { principal } = await db.enroll({ token: "ec_…" }); // redeem a single-use invite code (policy: token)
 ```
 
-The server assigns the principal a name and a templated grant set; enrollment is idempotent per key, so a reinstalled app keeps its identity. See [device enrollment](../auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps) for the server side.
+The server assigns the principal a name and a templated grant set; enrollment is idempotent per key, so a reinstalled app keeps its identity. When the server runs `policy: token`, pass the invite in `enroll({ token })` — that's how a browser redeems a **single-use enrollment code** an admin minted at `POST /_admin/enroll/codes` (a one-time `ec_…` string). See [device enrollment](../auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps) for the server side.
+
+## Downloading a backup
+
+`db.backup()` streams the database as a standalone SQLite file (read access) and resolves to a `Uint8Array` — wrap it in a `Blob` to offer a download:
+
+```ts
+const bytes = await db.backup();
+const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+```
+
+It buffers the whole image client-side, so for a very large database prefer the Go client's streaming `BackupTo`.
 
 ## The native tier
 

@@ -203,14 +203,19 @@ auth:
     provision:
       enabled: true
       name_template: "{principal}"   # {principal} → the u_<hash> name; MUST appear (else users collide)
-      backend: vault                 # default vault (encrypted at rest); file | memory-shared | mvcc | memdb
-      vault: { key: keys:userdb }    # shared key ⇒ encryption at rest; isolation is by grant, not by key
+      backend: vault                 # default vault; file | memory-shared | mvcc | memdb
+      vault: { key: keys:userdb }    # a shared key ⇒ encryption at rest (isolation is by grant, not by key).
+                                     #   A vault backend with NO key/recipients is plaintext — the server warns.
+      pragmas_preset: recommended    # per-db pragma preset (WAL etc.), like a seed database
+      pragmas: { cache_size: -2000 } # per-db pragma overrides (keep the cache small at scale)
       level: read-write              # the enrollee's grant on their own db (never admin)
-      max_bytes: 104857600           # per-db size cap (PRAGMA max_page_count); 0 = no cap
+      max_bytes: 104857600           # soft size cap (PRAGMA max_page_count, 4 KiB pages); 0 = no cap, min one page
       on_revoke: keep                # keep (default — data preserved) | drop (detach + delete the file)
 ```
 
-The per-user database is a first-class persisted database (it survives restart, and its owner-grant reloads with it), so nothing special happens at startup — it is served like any seed. Everything a use-case might vary is a knob with a **safe default**: `on_revoke` defaults to **`keep`** (deleting an enrollee never destroys data — re-enrolling the same key restores access to the same database), the backend defaults to an **encrypted vault**, and there is no size cap unless you set `max_bytes`. Provisioning is part of the enroll transaction: if the database can't be created, the whole enrollment is rolled back, so a principal is never left without the database it was promised. (The shared `grants` template and per-user `provision` can be used together — a user gets both shared grants and their own database.)
+The per-user database is a first-class persisted database (it survives restart, and its owner-grant reloads with it), so nothing special happens at startup — it is served like any seed. Everything a use-case might vary is a knob with a **safe default**: `on_revoke` defaults to **`keep`** (deleting an enrollee never destroys data — re-enrolling the same key restores access to the same database), the backend defaults to a **vault** (encrypted at rest *when you give it a key* — a keyless vault backend is plaintext and warned at startup), and there is no size cap unless you set `max_bytes`. Provisioning is part of the enroll transaction: if the database can't be created, the whole enrollment is rolled back, so a principal is never left without the database it was promised. (The shared `grants` template and per-user `provision` can be used together — a user gets both shared grants and their own database.)
+
+> **`max_bytes` is a soft cap.** It sets `PRAGMA max_page_count` (assuming 4 KiB pages), which bounds a *well-behaved* client — but a read-write owner can raise it on their own connection, so it isn't a hard quota against a hostile tenant. Bound total disk at the deployment level (an OS quota on `data_dir`, or a filesystem for it) when enrolling untrusted clients under `policy: open`.
 
 > **Scaling many per-user databases.** quicSQL holds **one open handle per database**, opened lazily on first use. The number you can *provision* is bounded only by disk and `max_principals` (raise it for a large fleet) — idle databases are just files. The number held **open at once** is the real limit: each open handle keeps a small connection pool (file descriptors + page cache). **Set `limits.idle_handle_timeout`** (it defaults to off, and the server warns when provisioning is on without it) — then a per-user handle closes after it's been idle and reopens on the next request, so the open set tracks *active* users, not total enrollees. With a modest idle timeout, a small `pool.max_open` (1–2), and a small `cache_size` in the provision template, one server comfortably keeps hundreds-to-low-thousands of databases open concurrently while backing tens of thousands on disk; raise the OS file-descriptor limit accordingly, and shard across servers beyond that.
 
@@ -266,7 +271,7 @@ A subtle but important point: quicSQL does **not** enforce read-only by parsing 
 
 `admin` is the top level, and it means two things depending on where it comes from:
 
-- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, list databases and sessions, kill a session, and run vault maintenance — the `compact` (offline), `compact_online` (the online reclaim), `trim`, and `snapshot` ops. These operations live under `/_admin` (admin-only).
+- A **server-admin** is a principal named in `control_plane.admins`. Server-admins may run the control plane against *any* database: create and detach databases at runtime, list them, list databases and sessions, kill a session, mint enrollment codes, restore a database, and run the full vault-maintenance set (compact/reclaim/checkpoint, snapshot + encrypted snapshot, and the recipient-mode key lifecycle) — see the [administration guide](administration.md#maintenance). These operations live under `/_admin` (admin-only); the membership-changing `rewrap`/`rekey` require a server-admin specifically.
 - A **per-database admin** is a principal holding an `admin`-level grant on a specific database. It may administer *that database only* — e.g. run vault maintenance on it — but cannot create or detach databases server-wide.
 
 ```yaml

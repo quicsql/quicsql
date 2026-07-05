@@ -11,7 +11,7 @@ These are [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-
 | [`javascript-and-browser-clients`](javascript-and-browser-clients/SKILL.md) | building a **JavaScript/TypeScript or browser** app on quicSQL — the `@quicsql/client` SDK, session tokens, keyring auth, enrollment, and the live change feed |
 | [`transactions-and-hrana`](transactions-and-hrana/SKILL.md) | interactive transactions or batching many statements over Hrana |
 | [`liteorm-over-quicsql`](liteorm-over-quicsql/SKILL.md) | using an ORM (LiteORM) against a remote quicSQL database |
-| [`operating-a-server`](operating-a-server/SKILL.md) | administering a running server — control plane, metrics, limits, sessions, **online backup / in-place restore**, WAL checkpoint, and the **change feed** |
+| [`operating-a-server`](operating-a-server/SKILL.md) | administering a running server — control plane, metrics, limits, sessions, **online backup / in-place restore**, WAL checkpoint, **vault key lifecycle** (members/rewrap/rekey), and **enrolled-principal management + single-use code minting** |
 | [`pitfalls`](pitfalls/SKILL.md) | debugging surprising behaviour, or before shipping |
 
 ## For maintainers

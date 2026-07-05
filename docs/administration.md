@@ -38,7 +38,7 @@ Two rules anchor the security model:
   never applies to `/_admin`**: an anonymous caller on a wide-open dev server
   still cannot create, detach, or kill anything.
 - **A per-database `admin` grant is the lesser power.** It unlocks
-  [maintenance](#vault-maintenance) and the filtered `databases`/`sessions`
+  [maintenance](#maintenance) and the filtered `databases`/`sessions`
   views *for that database only* — never create, detach, kill, or `info`.
 
 The meta store opens **only when the control plane is enabled**. That switch
@@ -182,7 +182,7 @@ the wildcard-granted database, if immediate cutoff matters.
 | `reclaimable` | vault | online (read-only) | reports `reclaimable_bytes` a logical compaction would free — a probe, not a mutation |
 | `checkpoint` | **any WAL** | online | WAL checkpoint on the live handle; `"mode"` is `passive` (default) / `full` / `restart` / `truncate` |
 | `snapshot` | **any** | online | serializes the whole logical database (**decrypted**, for a vault) to `"dest"` |
-| `snapshot_encrypted` | vault | offline-in-place | re-sealed **encrypted** copy of the container to `"dest"` — no plaintext on disk |
+| `snapshot_encrypted` | vault | offline | re-sealed **encrypted** copy of the container to a separate `"dest"` — no plaintext on disk |
 | `members` | vault (recipient) | offline | enumerate the keyslot membership (masters / writers / read-only members) |
 | `rewrap` | vault (recipient) | offline | re-wrap the data key to the configured membership — **O(1)**, access-list only |
 | `rekey` | vault (recipient) | offline | re-encrypt under a **fresh** data key + the configured membership — **O(size)**, true revocation |
@@ -266,7 +266,7 @@ curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance
 - **`rewrap`** re-wraps the *existing* data key to the new membership — **O(1)**, regardless of database size. Because the data key is unchanged, a party you *removed* who already learned that key can still decrypt data they previously read; rewrap manages the access list, not the cryptography.
 - **`rekey`** generates a **fresh** data key and re-encrypts every page under it — **O(database size)** — so a removed party can no longer read anything even with the old key. This is the only way to truly revoke a master.
 
-All three run **offline**: the database is reserved (its handle drained — `409` if it has active users) so the container is closed while the keyslot is rewritten, and reopens on the next request. The op **seals the new keyslot before it commits**, so an unauthorized caller (a `by` that isn't a current master, per `create.sign_with`) fails cleanly *before* any data is touched. These ops apply only to recipient-mode vaults; a raw-`key` vault has no keyslot (rotate it by re-encrypting out of band). Config validation still holds: `create.sign_with` must resolve to a master identity.
+All three run **offline**: the database is reserved (its handle drained — `409` if it has active users) so the container is closed while the keyslot is rewritten, and reopens on the next request. **`members` is available to a per-database admin; the membership-changing `rewrap`/`rekey` require a server-admin** (they re-seal or re-encrypt, too heavy to reach through a per-database `*: admin` wildcard). The op also **seals the new keyslot before it commits**, so an unauthorized caller (a `by` that isn't a current master, per `create.sign_with`) fails cleanly *before* any data is touched. These ops apply only to recipient-mode vaults; a raw-`key` vault has no keyslot (rotate it by re-encrypting out of band). Config validation still holds: `create.sign_with` must resolve to a master identity.
 
 ## The audit log
 

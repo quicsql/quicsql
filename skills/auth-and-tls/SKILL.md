@@ -1,6 +1,6 @@
 ---
 name: auth-and-tls
-description: Use when securing a quicSQL server or presenting credentials from a client — configuring principals and auth methods (bearer, password, mTLS, ed25519 keyring, peercred, session tokens), per-database grants and levels, TLS profiles, mutual TLS, and CORS for browser apps. Covers both the server config and the client side.
+description: Use when securing a quicSQL server or presenting credentials from a client — configuring principals and auth methods (bearer, password, mTLS, ed25519 keyring, peercred, session tokens), device enrollment (single-use invite codes, enrollee idle GC, database-per-user provisioning), per-database grants and levels, TLS profiles, mutual TLS, and CORS for browser apps. Covers both the server config and the client side.
 ---
 
 # Auth and TLS
