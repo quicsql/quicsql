@@ -3,8 +3,10 @@ package admin_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	sqlite "gosqlite.org"
 	"quicsql.net/admin"
@@ -196,6 +200,152 @@ func TestVaultOfflineCompact(t *testing.T) {
 	if err := dbh2.Handle.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("row lost across compact: n=%d err=%v", n, err)
 	}
+}
+
+// sshKeypair returns a fresh ed25519 OpenSSH private-key PEM + authorized_keys line.
+func sshKeypair(t *testing.T) (priv, pub []byte) {
+	t.Helper()
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, err := ssh.MarshalPrivateKey(sk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, err := ssh.NewPublicKey(pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(blk), ssh.MarshalAuthorizedKey(sp)
+}
+
+// TestVaultKeyManagement drives the recipient-mode vault keyslot lifecycle over
+// the control plane: enumerate members, rewrap to add a recipient (who can then
+// open the vault), and rekey (re-encrypt, data intact).
+func TestVaultKeyManagement(t *testing.T) {
+	dir := t.TempDir()
+	sdir := t.TempDir()
+	keys := map[string][2]string{ // name → (privFile, pubFile)
+		"reader": {"reader.key", "reader.pub"}, "reader2": {"reader2.key", "reader2.pub"},
+		"writer": {"writer.key", "writer.pub"}, "admin": {"admin.key", "admin.pub"},
+	}
+	for _, kp := range keys {
+		priv, pub := sshKeypair(t)
+		_ = os.WriteFile(filepath.Join(sdir, kp[0]), priv, 0o600)
+		_ = os.WriteFile(filepath.Join(sdir, kp[1]), pub, 0o600)
+	}
+	sec, _ := secret.New([]config.SecretSource{{Name: "f", Type: "file", Dir: sdir}})
+
+	// Provision a master-protected vault: reader is a read-only member, writer the
+	// authorized signer, admin the master. Seed a row, then close it.
+	prov, err := backend.For(config.Database{Name: "v", Backend: "vault", Path: "v.vault", Mode: "rwc",
+		Vault: &config.VaultConfig{WriteAs: "f:writer.key", Create: &config.VaultCreate{
+			Recipients: []string{"f:reader.pub"}, Masters: []string{"f:admin.pub"},
+			SignWith: "f:admin.key", Writers: []string{"f:writer.pub"},
+		}}}, sec, dir)
+	if err != nil {
+		t.Fatalf("provision For: %v", err)
+	}
+	ph, err := prov.Open(context.Background())
+	if err != nil {
+		t.Fatalf("provision open: %v", err)
+	}
+	if _, err := ph.Exec("CREATE TABLE t(x); INSERT INTO t VALUES(1);"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_ = ph.Close()
+
+	// The admin's backend opens as the writer and carries the DESIRED membership in
+	// its create: block — reader AND reader2 (rewrap will admit reader2).
+	adminVC := &config.VaultConfig{
+		Identities: []string{"f:writer.key"}, Masters: []string{"f:admin.pub"}, WriteAs: "f:writer.key",
+		Create: &config.VaultCreate{
+			Recipients: []string{"f:reader.pub", "f:reader2.pub"}, Masters: []string{"f:admin.pub"},
+			SignWith: "f:admin.key", Writers: []string{"f:writer.pub"},
+		},
+	}
+	vbe, err := backend.For(config.Database{Name: "v", Backend: "vault", Path: "v.vault", Mode: "rwc", Vault: adminVC}, sec, dir)
+	if err != nil {
+		t.Fatalf("admin For: %v", err)
+	}
+	fbe, _ := backend.For(config.Database{Name: "f", Backend: "file", Path: "f.db", Mode: "rwc"}, sec, dir)
+	h, reg, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"v": vbe, "f": fbe}, sec, dir)
+
+	// Materialize + release so it is idle (the ops reserve).
+	_, release, err := reg.Get(context.Background(), "v")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	release()
+
+	// members: the keyslot lists the master, the writer, and the reader.
+	rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"members"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("members: got %d (%s)", rec.Code, rec.Body)
+	}
+	var mres struct {
+		Members []backend.VaultMember `json:"members"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &mres)
+	roles := map[string]int{}
+	for _, m := range mres.Members {
+		roles[m.Role]++
+	}
+	if roles["master"] < 1 || roles["member"] < 1 {
+		t.Fatalf("membership roles = %+v, want a master and a member", roles)
+	}
+
+	// reader2 cannot open the vault BEFORE rewrap.
+	if canOpenVault(t, sec, dir, "f:reader2.key") {
+		t.Fatal("reader2 must not open the vault before rewrap")
+	}
+
+	// rewrap re-wraps the data key to the configured membership (adds reader2).
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"rewrap"}`); rec.Code != http.StatusOK {
+		t.Fatalf("rewrap: got %d (%s)", rec.Code, rec.Body)
+	}
+	if !canOpenVault(t, sec, dir, "f:reader2.key") {
+		t.Fatal("reader2 must open the vault AFTER rewrap")
+	}
+
+	// rekey re-encrypts under a fresh key; data survives and the writer still reads.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"rekey"}`); rec.Code != http.StatusOK {
+		t.Fatalf("rekey: got %d (%s)", rec.Code, rec.Body)
+	}
+	wbe, _ := backend.For(config.Database{Name: "v", Backend: "vault", Path: "v.vault", Mode: "rw",
+		Vault: &config.VaultConfig{Identities: []string{"f:writer.key"}, Masters: []string{"f:admin.pub"}}}, sec, dir)
+	wh, err := wbe.Open(context.Background())
+	if err != nil {
+		t.Fatalf("open after rekey: %v", err)
+	}
+	defer wh.Close()
+	var n int
+	if err := wh.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("data lost across rekey: n=%d err=%v", n, err)
+	}
+
+	// A file backend rejects vault key management.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"f","op":"rewrap"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("rewrap on file backend: got %d, want 400", rec.Code)
+	}
+}
+
+// canOpenVault reports whether the identity ref can open v.vault and read the row.
+func canOpenVault(t *testing.T, sec secret.Resolver, dir, identity string) bool {
+	t.Helper()
+	be, err := backend.For(config.Database{Name: "probe", Backend: "vault", Path: "v.vault", Mode: "ro",
+		Vault: &config.VaultConfig{Identities: []string{identity}, Masters: []string{"f:admin.pub"}}}, sec, dir)
+	if err != nil {
+		return false
+	}
+	h, err := be.Open(context.Background())
+	if err != nil {
+		return false
+	}
+	defer h.Close()
+	var n int
+	return h.QueryRow("SELECT count(*) FROM t").Scan(&n) == nil
 }
 
 func TestSnapshotEncrypted(t *testing.T) {

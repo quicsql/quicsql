@@ -303,6 +303,25 @@ type EncryptedSnapshotter interface {
 	SnapshotEncrypted(dst string) error
 }
 
+// VaultMember is one entry of a vault's keyslot membership (backend.VaultKeyManager).
+type VaultMember struct {
+	Role  string `json:"role"` // master | writer | member
+	Key   string `json:"key"`  // the member's public key
+	Label string `json:"label,omitempty"`
+}
+
+// VaultKeyManager is implemented by the vault backend for the keyslot lifecycle of
+// a recipient-mode, master-protected vault: enumerate the membership, re-wrap the
+// data key to the configured membership (Rewrap — O(1), access-list only), or
+// re-encrypt under a fresh key (Rekey — O(size), true cryptographic revocation).
+// The target membership is the vault's configured create: block. All three require
+// the container CLOSED (the registry must hold the path reservation).
+type VaultKeyManager interface {
+	VaultMembers() ([]VaultMember, error)
+	Rewrap() error
+	Rekey() error
+}
+
 // For selects and constructs the backend for one database entry.
 func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
 	installSecurity() // register the ATTACH/DETACH deny before any connection opens

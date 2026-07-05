@@ -21,6 +21,9 @@ import (
 //	    "checkpoint"      — ONLINE:  WAL checkpoint on the live handle (any WAL database)
 //	    "snapshot"        — copy the (decrypted, for a vault) database image to `dest` (any backend)
 //	    "snapshot_encrypted" — OFFLINE: re-sealed encrypted copy of a vault to `dest` (vault only)
+//	    "members"          — OFFLINE: enumerate a recipient-mode vault's keyslot membership
+//	    "rewrap"           — OFFLINE: re-wrap the data key to the configured membership (O(1))
+//	    "rekey"            — OFFLINE: re-encrypt under a fresh key + configured membership (O(size))
 type maintenanceRequest struct {
 	Database string `json:"database"`
 	Op       string `json:"op"`
@@ -62,6 +65,8 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		h.snapshot(w, r, req)
 	case "snapshot_encrypted":
 		h.snapshotEncrypted(w, r, req)
+	case "members", "rewrap", "rekey":
+		h.vaultKeyMgmt(w, r, req)
 	default:
 		h.auditFail(r, req.Op, req.Database, "unknown maintenance op")
 		writeErr(w, http.StatusBadRequest, "unknown maintenance op")
@@ -349,6 +354,64 @@ func (h *Handler) snapshotEncrypted(w http.ResponseWriter, r *http.Request, req 
 	}
 	h.audit(r, "snapshot_encrypted", req.Database, dest)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "snapshot_encrypted", "database": req.Database, "dest": dest, "bytes": size})
+}
+
+// vaultKeyMgmt runs a vault keyslot lifecycle op (members / rewrap / rekey). All
+// three require the container CLOSED, so the database is reserved (409 if it has
+// active users) and its handle reopens lazily afterward. The target membership for
+// rewrap/rekey is the vault's configured create: block — edit it in YAML, then
+// reconcile the on-disk container with rewrap (cheap) or rekey (rewrites data,
+// true revocation). rewrap/rekey seal the new keyslot before committing, so an
+// unauthorized caller fails cleanly without touching the data.
+func (h *Handler) vaultKeyMgmt(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
+	km, ok := h.reg.Backend(req.Database).(backend.VaultKeyManager)
+	if !ok {
+		h.auditFail(r, req.Op, req.Database, "backend is not a recipient-mode vault")
+		writeErr(w, http.StatusBadRequest, "vault key management is only supported for recipient-mode vaults")
+		return
+	}
+	release, err := h.reg.Reserve(req.Database)
+	if err != nil {
+		if errors.Is(err, registry.ErrBusy) {
+			h.auditFail(r, req.Op, req.Database, "database busy")
+			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
+			return
+		}
+		h.auditFail(r, req.Op, req.Database, "reserve failed")
+		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+		return
+	}
+	defer release()
+
+	switch req.Op {
+	case "members":
+		members, err := km.VaultMembers()
+		if err != nil {
+			h.auditFail(r, "members", req.Database, "enumerate failed: "+err.Error())
+			writeErr(w, http.StatusBadRequest, "cannot enumerate vault membership: "+err.Error())
+			return
+		}
+		// A read-only enumeration is not audited as a mutation.
+		writeJSON(w, http.StatusOK, map[string]any{"database": req.Database, "members": members})
+	case "rewrap":
+		if err := km.Rewrap(); err != nil {
+			h.log.Error("quicsql/admin: vault rewrap", "db", req.Database, "err", err)
+			h.auditFail(r, "rewrap", req.Database, "rewrap failed: "+err.Error())
+			writeErr(w, http.StatusBadRequest, "rewrap failed: "+err.Error())
+			return
+		}
+		h.audit(r, "rewrap", req.Database, "membership re-wrapped")
+		writeJSON(w, http.StatusOK, map[string]any{"status": "rewrapped", "database": req.Database})
+	case "rekey":
+		if err := km.Rekey(); err != nil {
+			h.log.Error("quicsql/admin: vault rekey", "db", req.Database, "err", err)
+			h.auditFail(r, "rekey", req.Database, "rekey failed: "+err.Error())
+			writeErr(w, http.StatusBadRequest, "rekey failed: "+err.Error())
+			return
+		}
+		h.audit(r, "rekey", req.Database, "re-encrypted under a fresh key")
+		writeJSON(w, http.StatusOK, map[string]any{"status": "rekeyed", "database": req.Database})
+	}
 }
 
 // writeGetErr maps a registry Get failure to a status, matching the data plane's

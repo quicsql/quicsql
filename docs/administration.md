@@ -183,6 +183,9 @@ the wildcard-granted database, if immediate cutoff matters.
 | `checkpoint` | **any WAL** | online | WAL checkpoint on the live handle; `"mode"` is `passive` (default) / `full` / `restart` / `truncate` |
 | `snapshot` | **any** | online | serializes the whole logical database (**decrypted**, for a vault) to `"dest"` |
 | `snapshot_encrypted` | vault | offline-in-place | re-sealed **encrypted** copy of the container to `"dest"` — no plaintext on disk |
+| `members` | vault (recipient) | offline | enumerate the keyslot membership (masters / writers / read-only members) |
+| `rewrap` | vault (recipient) | offline | re-wrap the data key to the configured membership — **O(1)**, access-list only |
+| `rekey` | vault (recipient) | offline | re-encrypt under a **fresh** data key + the configured membership — **O(size)**, true revocation |
 
 ```sh
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
@@ -238,6 +241,32 @@ request. The reclaim ops run against the live handle.
 > file, so it isn't RAM-bound like `snapshot`. Raw-key vaults re-seal in-band;
 > a recipient/identity-mode vault carries no runtime recipients and can't be
 > re-sealed this way (→ 500) — snapshot those out of band.
+
+### Vault key lifecycle (recipient-mode vaults)
+
+A vault encrypted **to recipients** (an `age`-style keyslot with masters, writers, and read-only members — not a raw `key`) can have its access list managed at runtime, without moving the data. The target membership is the vault's own **`create:` block**: edit the recipients/masters/writers in YAML, then reconcile the on-disk container.
+
+```sh
+# Who can open this vault? (masters may enumerate)
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"secrets","op":"members"}'
+# → {"database":"secrets","members":[{"role":"master","key":"ssh-ed25519 AAAA…"},{"role":"member","key":"ssh-ed25519 AAAA…"}]}
+
+# Admit/drop recipients cheaply (re-wrap the data key to the configured set):
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"secrets","op":"rewrap"}'
+# → {"status":"rewrapped","database":"secrets"}
+
+# True cryptographic revocation (new data key, rewrites every page):
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"secrets","op":"rekey"}'
+# → {"status":"rekeyed","database":"secrets"}
+```
+
+- **`rewrap`** re-wraps the *existing* data key to the new membership — **O(1)**, regardless of database size. Because the data key is unchanged, a party you *removed* who already learned that key can still decrypt data they previously read; rewrap manages the access list, not the cryptography.
+- **`rekey`** generates a **fresh** data key and re-encrypts every page under it — **O(database size)** — so a removed party can no longer read anything even with the old key. This is the only way to truly revoke a master.
+
+All three run **offline**: the database is reserved (its handle drained — `409` if it has active users) so the container is closed while the keyslot is rewritten, and reopens on the next request. The op **seals the new keyslot before it commits**, so an unauthorized caller (a `by` that isn't a current master, per `create.sign_with`) fails cleanly *before* any data is touched. These ops apply only to recipient-mode vaults; a raw-`key` vault has no keyslot (rotate it by re-encrypting out of band). Config validation still holds: `create.sign_with` must resolve to a master identity.
 
 ## The audit log
 

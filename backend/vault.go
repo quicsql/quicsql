@@ -2,10 +2,12 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"gosqlite.org"
+	"gosqlite.org/crypto/keyring"
 	"gosqlite.org/vfs/crypto"
 	"gosqlite.org/vfs/vault"
 	"quicsql.net/config"
@@ -19,6 +21,12 @@ type vaultBackend struct {
 	cfg  sqlite.Config
 	opts vault.Options
 	ro   bool
+
+	// sec, vc, and name let the key-management ops (rekey/rewrap/members) re-resolve
+	// the configured create-time membership on demand. vc may be nil (plain container).
+	sec  secret.Resolver
+	vc   *config.VaultConfig
+	name string
 }
 
 func (b *vaultBackend) Open(ctx context.Context) (*sqlite.DB, error) {
@@ -75,6 +83,67 @@ func (b *vaultBackend) SnapshotEncrypted(dst string) error {
 	return vault.Snapshot(dst, b.cfg.Path, b.opts, b.opts)
 }
 
+// keyMgmtArgs re-resolves the configured create-time membership into the arguments
+// the vault key-management ops take: the master identity that authorizes the
+// change (create.sign_with), the writer that signs the commit (write_as), and the
+// target membership (create.recipients/masters/writers). These ops manage the
+// keyslot of a recipient-mode, master-protected vault; a raw-key or create-less
+// vault has no membership to manage.
+func (b *vaultBackend) keyMgmtArgs() (by keyring.Identity, writeAs keyring.WriterIdentity, m keyring.Membership, err error) {
+	if b.vc == nil || b.vc.Create == nil {
+		return nil, nil, keyring.Membership{}, errors.New("vault key management requires a recipient-mode vault with a create: membership in config")
+	}
+	var o vault.Options
+	if err := createVaultOptions(&o, b.name, b.vc, b.sec); err != nil {
+		return nil, nil, keyring.Membership{}, err
+	}
+	if o.SignWith == nil {
+		return nil, nil, keyring.Membership{}, errors.New("vault key management requires create.sign_with (a master identity)")
+	}
+	return o.SignWith, o.WriteAs, keyring.Membership{Masters: o.Masters, Writers: o.Writers, Members: o.Recipients}, nil
+}
+
+// VaultMembers enumerates the keyslot membership (masters, writers, read-only
+// members) of a recipient-mode vault (backend.VaultKeyManager). The container must
+// be closed (the registry must hold the path reservation).
+func (b *vaultBackend) VaultMembers() ([]VaultMember, error) {
+	by, _, _, err := b.keyMgmtArgs()
+	if err != nil {
+		return nil, err
+	}
+	ms, err := vault.Members(b.cfg.Path, by)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VaultMember, len(ms))
+	for i, mem := range ms {
+		out[i] = VaultMember{Role: mem.Role, Key: mem.Key, Label: mem.Label}
+	}
+	return out, nil
+}
+
+// Rewrap re-wraps the vault's data key to the configured membership WITHOUT
+// re-encrypting data — O(1) access-list management (backend.VaultKeyManager).
+// The container must be closed (path reservation held).
+func (b *vaultBackend) Rewrap() error {
+	by, writeAs, m, err := b.keyMgmtArgs()
+	if err != nil {
+		return err
+	}
+	return vault.Rewrap(b.cfg.Path, by, writeAs, m)
+}
+
+// Rekey re-encrypts the vault under a fresh data key wrapped to the configured
+// membership — O(database size), true cryptographic revocation
+// (backend.VaultKeyManager). The container must be closed (path reservation held).
+func (b *vaultBackend) Rekey() error {
+	by, writeAs, m, err := b.keyMgmtArgs()
+	if err != nil {
+		return err
+	}
+	return vault.Rekey(b.cfg.Path, by, writeAs, m)
+}
+
 // newVault resolves the vault.Options for a database. The option surface splits
 // by role (see the plan): raw key, compression, cipher, authenticate, and anchor
 // apply to both create and open; the rest is chosen by whether the container
@@ -85,7 +154,7 @@ func (b *vaultBackend) SnapshotEncrypted(dst string) error {
 // creating handle also takes write_as so it can write in authenticated-writer
 // mode. All secret material is resolved eagerly here so a bad key fails at load.
 func newVault(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
-	be := &vaultBackend{cfg: baseConfig(db, dataDir), ro: db.Mode == "ro"}
+	be := &vaultBackend{cfg: baseConfig(db, dataDir), ro: db.Mode == "ro", sec: sec, vc: db.Vault, name: db.Name}
 	vc := db.Vault
 	if vc == nil {
 		return be, nil // plain container (no compression, no encryption)
