@@ -73,6 +73,39 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reserve drains and reserves the idle handle for an OFFLINE op, mapping the
+// registry result to a response (ErrBusy→409, anything else→500) and auditing the
+// failure. On success it returns the release func (defer it) and ok=true; on
+// failure it has already written the response, so the caller returns immediately.
+func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, op, db string) (release func(), ok bool) {
+	release, err := h.reg.Reserve(db)
+	if err != nil {
+		if errors.Is(err, registry.ErrBusy) {
+			h.auditFail(r, op, db, "database busy")
+			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
+			return nil, false
+		}
+		h.auditFail(r, op, db, "reserve failed")
+		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+		return nil, false
+	}
+	return release, true
+}
+
+// pin opens (or reuses) the LIVE handle and holds a ref so the container stays
+// open for the duration of the op, mapping a Get failure via writeGetErr and
+// auditing it. On success it returns the handle + release func (defer it) +
+// ok=true; on failure it has already written the response, so the caller returns.
+func (h *Handler) pin(w http.ResponseWriter, r *http.Request, op, db string) (dbh *registry.DB, release func(), ok bool) {
+	dbh, release, err := h.reg.Get(r.Context(), db)
+	if err != nil {
+		h.auditFail(r, op, db, "open failed")
+		h.writeGetErr(w, db, err)
+		return nil, nil, false
+	}
+	return dbh, release, true
+}
+
 // logicalReclaim runs the O(live-data) reclaim against the LIVE handle, or (for
 // "reclaimable") just reports how much it would free — both read/write the open
 // container, so a registry ref is pinned to keep it open.
@@ -84,10 +117,8 @@ func (h *Handler) logicalReclaim(w http.ResponseWriter, r *http.Request, req mai
 		writeErr(w, http.StatusBadRequest, "logical reclaim is only supported for vault databases")
 		return
 	}
-	_, releaseRef, err := h.reg.Get(r.Context(), req.Database)
-	if err != nil {
-		h.auditFail(r, req.Op, req.Database, "open failed")
-		h.writeGetErr(w, req.Database, err)
+	_, releaseRef, ok := h.pin(w, r, req.Op, req.Database)
+	if !ok {
 		return
 	}
 	defer releaseRef()
@@ -135,10 +166,8 @@ func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request, req mainten
 		writeErr(w, http.StatusBadRequest, "checkpoint mode must be passive|full|restart|truncate")
 		return
 	}
-	dbh, releaseRef, err := h.reg.Get(r.Context(), req.Database)
-	if err != nil {
-		h.auditFail(r, "checkpoint", req.Database, "open failed")
-		h.writeGetErr(w, req.Database, err)
+	dbh, releaseRef, ok := h.pin(w, r, "checkpoint", req.Database)
+	if !ok {
 		return
 	}
 	defer releaseRef()
@@ -187,15 +216,8 @@ func (h *Handler) offlineCompact(w http.ResponseWriter, r *http.Request, req mai
 		writeErr(w, http.StatusBadRequest, "offline compact is only supported for vault databases")
 		return
 	}
-	release, err := h.reg.Reserve(req.Database)
-	if err != nil {
-		if errors.Is(err, registry.ErrBusy) {
-			h.auditFail(r, "compact", req.Database, "database busy")
-			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
-			return
-		}
-		h.auditFail(r, "compact", req.Database, "reserve failed")
-		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+	release, ok := h.reserve(w, r, "compact", req.Database)
+	if !ok {
 		return
 	}
 	defer release()
@@ -219,15 +241,14 @@ func (h *Handler) onlineReclaim(w http.ResponseWriter, r *http.Request, req main
 		writeErr(w, http.StatusBadRequest, "online reclaim is only supported for vault databases")
 		return
 	}
-	_, releaseRef, err := h.reg.Get(r.Context(), req.Database) // keep the container open
-	if err != nil {
-		h.auditFail(r, req.Op, req.Database, "open failed")
-		h.writeGetErr(w, req.Database, err)
+	_, releaseRef, ok := h.pin(w, r, req.Op, req.Database) // keep the container open
+	if !ok {
 		return
 	}
 	defer releaseRef()
 
 	var reclaimed int64
+	var err error
 	if req.Op == "trim" {
 		reclaimed, err = reclaimer.Trim(req.MaxBytes)
 	} else {
@@ -263,10 +284,8 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenan
 		writeErr(w, http.StatusBadRequest, "snapshot dest must be a path within data_dir")
 		return
 	}
-	dbh, releaseRef, err := h.reg.Get(r.Context(), req.Database)
-	if err != nil {
-		h.auditFail(r, "snapshot", req.Database, "open failed")
-		h.writeGetErr(w, req.Database, err)
+	dbh, releaseRef, ok := h.pin(w, r, "snapshot", req.Database)
+	if !ok {
 		return
 	}
 	defer releaseRef()
@@ -323,31 +342,37 @@ func (h *Handler) snapshotEncrypted(w http.ResponseWriter, r *http.Request, req 
 		writeErr(w, http.StatusBadRequest, "encrypted snapshot is only supported for vault databases")
 		return
 	}
-	if _, err := os.Stat(dest); err == nil {
-		h.auditFail(r, "snapshot_encrypted", req.Database, "dest exists: "+dest)
-		writeErr(w, http.StatusConflict, "snapshot dest already exists")
+	// Claim dest atomically with O_EXCL (as snapshot does) rather than a TOCTOU
+	// os.Stat: refuse to overwrite or follow a symlink onto an existing file, with
+	// no window between the check and the write. vault.Snapshot renames its temp
+	// sibling over this empty placeholder, so the claim only reserves the name; the
+	// deferred cleanup removes it again unless the snapshot commits.
+	cf, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		h.auditFail(r, "snapshot_encrypted", req.Database, "dest exists or cannot be created: "+dest)
+		writeErr(w, http.StatusConflict, "snapshot dest already exists or cannot be created")
 		return
 	}
-	// vault.Snapshot needs the container closed; reserve to drain the handle.
-	release, err := h.reg.Reserve(req.Database)
-	if err != nil {
-		if errors.Is(err, registry.ErrBusy) {
-			h.auditFail(r, "snapshot_encrypted", req.Database, "database busy")
-			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
-			return
+	_ = cf.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(dest) // reserved placeholder or partial artifact — don't leave it behind
 		}
-		h.auditFail(r, "snapshot_encrypted", req.Database, "reserve failed")
-		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+	}()
+	// vault.Snapshot needs the container closed; reserve to drain the handle.
+	release, ok := h.reserve(w, r, "snapshot_encrypted", req.Database)
+	if !ok {
 		return
 	}
 	defer release()
 	if err := snap.SnapshotEncrypted(dest); err != nil {
-		_ = os.Remove(dest) // a partial/temp artifact must not linger
 		h.log.Error("quicsql/admin: encrypted snapshot", "db", req.Database, "err", err)
 		h.auditFail(r, "snapshot_encrypted", req.Database, "snapshot failed: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, "encrypted snapshot failed (a recipient-mode vault cannot be re-sealed in-band)")
 		return
 	}
+	committed = true
 	var size int64
 	if info, statErr := os.Stat(dest); statErr == nil {
 		size = info.Size()
@@ -379,15 +404,8 @@ func (h *Handler) vaultKeyMgmt(w http.ResponseWriter, r *http.Request, req maint
 		writeErr(w, http.StatusBadRequest, "vault key management is only supported for recipient-mode vaults")
 		return
 	}
-	release, err := h.reg.Reserve(req.Database)
-	if err != nil {
-		if errors.Is(err, registry.ErrBusy) {
-			h.auditFail(r, req.Op, req.Database, "database busy")
-			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
-			return
-		}
-		h.auditFail(r, req.Op, req.Database, "reserve failed")
-		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+	release, ok := h.reserve(w, r, req.Op, req.Database)
+	if !ok {
 		return
 	}
 	defer release()

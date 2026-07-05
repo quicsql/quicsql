@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"gosqlite.org"
@@ -92,11 +91,21 @@ func Open(cfg config.MetaStore, sec secret.Resolver, dataDir string, log *slog.L
 		_ = db.Close()
 		return nil, fmt.Errorf("meta: schema: %w", err)
 	}
-	// Migration: stores created before idle GC lack enrolled.last_seen.
-	if _, err := db.Exec(`ALTER TABLE enrolled ADD COLUMN last_seen INTEGER`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column name") {
+	// Migration: stores created before idle GC lack enrolled.last_seen. Detect the
+	// column with the pragma_table_info() table-valued function rather than matching a
+	// driver's "duplicate column name" error string — that string can change between
+	// SQLite builds and would then turn a benign re-run into a startup failure. Add
+	// the column only when it is genuinely absent.
+	var hasLastSeen int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('enrolled') WHERE name = 'last_seen'`).Scan(&hasLastSeen); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("meta: migrate enrolled.last_seen: %w", err)
+		return nil, fmt.Errorf("meta: inspect enrolled columns: %w", err)
+	}
+	if hasLastSeen == 0 {
+		if _, err := db.Exec(`ALTER TABLE enrolled ADD COLUMN last_seen INTEGER`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("meta: migrate enrolled.last_seen: %w", err)
+		}
 	}
 	return &Store{db: db, log: log}, nil
 }

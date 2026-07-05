@@ -60,7 +60,7 @@ func TestVaultFeedAttribution(t *testing.T) {
 	}
 	defer db.Close()
 
-	sub, _, _, ok, _ := b.Subscribe("vaultdb", 0)
+	sub, _, _, ok, _, _ := b.Subscribe("vaultdb", 0)
 	if !ok {
 		t.Fatal("vault db should be observable")
 	}
@@ -99,7 +99,7 @@ func TestSymlinkedPathAttribution(t *testing.T) {
 	}
 	defer db.Close()
 
-	sub, _, _, ok, _ := b.Subscribe("linked", 0)
+	sub, _, _, ok, _, _ := b.Subscribe("linked", 0)
 	if !ok {
 		t.Fatal("linked db should be observable")
 	}

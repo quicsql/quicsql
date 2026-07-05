@@ -64,6 +64,17 @@ type Service struct {
 
 	seenMu sync.Mutex       // guards seen (touched on the auth hot path)
 	seen   map[string]int64 // principal → last-auth unix, buffered until the reaper flushes it
+
+	gateMu sync.Mutex           // guards gates
+	gates  map[string]*provGate // principal → serializes provisioning vs. Delete for one name
+}
+
+// provGate serializes the provisioning side-effects for a single principal so a
+// concurrent admin Delete cannot interleave with an enroll's out-of-lock Create.
+// It is refcounted so the map entry is dropped once no one holds or waits on it.
+type provGate struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // SetProvisioner wires database-per-user provisioning into the service. Called
@@ -82,6 +93,7 @@ func New(cfg config.Enroll, store *meta.Store, authn *auth.Authenticator, policy
 		buckets: map[string]*bucket{},
 		lastGC:  time.Now(),
 		seen:    map[string]int64{},
+		gates:   map[string]*provGate{},
 	}
 	for _, ref := range cfg.Tokens {
 		h, err := auth.ResolveParam(sec, ref)
@@ -124,6 +136,48 @@ func (s *Service) LoadExisting() (int, error) {
 // List returns the enrolled principals (for /_admin/principals).
 func (s *Service) List() ([]meta.Enrolled, error) { return s.store.EnrolledList() }
 
+// lockGate acquires the per-principal provisioning gate and returns its release
+// func. It serializes an enroll's out-of-lock Create+grant against a concurrent
+// Delete for the same name, so the two can never interleave into an orphaned
+// database owned by a just-deleted principal.
+func (s *Service) lockGate(name string) func() {
+	s.gateMu.Lock()
+	g := s.gates[name]
+	if g == nil {
+		g = &provGate{}
+		s.gates[name] = g
+	}
+	g.refs++
+	s.gateMu.Unlock()
+	g.mu.Lock()
+	return func() {
+		g.mu.Unlock()
+		s.gateMu.Lock()
+		if g.refs--; g.refs == 0 {
+			delete(s.gates, name)
+		}
+		s.gateMu.Unlock()
+	}
+}
+
+// rollbackEnroll undoes a durable enrollment (meta row, keyring, grant, count) and
+// releases any single-use code, so a provisioning failure or a concurrent delete
+// never leaves a principal without its promised database and a transient error never
+// burns the code. Idempotent: the DeleteEnrolled is a no-op (and count untouched) if
+// the row is already gone. The caller holds the principal's provisioning gate.
+func (s *Service) rollbackEnroll(name, codeHash string) {
+	s.mu.Lock()
+	if existed, _ := s.store.DeleteEnrolled(name); existed {
+		s.count--
+	}
+	s.authn.RemoveKeyringName(name)
+	s.policy.RevokePrincipal(name)
+	s.mu.Unlock()
+	if codeHash != "" {
+		s.store.ReleaseEnrollCode(codeHash)
+	}
+}
+
 // Delete revokes an enrolled principal everywhere: meta store, keyring, grants.
 // Deleting an unknown (or config-defined) name reports false.
 //
@@ -131,7 +185,11 @@ func (s *Service) List() ([]meta.Enrolled, error) { return s.store.EnrolledList(
 // (active users), Delete aborts with registry.ErrBusy and leaves the enrollment
 // intact, so the identity isn't removed out from under a still-orphaned database;
 // the admin caller gets a 409 and the idle reaper simply retries next tick.
+//
+// The whole body runs under the principal's provisioning gate so it can't race an
+// in-flight enroll's Create (which is deliberately outside s.mu, per H3).
 func (s *Service) Delete(name string) (bool, error) {
+	defer s.lockGate(name)()
 	if s.provisionEnabled() && s.cfg.Provision.OnRevoke == "drop" {
 		if err := s.prov.Drop(s.provisionName(name), true); err != nil && !errors.Is(err, registry.ErrUnknownDB) {
 			return false, err // ErrBusy → retryable; identity + grants stay intact
@@ -155,6 +213,12 @@ func (s *Service) Delete(name string) (bool, error) {
 // flushes the buffer to the meta store; a name that isn't enrolled is harmless.
 func (s *Service) Touch(name string) {
 	if s.cfg.IdleTTL <= 0 {
+		return
+	}
+	// Only enrolled principals (u_…) carry a last_seen row. The seen-hook also fires
+	// for static config operators authenticating by keyring or session — buffering
+	// them would just cost a no-op UPDATE against the enrolled table every flush.
+	if !strings.HasPrefix(name, enrolledPrefix) {
 		return
 	}
 	now := time.Now().Unix()
@@ -333,26 +397,37 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.count++
 	s.mu.Unlock()
 
-	// Provision the enrollee's own database, if configured — OUTSIDE the lock. On
-	// failure, roll the whole enroll back (including un-consuming the one-time code)
-	// so a principal is never left without its promised database and a transient
-	// error never burns the code.
+	// Provision the enrollee's own database, if configured — OUTSIDE s.mu (a per-user
+	// open may block on a slow KMS and must not stall the rate limiter). The whole
+	// step runs under the principal's provisioning gate so a concurrent admin Delete
+	// for this name is serialized against it: they can never interleave into a
+	// database orphaned by a just-deleted principal. On failure, roll the enroll back
+	// (including un-consuming the one-time code) so a principal is never left without
+	// its promised database and a transient error never burns the code.
 	if s.provisionEnabled() {
+		unlock := s.lockGate(name)
+		// A Delete that won the gate first may already have removed this principal;
+		// provisioning a database for a name that is gone — OR that we cannot confirm
+		// still exists (a meta-store read error) — would risk stranding it. Fail
+		// closed: roll the enroll back (a no-op if Delete already did) so a retry
+		// re-enrolls and re-provisions cleanly, rather than create a possible orphan.
+		if _, stillEnrolled, cerr := s.store.EnrolledByKey(canon); cerr != nil || !stillEnrolled {
+			s.rollbackEnroll(name, codeHash)
+			unlock()
+			s.store.Audit(name, "enroll.failed", "", "revoked or unconfirmed before provisioning")
+			s.log.Warn("quicsql/enroll: principal not confirmed before provisioning, rolled back", "principal", name)
+			httpjson.Error(w, http.StatusConflict, "enrollment was revoked; please retry")
+			return
+		}
 		if err := s.provisionFor(r.Context(), name); err != nil {
-			s.mu.Lock()
-			_, _ = s.store.DeleteEnrolled(name)
-			s.authn.RemoveKeyringName(name)
-			s.policy.RevokePrincipal(name)
-			s.count--
-			s.mu.Unlock()
-			if codeHash != "" {
-				s.store.ReleaseEnrollCode(codeHash)
-			}
+			s.rollbackEnroll(name, codeHash)
+			unlock()
 			s.store.Audit(name, "enroll.failed", "", "provision: "+err.Error())
 			s.log.Error("quicsql/enroll: provisioning failed, enrollment rolled back", "principal", name, "err", err)
 			httpjson.Error(w, http.StatusInternalServerError, "enrollment could not provision a database")
 			return
 		}
+		unlock()
 	}
 
 	s.store.Audit(name, "enroll.created", "", "ip="+ip)
@@ -501,12 +576,17 @@ func (s *Service) MintCode() (code string, expiresAt int64, err error) {
 	return code, expiresAt, nil
 }
 
+// enrolledPrefix marks a server-assigned enrolled-principal name. PrincipalName
+// always emits it, so it reliably distinguishes a dynamic enrollee (u_…) from a
+// static config principal.
+const enrolledPrefix = "u_"
+
 // PrincipalName derives the server-assigned principal name from a canonical
 // key line: "u_" + base32(sha256(key))[:16]. Deterministic, so re-enrolling the
 // same key always resolves to the same identity, and never client-chosen.
 func PrincipalName(canonicalKey string) string {
 	sum := sha256.Sum256([]byte(canonicalKey))
-	return "u_" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10]))
+	return enrolledPrefix + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10]))
 }
 
 func remoteIP(r *http.Request) string {

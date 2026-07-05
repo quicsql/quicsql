@@ -87,7 +87,7 @@ func (b *Broker) Register(name, path string) {
 		b.log.Warn("quicsql/feed: database has no stable path — change feed unavailable", "db", name)
 		return
 	}
-	f := &dbFeed{name: name, ring: make([]Event, 0, b.buffer), cap: b.buffer, subs: map[*Subscriber]struct{}{}}
+	f := &dbFeed{name: name, ring: make([]Event, b.buffer), cap: b.buffer, subs: map[*Subscriber]struct{}{}}
 	b.mu.Lock()
 	b.byPath[canonicalPath(path)] = f
 	b.byName[name] = f
@@ -191,28 +191,18 @@ func (b *Broker) Install() {
 // events after `since` first. ok=false when the database is not observed;
 // full=true when the subscriber cap is reached. When `since` has already left
 // the ring, reset=true tells the client its world is stale (refetch, then
-// follow from the returned events).
-func (b *Broker) Subscribe(db string, since uint64) (s *Subscriber, replay []Event, reset bool, ok, full bool) {
+// follow from the returned events). seq is the feed's current sequence at the
+// instant of attach — the point the subscriber now follows from (replay covers up
+// to it, live events arrive after it) — so the caller needs no second locked
+// lookup to report it.
+func (b *Broker) Subscribe(db string, since uint64) (s *Subscriber, replay []Event, reset bool, ok, full bool, seq uint64) {
 	b.mu.RLock()
 	f := b.byName[db]
 	b.mu.RUnlock()
 	if f == nil {
-		return nil, nil, false, false, false
+		return nil, nil, false, false, false, 0
 	}
 	return f.subscribe(since, b.maxSubs)
-}
-
-// Seq reports a database's current sequence (0 = never written or unobserved).
-func (b *Broker) Seq(db string) uint64 {
-	b.mu.RLock()
-	f := b.byName[db]
-	b.mu.RUnlock()
-	if f == nil {
-		return 0
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.seq
 }
 
 // Observed reports whether db has a feed.
@@ -240,14 +230,27 @@ func (s *Subscriber) Close() {
 	s.feed.unsubscribe(s)
 }
 
+// dbFeed retains the last `cap` events in a fixed circular buffer: the event with
+// sequence s (1-based, monotonic) lives at ring[(s-1) % cap]. This overwrites the
+// oldest slot in place on each publish rather than reslicing (`ring[1:]`), which —
+// once the ring was full — reallocated and copied the whole buffer on every commit.
 type dbFeed struct {
 	name string
 	cap  int
 
 	mu   sync.Mutex
 	seq  uint64
-	ring []Event
+	ring []Event // fixed length == cap
 	subs map[*Subscriber]struct{}
+}
+
+// retained reports how many of the most-recent events are still in the ring
+// (everything, until `cap` have been published). Caller holds f.mu.
+func (f *dbFeed) retained() uint64 {
+	if f.seq < uint64(f.cap) {
+		return f.seq
+	}
+	return uint64(f.cap)
 }
 
 func (f *dbFeed) publish(events []Event) {
@@ -256,10 +259,7 @@ func (f *dbFeed) publish(events []Event) {
 	for i := range events {
 		f.seq++
 		events[i].Seq = f.seq
-		if len(f.ring) == f.cap {
-			f.ring = f.ring[1:]
-		}
-		f.ring = append(f.ring, events[i])
+		f.ring[(f.seq-1)%uint64(f.cap)] = events[i] // overwrite the oldest slot in place
 		for s := range f.subs {
 			select {
 			case s.c <- events[i]:
@@ -273,11 +273,11 @@ func (f *dbFeed) publish(events []Event) {
 	}
 }
 
-func (f *dbFeed) subscribe(since uint64, maxSubs int) (s *Subscriber, replay []Event, reset bool, ok, full bool) {
+func (f *dbFeed) subscribe(since uint64, maxSubs int) (s *Subscriber, replay []Event, reset bool, ok, full bool, seq uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if maxSubs > 0 && len(f.subs) >= maxSubs {
-		return nil, nil, false, true, true
+		return nil, nil, false, true, true, f.seq
 	}
 	switch {
 	case since > f.seq:
@@ -285,17 +285,19 @@ func (f *dbFeed) subscribe(since uint64, maxSubs int) (s *Subscriber, replay []E
 		// stale even though it looks "ahead".
 		reset = true
 	case since > 0 && since < f.seq:
-		oldest := f.seq - uint64(len(f.ring)) + 1
-		if len(f.ring) == 0 || since+1 < oldest {
+		oldest := f.seq - f.retained() + 1 // oldest sequence still in the ring
+		if since+1 < oldest {
 			reset = true // the requested horizon has left the ring
 		} else {
-			replay = append(replay, f.ring[since-oldest+1:]...)
+			for sq := since + 1; sq <= f.seq; sq++ {
+				replay = append(replay, f.ring[(sq-1)%uint64(f.cap)])
+			}
 		}
 	}
 	sub := &Subscriber{c: make(chan Event, subscriberBuf), feed: f}
 	sub.C = sub.c
 	f.subs[sub] = struct{}{}
-	return sub, replay, reset, true, false
+	return sub, replay, reset, true, false, f.seq
 }
 
 func (f *dbFeed) unsubscribe(s *Subscriber) {

@@ -10,7 +10,6 @@ import (
 
 	sqlite "gosqlite.org"
 	"quicsql.net/backend"
-	"quicsql.net/registry"
 )
 
 // sqliteMagic is the 16-byte header every SQLite database file begins with.
@@ -112,15 +111,8 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 	removeSidecars(tmpPath)
 
 	// Reserve: close the idle handle (checkpointing its WAL) and block new opens.
-	release, err := h.reg.Reserve(db)
-	if err != nil {
-		if errors.Is(err, registry.ErrBusy) {
-			h.auditFail(r, "restore", db, "database busy")
-			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
-			return
-		}
-		h.auditFail(r, "restore", db, "reserve failed")
-		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+	release, ok := h.reserve(w, r, "restore", db)
+	if !ok {
 		return
 	}
 	defer release()

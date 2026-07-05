@@ -52,10 +52,6 @@ func (h *Handler) handleChanges(w http.ResponseWriter, r *http.Request, db strin
 		}
 		release()
 	}
-	if !h.feed.Observed(db) {
-		writeErr(w, http.StatusNotFound, "change feed unavailable for this database (no stable path)")
-		return
-	}
 	var since uint64
 	if s := r.URL.Query().Get("since"); s != "" {
 		v, err := strconv.ParseUint(s, 10, 64)
@@ -79,9 +75,11 @@ func (h *Handler) handleChanges(w http.ResponseWriter, r *http.Request, db strin
 		}
 	}
 
-	sub, replay, reset, ok, full := h.feed.Subscribe(db, since)
+	// One locked lookup does the work of the old Observed + Subscribe + Seq trio:
+	// curSeq is the feed's sequence at attach (the point this stream now follows).
+	sub, replay, reset, ok, full, curSeq := h.feed.Subscribe(db, since)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "change feed unavailable")
+		writeErr(w, http.StatusNotFound, "change feed unavailable for this database (no stable path)")
 		return
 	}
 	if full {
@@ -128,7 +126,7 @@ func (h *Handler) handleChanges(w http.ResponseWriter, r *http.Request, db strin
 	if reset {
 		head = "reset"
 	}
-	if !emit("event: %s\ndata: {\"seq\":%d}\n\n", head, h.feed.Seq(db)) {
+	if !emit("event: %s\ndata: {\"seq\":%d}\n\n", head, curSeq) {
 		return
 	}
 	for _, e := range replay {

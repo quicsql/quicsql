@@ -47,7 +47,7 @@ func TestHooksEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sub, replay, reset, ok, full := b.Subscribe("appdb", 0)
+	sub, replay, reset, ok, full, _ := b.Subscribe("appdb", 0)
 	if !ok || full || reset || len(replay) != 0 {
 		t.Fatalf("subscribe: ok=%v full=%v reset=%v replay=%d", ok, full, reset, len(replay))
 	}
@@ -114,20 +114,20 @@ func TestReplayAndReset(t *testing.T) {
 	f.publish(events) // seq 1..10, ring holds 7..10
 
 	// A recent horizon replays exactly the missed events.
-	_, replay, reset, ok, _ := b.Subscribe("db", 8)
+	_, replay, reset, ok, _, _ := b.Subscribe("db", 8)
 	if !ok || reset || len(replay) != 2 || replay[0].Seq != 9 || replay[1].Seq != 10 {
 		t.Fatalf("replay from 8: reset=%v replay=%+v", reset, replay)
 	}
 	// A horizon that left the ring gets reset.
-	if _, _, reset, _, _ := b.Subscribe("db", 2); !reset {
+	if _, _, reset, _, _, _ := b.Subscribe("db", 2); !reset {
 		t.Fatal("expected reset for an evicted horizon")
 	}
 	// A horizon from a previous incarnation (ahead of seq) also resets.
-	if _, _, reset, _, _ := b.Subscribe("db", 99); !reset {
+	if _, _, reset, _, _, _ := b.Subscribe("db", 99); !reset {
 		t.Fatal("expected reset for a future horizon")
 	}
 	// Caught up exactly: no replay, no reset.
-	if _, replay, reset, _, _ := b.Subscribe("db", 10); reset || len(replay) != 0 {
+	if _, replay, reset, _, _, _ := b.Subscribe("db", 10); reset || len(replay) != 0 {
 		t.Fatalf("caught-up subscribe: reset=%v replay=%d", reset, len(replay))
 	}
 }
@@ -137,11 +137,11 @@ func TestSubscriberCapAndSlowConsumerDrop(t *testing.T) {
 	b.Register("db", "/x/cap.sqlite")
 	f := b.byName["db"]
 
-	s1, _, _, ok, full := b.Subscribe("db", 0)
+	s1, _, _, ok, full, _ := b.Subscribe("db", 0)
 	if !ok || full {
 		t.Fatal("first subscribe should succeed")
 	}
-	if _, _, _, _, full := b.Subscribe("db", 0); !full {
+	if _, _, _, _, full, _ := b.Subscribe("db", 0); !full {
 		t.Fatal("second subscribe should hit the cap")
 	}
 
@@ -160,7 +160,7 @@ func TestSubscriberCapAndSlowConsumerDrop(t *testing.T) {
 		t.Fatalf("drained %d, want %d then close", drained, subscriberBuf)
 	}
 	// The dropped subscriber's slot is free again.
-	if _, _, _, ok, full := b.Subscribe("db", 0); !ok || full {
+	if _, _, _, ok, full, _ := b.Subscribe("db", 0); !ok || full {
 		t.Fatal("slot should be free after drop")
 	}
 }
@@ -183,7 +183,7 @@ func TestPendingOverflowPublishesReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sub, _, _, _, _ := b.Subscribe("db", 0)
+	sub, _, _, _, _, _ := b.Subscribe("db", 0)
 	defer sub.Close()
 	// Drain the CREATE TABLE's (zero) events; then one big transaction of more
 	// than maxPending inserts.
@@ -223,7 +223,7 @@ func TestPendingOverflowPublishesReset(t *testing.T) {
 func TestForgetClosesSubscribers(t *testing.T) {
 	b := New(16, 8, nil)
 	b.Register("db", "/x/f.sqlite")
-	s, _, _, _, _ := b.Subscribe("db", 0)
+	s, _, _, _, _, _ := b.Subscribe("db", 0)
 	b.Forget("db")
 	if _, open := <-s.C; open {
 		t.Fatal("subscriber should be closed on Forget")

@@ -183,13 +183,18 @@ func (s *sessionMinter) verify(token string) (string, error) {
 	return principal, nil
 }
 
-// isRevoked reports whether the session id has been revoked.
+// isRevoked reports whether the session id has an unexpired revocation entry. A
+// past-deadline entry (now beyond the session's outer deadline) is treated as
+// not-revoked and left for the next revoke() to sweep: by then every descendant
+// token has expired anyway, so the entry is moot, and honoring its deadline here
+// means isRevoked no longer depends solely on revoke() running to stop reporting
+// a long-dead session as revoked.
 func (s *sessionMinter) isRevoked(sid []byte) bool {
 	key := hex.EncodeToString(sid)
 	s.mu.RLock()
-	_, dead := s.revoked[key]
+	until, present := s.revoked[key]
 	s.mu.RUnlock()
-	return dead
+	return present && time.Now().UnixNano() <= until
 }
 
 // revoke invalidates the WHOLE session the presented token belongs to. Revocation

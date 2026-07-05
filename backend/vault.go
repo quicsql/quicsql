@@ -103,11 +103,30 @@ func (b *vaultBackend) keyMgmtArgs() (by keyring.Identity, writeAs keyring.Write
 	return o.SignWith, o.WriteAs, keyring.Membership{Masters: o.Masters, Writers: o.Writers, Members: o.Recipients}, nil
 }
 
+// masterIdentity resolves ONLY the create.sign_with master identity — the single
+// credential the read-only VaultMembers enumeration needs to unwrap the keyslot.
+// Unlike keyMgmtArgs it deliberately does NOT resolve the recipient/writer/write_as
+// secrets a mutating rewrap/rekey requires, so merely listing membership never
+// re-execs a KMS command for creds it will not use.
+func (b *vaultBackend) masterIdentity() (keyring.Identity, error) {
+	if b.vc == nil || b.vc.Create == nil {
+		return nil, errors.New("vault key management requires a recipient-mode vault with a create: membership in config")
+	}
+	if b.vc.Create.SignWith == "" {
+		return nil, errors.New("vault key management requires create.sign_with (a master identity)")
+	}
+	mi, err := b.sec.MasterIdentity(b.vc.Create.SignWith)
+	if err != nil {
+		return nil, fmt.Errorf("vault %q sign_with: %w", b.name, err)
+	}
+	return mi, nil
+}
+
 // VaultMembers enumerates the keyslot membership (masters, writers, read-only
 // members) of a recipient-mode vault (backend.VaultKeyManager). The container must
 // be closed (the registry must hold the path reservation).
 func (b *vaultBackend) VaultMembers() ([]VaultMember, error) {
-	by, _, _, err := b.keyMgmtArgs()
+	by, err := b.masterIdentity()
 	if err != nil {
 		return nil, err
 	}
