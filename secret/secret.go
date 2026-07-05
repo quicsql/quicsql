@@ -162,8 +162,9 @@ func runKMSCommand(src config.SecretSource, name string) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, src.Command[0], src.Command[1:]...)
 	cmd.Env = append(os.Environ(), "QUICSQL_SECRET_NAME="+name)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &cappedBuffer{limit: maxKMSOutput}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
@@ -175,6 +176,24 @@ func runKMSCommand(src config.SecretSource, name string) ([]byte, error) {
 		return nil, fmt.Errorf("secret: kms source %q command produced no output for %q", src.Name, name)
 	}
 	return stdout.Bytes(), nil
+}
+
+// maxKMSOutput bounds a kms command's stdout — a key is small; this caps a runaway
+// or compromised helper so it can't OOM the daemon.
+const maxKMSOutput = 1 << 20 // 1 MiB
+
+// cappedBuffer is a bytes.Buffer that refuses to grow past limit, so a subprocess
+// writing unbounded output fails the command instead of exhausting memory.
+type cappedBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.Len()+len(p) > c.limit {
+		return 0, fmt.Errorf("secret: kms command output exceeds %d bytes", c.limit)
+	}
+	return c.Buffer.Write(p)
 }
 
 // isPrivateKeyPEM reports whether b is a PEM block (a private key), matched on

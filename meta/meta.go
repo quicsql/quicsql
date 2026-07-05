@@ -225,6 +225,20 @@ func (s *Store) IdleEnrolled(cutoff int64) ([]string, error) {
 	return out, rows.Err()
 }
 
+// EnrolledByKey returns the principal name bound to a canonical key and whether it
+// exists — the indexed idempotency lookup (enrolled.key is UNIQUE), so the enroll
+// path need not scan the whole table.
+func (s *Store) EnrolledByKey(key string) (name string, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT name FROM enrolled WHERE key = ?`, key).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("meta: enrolled by key: %w", err)
+	}
+	return name, true, nil
+}
+
 // PutEnrolled records one enrolled principal. The name and key are both unique;
 // re-enrolling an existing key is the caller's idempotency path, not an upsert.
 func (s *Store) PutEnrolled(name, key string) error {
@@ -277,6 +291,15 @@ func (s *Store) ConsumeEnrollCode(hash string, now int64) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// ReleaseEnrollCode un-consumes a code (used_at = NULL), restoring it after an
+// enrollment that consumed it but then rolled back — so a transient provisioning
+// failure never burns a user's one-time code. Best-effort.
+func (s *Store) ReleaseEnrollCode(hash string) {
+	if _, err := s.db.Exec(`UPDATE enroll_codes SET used_at = NULL WHERE hash = ?`, hash); err != nil {
+		s.log.Error("quicsql/meta: release enroll code", "err", err)
+	}
 }
 
 // GCEnrollCodes deletes used or expired codes, bounding the table. Best-effort.

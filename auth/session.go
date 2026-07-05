@@ -50,7 +50,7 @@ type sessionMinter struct {
 	idleTTL time.Duration
 	maxTTL  time.Duration
 
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	revoked map[string]int64 // hex(sid) → the session's outer deadline (unix nanos), kept until it passes
 }
 
@@ -186,9 +186,9 @@ func (s *sessionMinter) verify(token string) (string, error) {
 // isRevoked reports whether the session id has been revoked.
 func (s *sessionMinter) isRevoked(sid []byte) bool {
 	key := hex.EncodeToString(sid)
-	s.mu.Lock()
+	s.mu.RLock()
 	_, dead := s.revoked[key]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	return dead
 }
 

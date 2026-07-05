@@ -139,8 +139,8 @@ type Enroll struct {
 	Policy string `yaml:"policy" json:"policy"` // open | token
 	// Tokens are the accepted enrollment tokens for policy "token", each a
 	// hex(sha256(token)) or a secret reference — the same never-store-plaintext
-	// discipline as bearer credentials. Static and shared: rotate by config
-	// change; single-use minted codes are a planned refinement.
+	// discipline as bearer credentials. Static and shared (rotate by config change);
+	// for one-time per-user invites use Codes (single-use minted codes) instead.
 	Tokens []string `yaml:"tokens" json:"tokens"`
 	// MaxPrincipals hard-caps the enrolled set (default 1000) — the backstop
 	// that bounds meta-store growth and policy size under abuse.
@@ -164,6 +164,10 @@ type Enroll struct {
 	// static Tokens: an admin mints a code, hands it to a user, and it works once.
 	Codes EnrollCodes `yaml:"codes" json:"codes"`
 }
+
+// ProvisionPageSize is the page size assumed when translating
+// Provision.MaxBytes into a PRAGMA max_page_count cap (SQLite's default page).
+const ProvisionPageSize = 4096
 
 // EnrollCodes configures server-minted single-use enrollment codes. When enabled,
 // POST /_admin/enroll/codes (server-admin) mints a fresh code, and a caller may

@@ -316,6 +316,35 @@ func TestSessionNoRefreshHeaderWhenNonRenewable(t *testing.T) {
 	}
 }
 
+// TestSessionAuthCountsAsSeen: a session-authenticated request fires the seen-hook
+// with the minting principal, so an enrolled device riding a session token stays
+// "active" for idle GC (regression for the idle-GC vs session-token contradiction).
+func TestSessionAuthCountsAsSeen(t *testing.T) {
+	sum := sha256.Sum256([]byte("s3cr3t"))
+	sec, _ := secret.New(nil)
+	cfg := &config.Config{Auth: config.Auth{
+		Principals: []config.Principal{principal("app", "bearer", map[string]any{"token_hash": hex.EncodeToString(sum[:])})},
+		Session:    config.SessionTokens{Enabled: true, IdleTTL: time.Minute},
+	}}
+	a, err := New(cfg, sec, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var seen []string
+	a.SetSeenHook(func(name string) { seen = append(seen, name) })
+	m := a.Middleware(config.Listener{Name: "l", Auth: []string{"bearer", "session"}}, nil)
+
+	tok := tokenFrom(t, mintToken(t, m, "Bearer s3cr3t")) // minted via bearer (does NOT fire the hook)
+	r := httptest.NewRequest(http.MethodPost, "/app/query", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := m.authenticate(r); err != nil {
+		t.Fatalf("session auth: %v", err)
+	}
+	if len(seen) != 1 || seen[0] != "app" {
+		t.Fatalf("session auth must fire the seen-hook with the principal, got %v", seen)
+	}
+}
+
 // revokeToken DELETEs /_auth/session presenting the given token.
 func revokeToken(t *testing.T, m *Middleware, token string) *httptest.ResponseRecorder {
 	t.Helper()

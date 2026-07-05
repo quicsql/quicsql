@@ -364,6 +364,15 @@ func (h *Handler) snapshotEncrypted(w http.ResponseWriter, r *http.Request, req 
 // true revocation). rewrap/rekey seal the new keyslot before committing, so an
 // unauthorized caller fails cleanly without touching the data.
 func (h *Handler) vaultKeyMgmt(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
+	// The membership-changing ops re-seal (rewrap) or re-encrypt every page (rekey)
+	// — too heavy to reach via a per-database `*: admin` wildcard (which the
+	// anonymous principal matches). Require a server-admin; read-only `members`
+	// stays gated by the ordinary per-database admin check above.
+	if (req.Op == "rewrap" || req.Op == "rekey") && !h.isServerAdmin(r) {
+		h.auditDeny(r, req.Op, req.Database, "not server-admin")
+		writeErr(w, http.StatusForbidden, "rewrap/rekey require server-admin capability")
+		return
+	}
 	km, ok := h.reg.Backend(req.Database).(backend.VaultKeyManager)
 	if !ok {
 		h.auditFail(r, req.Op, req.Database, "backend is not a recipient-mode vault")

@@ -126,7 +126,11 @@ func (p *Provisioner) Drop(name string, deleteFile bool) error {
 		p.metrics.Forget(name)
 	}
 	if p.store != nil {
-		_ = p.store.Delete(name)
+		// A failed delete leaves the persisted record, so reconcile would resurrect
+		// the database on restart — log rather than swallow.
+		if err := p.store.Delete(name); err != nil {
+			p.log.Warn("quicsql/provision: could not delete persisted database record (may resurrect on restart)", "db", name, "err", err)
+		}
 	}
 	if deleteFile && path != "" {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

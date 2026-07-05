@@ -151,6 +151,12 @@ func (h *Handler) handleChanges(w http.ResponseWriter, r *http.Request, db strin
 				return
 			}
 		case <-keepalive.C:
+			// Re-check authorization: a read grant revoked after connect (admin
+			// delete, idle-GC) must close the stream, not keep leaking change
+			// metadata to a principal who lost access.
+			if h.policy != nil && !h.policy.Level(authz.FromContext(r.Context()), db).CanRead() {
+				return
+			}
 			if !emit(": ping\n\n") {
 				return
 			}

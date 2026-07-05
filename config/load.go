@@ -540,11 +540,34 @@ func (c *Config) validateEnroll() error {
 		if p.MaxBytes < 0 {
 			return fmt.Errorf("config: auth.enroll.provision.max_bytes must not be negative")
 		}
+		// A cap below one page would integer-divide to max_page_count=0, which SQLite
+		// reads as "unlimited" — the opposite of intended. Require at least one page.
+		if p.MaxBytes > 0 && p.MaxBytes < ProvisionPageSize {
+			return fmt.Errorf("config: auth.enroll.provision.max_bytes must be 0 (no cap) or at least %d (one page)", ProvisionPageSize)
+		}
 		if p.Vault != nil && p.Backend != "vault" {
 			return fmt.Errorf("config: auth.enroll.provision has a vault block but backend is %q", p.Backend)
 		}
+		// The default backend is "vault" ("encrypted at rest"), but a vault with no
+		// key or recipients is a plain container — warn rather than silently ship
+		// plaintext per-user databases (mirrors the keyless meta-store warning).
+		if p.Backend == "vault" && !provisionVaultEncrypted(p.Vault) {
+			c.warnings = append(c.warnings, "config: auth.enroll.provision.backend is vault but no vault.key/recipients are set — per-user databases will NOT be encrypted at rest")
+		}
 	}
 	return nil
+}
+
+// provisionVaultEncrypted reports whether the provision vault template encrypts at
+// rest — a raw key or at least one recipient.
+func provisionVaultEncrypted(v *VaultConfig) bool {
+	if v == nil {
+		return false
+	}
+	if v.Key != "" {
+		return true
+	}
+	return v.Create != nil && len(v.Create.Recipients) > 0
 }
 
 // transportFamily is the socket family a transport binds — the axis a bind

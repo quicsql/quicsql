@@ -63,8 +63,9 @@ type Authenticator struct {
 	dynKeyring map[string]keyringCred
 
 	// seenHook, if set, fires with the principal name on every successful keyring
-	// auth — the enrollment service uses it to track last-seen for idle GC. Set
-	// once before serving; nil otherwise.
+	// OR session auth — the enrollment service uses it to track last-seen for idle
+	// GC (a session token minted by an enrolled principal keeps it active). Set once
+	// before serving; nil otherwise.
 	seenHook func(name string)
 
 	dummyHash []byte // a throwaway bcrypt hash, compared on unknown users to level password timing
@@ -402,6 +403,12 @@ func (a *Authenticator) trySession(r *http.Request) (*authz.Principal, bool, err
 	if err != nil {
 		return nil, true, errInvalidCredential
 	}
+	if a.seenHook != nil {
+		// A session token minted by an enrolled principal carries that principal's
+		// name, so riding a session counts as enrollee activity for idle GC — the
+		// intended flow is enroll (keyring once) then use a session token.
+		a.seenHook(name)
+	}
 	return &authz.Principal{Name: name, Method: "session"}, true, nil
 }
 
@@ -541,10 +548,10 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	return &authz.Principal{Name: cred.name, Method: "keyring"}, true, nil
 }
 
-// SetKeyringSeenHook registers a callback fired with the principal name on every
-// successful keyring auth (the enrollment service's idle-GC last-seen tracker).
-// Set once before serving.
-func (a *Authenticator) SetKeyringSeenHook(fn func(name string)) { a.seenHook = fn }
+// SetSeenHook registers a callback fired with the principal name on every
+// successful keyring or session auth (the enrollment service's idle-GC last-seen
+// tracker — so a session-riding enrollee stays "active"). Set once before serving.
+func (a *Authenticator) SetSeenHook(fn func(name string)) { a.seenHook = fn }
 
 func (a *Authenticator) tryPeercred(r *http.Request) (*authz.Principal, bool) {
 	c := connFrom(r.Context())

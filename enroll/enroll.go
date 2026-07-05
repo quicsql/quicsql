@@ -126,7 +126,17 @@ func (s *Service) List() ([]meta.Enrolled, error) { return s.store.EnrolledList(
 
 // Delete revokes an enrolled principal everywhere: meta store, keyring, grants.
 // Deleting an unknown (or config-defined) name reports false.
+//
+// For on_revoke:drop the per-user database is dropped FIRST — if it is busy
+// (active users), Delete aborts with registry.ErrBusy and leaves the enrollment
+// intact, so the identity isn't removed out from under a still-orphaned database;
+// the admin caller gets a 409 and the idle reaper simply retries next tick.
 func (s *Service) Delete(name string) (bool, error) {
+	if s.provisionEnabled() && s.cfg.Provision.OnRevoke == "drop" {
+		if err := s.prov.Drop(s.provisionName(name), true); err != nil && !errors.Is(err, registry.ErrUnknownDB) {
+			return false, err // ErrBusy → retryable; identity + grants stay intact
+		}
+	}
 	existed, err := s.store.DeleteEnrolled(name)
 	if err != nil || !existed {
 		return existed, err
@@ -136,16 +146,6 @@ func (s *Service) Delete(name string) (bool, error) {
 	s.mu.Lock()
 	s.count--
 	s.mu.Unlock()
-
-	// Fate of the per-user database, per on_revoke. "keep" (default) leaves it in
-	// place — data is preserved and re-granted if the same key re-enrolls. "drop"
-	// detaches it and deletes the file.
-	if s.provisionEnabled() && s.cfg.Provision.OnRevoke == "drop" {
-		dbName := s.provisionName(name)
-		if err := s.prov.Drop(dbName, true); err != nil && !errors.Is(err, registry.ErrUnknownDB) {
-			s.log.Warn("quicsql/enroll: could not drop per-user database on revoke", "principal", name, "db", dbName, "err", err)
-		}
-	}
 	return true, nil
 }
 
@@ -213,12 +213,16 @@ func (s *Service) reap(now int64) int {
 	return n
 }
 
-// StartIdleReaper runs idle GC every interval until ctx is cancelled, flushing
-// last-seen once more on shutdown. A no-op when IdleTTL is 0.
-func (s *Service) StartIdleReaper(ctx context.Context, interval time.Duration) {
+// StartIdleReaper runs idle GC until ctx is cancelled, flushing last-seen once
+// more on shutdown. A no-op when IdleTTL is 0. The tick is derived from IdleTTL
+// (bounded by [min, 1h]) rather than the caller's fine reap interval, so a
+// multi-day TTL doesn't flush last-seen to the encrypted meta store every few
+// seconds — eviction latency of IdleTTL/20 is immaterial against the TTL itself.
+func (s *Service) StartIdleReaper(ctx context.Context, floor time.Duration) {
 	if s.cfg.IdleTTL <= 0 {
 		return
 	}
+	interval := min(max(s.cfg.IdleTTL/20, floor), time.Hour)
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -244,7 +248,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := remoteIP(r)
 	if !s.allow(ip) {
-		s.store.Audit("", "enroll.denied", "", "rate limited ip="+ip)
+		// Deliberately NOT audited: the token bucket rejects floods cheaply, but a
+		// meta-store INSERT per rejected attempt would let that same flood amplify
+		// into unbounded encrypted disk writes.
 		httpjson.Error(w, http.StatusTooManyRequests, "enrollment rate limited")
 		return
 	}
@@ -264,30 +270,27 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := PrincipalName(canon)
-	// One registration path at a time: the check-then-insert on count and the
-	// idempotency lookup must not interleave.
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	existing, err := s.store.EnrolledList()
-	if err != nil {
+	// Locked critical section: the idempotency lookup, token gate, cap, code
+	// consumption, and the durable enroll (row + keyring + grants + count). It does
+	// NOT hold the lock across provisioning below — a per-user DB open (possibly a
+	// slow KMS call) must not stall the rate limiter, which shares s.mu.
+	s.mu.Lock()
+	if existing, ok, err := s.store.EnrolledByKey(canon); err != nil {
+		s.mu.Unlock()
 		httpjson.Error(w, http.StatusInternalServerError, "internal error")
 		return
+	} else if ok {
+		s.mu.Unlock()
+		// Idempotent re-enroll: same key, same principal — needs no token.
+		httpjson.Write(w, http.StatusOK, map[string]any{"principal": existing, "created": false})
+		return
 	}
-	for _, e := range existing {
-		if e.Key == canon {
-			// Idempotent re-enroll: same key, same principal — a reinstalled app
-			// doesn't multiply identities, and needs no token (already trusted).
-			httpjson.Write(w, http.StatusOK, map[string]any{"principal": e.Name, "created": false})
-			return
-		}
-	}
-	// New enrollment: the token gate applies now (it never applies to the re-enroll
-	// above). A single-use code is validated here and consumed just below.
 	var codeHash string
 	if s.cfg.Policy == "token" {
 		ok, ch := s.validateToken(presentedToken)
 		if !ok {
+			s.mu.Unlock()
 			s.store.Audit("", "enroll.denied", "", "missing/invalid enrollment token ip="+ip)
 			httpjson.Error(w, http.StatusForbidden, "enrollment requires a valid enrollment token")
 			return
@@ -295,43 +298,56 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		codeHash = ch
 	}
 	if s.cfg.MaxPrincipals > 0 && s.count >= s.cfg.MaxPrincipals {
+		s.mu.Unlock()
 		s.store.Audit("", "enroll.denied", "", "max_principals reached ip="+ip)
 		httpjson.Error(w, http.StatusTooManyRequests, "enrollment capacity reached")
 		return
 	}
-	// Consume the single-use code NOW — this is a confirmed new enrollment (past the
-	// idempotency and cap gates), so a re-enroll or a rejected attempt never burns
-	// one. The atomic consume also settles any race between two keys presenting the
-	// same code: exactly one wins.
+	// Consume the single-use code now — a confirmed new enrollment (past idempotency
+	// and cap). The atomic consume settles any race between two keys presenting the
+	// same code. If a later step fails, ReleaseEnrollCode restores it.
 	if codeHash != "" {
 		consumed, cerr := s.store.ConsumeEnrollCode(codeHash, time.Now().Unix())
 		if cerr != nil {
+			s.mu.Unlock()
 			httpjson.Error(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		if !consumed {
+			s.mu.Unlock()
 			s.store.Audit("", "enroll.denied", "", "enrollment code already used or expired ip="+ip)
 			httpjson.Error(w, http.StatusForbidden, "enrollment code is no longer valid")
 			return
 		}
 	}
 	if err := s.store.PutEnrolled(name, canon); err != nil {
+		s.mu.Unlock()
+		if codeHash != "" {
+			s.store.ReleaseEnrollCode(codeHash)
+		}
 		httpjson.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	s.authn.AddKeyring(canon, pub, name)
 	s.applyGrants(name)
 	s.count++
+	s.mu.Unlock()
 
-	// Provision the enrollee's own database, if configured. Do it as part of the
-	// enrollment transaction: if it fails, roll the whole enroll back so we never
-	// leave a principal without the database it was promised.
+	// Provision the enrollee's own database, if configured — OUTSIDE the lock. On
+	// failure, roll the whole enroll back (including un-consuming the one-time code)
+	// so a principal is never left without its promised database and a transient
+	// error never burns the code.
 	if s.provisionEnabled() {
-		if err := s.provisionFor(name); err != nil {
+		if err := s.provisionFor(r.Context(), name); err != nil {
+			s.mu.Lock()
 			_, _ = s.store.DeleteEnrolled(name)
 			s.authn.RemoveKeyringName(name)
 			s.policy.RevokePrincipal(name)
 			s.count--
+			s.mu.Unlock()
+			if codeHash != "" {
+				s.store.ReleaseEnrollCode(codeHash)
+			}
 			s.store.Audit(name, "enroll.failed", "", "provision: "+err.Error())
 			s.log.Error("quicsql/enroll: provisioning failed, enrollment rolled back", "principal", name, "err", err)
 			httpjson.Error(w, http.StatusInternalServerError, "enrollment could not provision a database")
@@ -382,7 +398,9 @@ func (s *Service) provisionSpec(principal string) (config.Database, error) {
 		db.Pragmas = make(map[string]any, len(p.Pragmas)+1)
 		maps.Copy(db.Pragmas, p.Pragmas)
 		if p.MaxBytes > 0 {
-			db.Pragmas["max_page_count"] = p.MaxBytes / 4096
+			// A soft, advisory cap: config validation guarantees >= one page, so this
+			// is >= 1 (never the "unlimited" 0 that a sub-page value would truncate to).
+			db.Pragmas["max_page_count"] = p.MaxBytes / config.ProvisionPageSize
 		}
 	}
 	return db, nil
@@ -391,12 +409,12 @@ func (s *Service) provisionSpec(principal string) (config.Database, error) {
 // provisionFor creates the enrollee's database and grants them access on the live
 // policy. An already-existing database (a prior run, or a "keep" re-enroll) is
 // tolerated — the grant is (re)applied and the call succeeds.
-func (s *Service) provisionFor(principal string) error {
+func (s *Service) provisionFor(ctx context.Context, principal string) error {
 	spec, err := s.provisionSpec(principal)
 	if err != nil {
 		return err
 	}
-	if err := s.prov.Create(context.Background(), spec); err != nil && !errors.Is(err, registry.ErrExists) {
+	if err := s.prov.Create(ctx, spec); err != nil && !errors.Is(err, registry.ErrExists) {
 		return err
 	}
 	if lvl, ok := authz.ParseLevel(s.cfg.Provision.Level); ok {

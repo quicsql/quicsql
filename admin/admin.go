@@ -174,6 +174,12 @@ func (h *Handler) handlePrincipalDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	existed, err := h.enroll.Delete(req.Name)
+	if errors.Is(err, registry.ErrBusy) {
+		// on_revoke:drop couldn't drop the per-user database (active users); the
+		// principal is left intact so nothing is orphaned. Retry when idle.
+		writeErr(w, http.StatusConflict, "the principal's database is busy (has active users); retry when idle")
+		return
+	}
 	if err != nil {
 		h.audit(r, "principals.delete.failed", "", req.Name)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -438,7 +444,11 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		h.metrics.Forget(req.Database)
 	}
 	if h.store != nil {
-		_ = h.store.Delete(req.Database)
+		// A failed delete leaves the persisted record behind, so reconcile would
+		// resurrect the database on restart — surface it rather than swallow it.
+		if err := h.store.Delete(req.Database); err != nil {
+			h.log.Error("quicsql/admin: detach persist delete failed (may resurrect on restart)", "db", req.Database, "err", err)
+		}
 		h.store.Audit(h.principal(r), "detach", req.Database, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "detached", "database": req.Database})
