@@ -215,6 +215,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 	}
 	if cfg.ControlPlane.Enabled {
 		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
+		adminH.SetRestoreLimit(cfg.Limits.MaxRestoreBytes)
 		if broker != nil {
 			adminH.SetFeed(broker)
 		}

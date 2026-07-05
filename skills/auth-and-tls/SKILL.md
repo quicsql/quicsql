@@ -41,9 +41,9 @@ listeners:
   - { name: h2, transport: h2, address: 0.0.0.0:7777, tls: main, auth: [password, session] }
 ```
 
-`POST /_auth/session` with any **other** credential (password/bearer/keyring/mtls/peercred) returns `{token, expires_at, principal}`; use the `qs_…` token as `Authorization: Bearer` like any bearer token; `DELETE /_auth/session` (presenting the token) revokes it. A session token authenticates as the minting principal with the same grants, **cannot mint its successor**, and dies on server restart (per-process signing key, fail-closed). Anonymous cannot mint.
+`POST /_auth/session` with any **other** credential (password/bearer/keyring/mtls/peercred) returns `{token, expires_at, principal}` (plus `max_expires_at` when renewable); use the `qs_…` token as `Authorization: Bearer` like any bearer token; `DELETE /_auth/session` (presenting the token) revokes it. A session token authenticates as the minting principal with the same grants, **cannot mint its successor**, and dies on server restart (per-process signing key, fail-closed). Anonymous cannot mint. **The `qs_` prefix is reserved** — on a listener accepting both `session` and `bearer`, a `qs_…` value always routes to the session method, so don't mint a static bearer token beginning with `qs_` (it would be treated as a failed session token).
 
-By default (`max_ttl` unset) a token dies at `idle_ttl` and is not renewable. Set `max_ttl` for a **sliding "extend on use"** session: an active session slides forward (transparently — the server returns an extended token in an `X-Quicsql-Session` header the SDK adopts — or explicitly via `PUT /_auth/session`), an idle one lapses at `idle_ttl`, and no renewal crosses `max_ttl` from the first mint (`max_ttl` ≥ `idle_ttl`). Opt-in: it trades some of the strict "dies at idle_ttl" bound for convenience.
+By default (`max_ttl` unset) a token dies at `idle_ttl` and is not renewable. Set `max_ttl` for a **sliding "extend on use"** session: an active session slides forward (transparently — the server returns an extended token in the `X-Quicsql-Session` header, new expiry in `X-Quicsql-Session-Expires`, which the SDK adopts — or explicitly via `PUT /_auth/session`), an idle one lapses at `idle_ttl`, and no renewal crosses `max_ttl` from the first mint (`max_ttl` ≥ `idle_ttl`). Opt-in: it trades some of the strict "dies at idle_ttl" bound for convenience. **`DELETE` revokes the whole session** — every token in a renewal chain shares one session id, so revoking any one (e.g. logout with the current token) cuts the siblings earlier renewals issued too.
 
 ## Device enrollment (self-service principals)
 
@@ -64,15 +64,18 @@ Idempotent per key (`created: false` on re-enroll); denials are 401 (possession)
 
 ## CORS (browser apps)
 
-Off by default — without it a web page from another origin cannot call the server at all. Enable and allowlist the page origins (`"*"` allowed; exact match, no wildcards or paths):
+Off by default — without it a web page from another origin cannot call the server at all. Enable and allowlist the page origins (exact match, no wildcards or paths):
 
 ```yaml
 cors:
   enabled: true
-  origins: ["https://app.example.com"]
+  origins: ["https://app.example.com"]   # "*" refused unless auth is configured (see below)
+  # allow_headers: []   # extra request headers, added to the built-in Authorization/Content-Type/X-Quicsql-* set
+  # expose_headers: []  # extra response headers scripts may read (session headers already exposed)
+  # max_age: 2h         # preflight cache TTL (default 2h)
 ```
 
-Preflights (`OPTIONS`) are answered before auth (they carry no credential by design); actual requests still authenticate normally. `Authorization`, `Content-Type`, and the `X-Quicsql-*` keyring headers are pre-approved, so bearer/session/password/keyring all work from browsers; mTLS does not. Pair with session tokens so the page holds only a short-lived token.
+Preflights (`OPTIONS`) are answered before auth (they carry no credential by design); actual requests still authenticate normally. `Authorization`, `Content-Type`, and the `X-Quicsql-*` keyring headers are pre-approved, so bearer/session/password/keyring all work from browsers; mTLS does not. A `"*"` origin is **refused at startup unless auth is configured** — otherwise any web page could reach an open-mode (unauthenticated) database. Pair with session tokens so the page holds only a short-lived token.
 
 ## Authorization (per-database grants)
 

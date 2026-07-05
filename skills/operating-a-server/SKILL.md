@@ -1,6 +1,6 @@
 ---
 name: operating-a-server
-description: Use when administering a running quicSQL server — the /_admin control plane (create/detach/list databases, stats, sessions, kill, vault maintenance), scraping /_metrics, configuring rate/concurrency limits and timeouts, and the slow-query log.
+description: Use when administering a running quicSQL server — the /_admin control plane (create/detach/list databases, stats, sessions, kill, vault maintenance), online backup / in-place restore, WAL checkpoint, scraping /_metrics, configuring rate/concurrency limits and timeouts, and the slow-query log.
 ---
 
 # Operating a quicSQL server

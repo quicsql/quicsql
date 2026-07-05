@@ -315,3 +315,76 @@ func TestSessionNoRefreshHeaderWhenNonRenewable(t *testing.T) {
 		t.Fatal("a non-renewable session must never emit a refresh header")
 	}
 }
+
+// revokeToken DELETEs /_auth/session presenting the given token.
+func revokeToken(t *testing.T, m *Middleware, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("revoke request must be handled by the middleware")
+	}))
+	r := httptest.NewRequest(http.MethodDelete, "/_auth/session", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// tokenField extracts just the token from a mint/renew response.
+func tokenField(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v (%s)", err, w.Body.String())
+	}
+	return resp.Token
+}
+
+// authOK reports whether the token authenticates on m.
+func authOK(t *testing.T, m *Middleware, token string) bool {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/app/query", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	_, err := m.authenticate(r)
+	return err == nil
+}
+
+// A sliding session is ONE identity: a DELETE on any token in the renewal chain
+// revokes the whole chain — the presented token and every sibling an earlier
+// renewal issued (they share the session id). A leaked early token cannot outlive
+// the logout that presents a renewed one.
+func TestSessionRevokeRevokesWholeChain(t *testing.T) {
+	// Security-critical direction: revoking the NEWER token (a logout with the
+	// token in hand) must also invalidate an EARLIER, possibly-leaked one.
+	m := buildSessionTTL(t, time.Minute, time.Hour) // renewable
+	old := tokenFrom(t, mintToken(t, m, "Bearer s3cr3t"))
+	renewed := tokenField(t, renewToken(t, m, old))
+	if renewed == old || !strings.HasPrefix(renewed, sessionPrefix) {
+		t.Fatalf("renew should return a new token, got %q", renewed)
+	}
+	if !authOK(t, m, old) || !authOK(t, m, renewed) {
+		t.Fatal("both tokens should authenticate before revocation")
+	}
+	if w := revokeToken(t, m, renewed); w.Code != http.StatusNoContent {
+		t.Fatalf("revoke status = %d, want 204", w.Code)
+	}
+	if authOK(t, m, renewed) {
+		t.Fatal("the revoked token must be rejected")
+	}
+	if authOK(t, m, old) {
+		t.Fatal("the earlier token in the chain must ALSO be revoked")
+	}
+
+	// The reverse direction, on a fresh session: revoking the OLDER token kills
+	// the renewed sibling too.
+	m2 := buildSessionTTL(t, time.Minute, time.Hour)
+	first := tokenFrom(t, mintToken(t, m2, "Bearer s3cr3t"))
+	second := tokenField(t, renewToken(t, m2, first))
+	if w := revokeToken(t, m2, first); w.Code != http.StatusNoContent {
+		t.Fatalf("revoke(first) status = %d, want 204", w.Code)
+	}
+	if authOK(t, m2, second) {
+		t.Fatal("revoking an earlier token must revoke the renewed sibling too")
+	}
+}

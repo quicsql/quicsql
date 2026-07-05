@@ -309,8 +309,9 @@ type Limits struct {
 	MaxRows            int           `yaml:"max_rows" json:"max_rows"`
 	MaxResultBytes     int64         `yaml:"max_result_bytes" json:"max_result_bytes"`
 	MaxRequestBytes    int64         `yaml:"max_request_bytes" json:"max_request_bytes"`
-	MaxBlobBytes       int64         `yaml:"max_blob_bytes" json:"max_blob_bytes"`     // cap for a single streamed large object (0 = default)
-	MaxExportBytes     int64         `yaml:"max_export_bytes" json:"max_export_bytes"` // cap for a full-database /export image, materialized whole in RAM (0 = default 1 GiB)
+	MaxBlobBytes       int64         `yaml:"max_blob_bytes" json:"max_blob_bytes"`       // cap for a single streamed large object (0 = default)
+	MaxExportBytes     int64         `yaml:"max_export_bytes" json:"max_export_bytes"`   // cap for a full-database /export image, materialized whole in RAM (0 = default 1 GiB)
+	MaxRestoreBytes    int64         `yaml:"max_restore_bytes" json:"max_restore_bytes"` // cap for a /_admin/restore upload, streamed to disk (0 = default 4 GiB; <0 = unlimited)
 	StatementTimeout   time.Duration `yaml:"statement_timeout" json:"statement_timeout"`
 	TxIdleTimeout      time.Duration `yaml:"tx_idle_timeout" json:"tx_idle_timeout"`
 	MaxTxLifetime      time.Duration `yaml:"max_tx_lifetime" json:"max_tx_lifetime"`

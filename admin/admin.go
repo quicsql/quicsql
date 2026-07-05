@@ -43,7 +43,16 @@ type Handler struct {
 	log      *slog.Logger
 	enroll   Enrollments  // runtime-enrolled principal management (may be nil)
 	feedReg  FeedRegistry // change-feed registration for runtime create/detach (may be nil)
+
+	// maxRestore bounds a /_admin/restore upload (streamed to disk): 0 uses the
+	// default, <0 removes the cap. Set from limits.max_restore_bytes.
+	maxRestore int64
 }
+
+// SetRestoreLimit sets the /_admin/restore upload cap (limits.max_restore_bytes):
+// 0 keeps the default (4 GiB), a positive value overrides it, a negative value
+// removes the cap. Called once during serverd assembly.
+func (h *Handler) SetRestoreLimit(n int64) { h.maxRestore = n }
 
 // Enrollments is the enrolled-principal management surface the enrollment
 // service provides; nil when enrollment is disabled.

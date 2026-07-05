@@ -16,10 +16,11 @@ import (
 // sqliteMagic is the 16-byte header every SQLite database file begins with.
 const sqliteMagic = "SQLite format 3\x00"
 
-// maxRestoreBytes bounds an uploaded restore image. It is streamed to disk, so
-// this guards disk (not RAM); a database larger than this should be moved into
-// place out of band.
-const maxRestoreBytes = 4 << 30
+// defaultMaxRestoreBytes bounds an uploaded restore image when no explicit
+// limits.max_restore_bytes is set. It is streamed to disk, so this guards disk
+// (not RAM); raise the limit (or set it <0 for no cap) to restore a larger image
+// in place, or move the file into place out of band.
+const defaultMaxRestoreBytes = 4 << 30
 
 // handleRestore replaces a file database's contents with an uploaded SQLite image
 // — the inverse of /export and /backup. `POST /_admin/restore?database=X` with
@@ -81,14 +82,22 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	n, err := io.Copy(tmp, io.LimitReader(r.Body, maxRestoreBytes+1))
+	limit := h.maxRestore
+	if limit == 0 {
+		limit = defaultMaxRestoreBytes
+	}
+	src := r.Body
+	if limit > 0 {
+		src = io.NopCloser(io.LimitReader(r.Body, limit+1)) // +1 so an at-limit read still trips the check
+	}
+	n, err := io.Copy(tmp, src)
 	_ = tmp.Close()
 	if err != nil {
 		h.auditFail(r, "restore", db, "upload failed")
 		writeErr(w, http.StatusBadRequest, "restore: upload failed")
 		return
 	}
-	if n > maxRestoreBytes {
+	if limit > 0 && n > limit {
 		h.auditFail(r, "restore", db, "image too large")
 		writeErr(w, http.StatusRequestEntityTooLarge, "restore image exceeds the size cap")
 		return

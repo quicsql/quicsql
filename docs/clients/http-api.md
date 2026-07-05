@@ -104,20 +104,22 @@ your language which wraps it.
 
 Beyond `/query`, each database also serves `/export` (a full in-memory database
 snapshot), `/backup` (a streaming online backup with no size ceiling),
-`/changeset/*` (SQLite session changesets), and `/blob/*` (streamed large
-objects) — specified [below](#beyond-query). Server-scoped endpoints live
-elsewhere: `/_health` (unauthenticated liveness), `/_auth/challenge` (the
-keyring nonce), and `/_auth/session` (mint/renew/revoke a short-lived session
-token) are in the [auth guide](../auth-and-authz.md), and `/_metrics`
-(Prometheus) and `/_admin/*` (the control plane) are in
+`/changeset/*` (SQLite session changesets), `/blob/*` (streamed large objects),
+and `/changes` (a live Server-Sent-Events change feed) — specified
+[below](#beyond-query). Server-scoped endpoints live elsewhere: `/_health`
+(unauthenticated liveness), `/_auth/challenge` (the keyring nonce), and
+`/_auth/session` (mint/renew/revoke a short-lived session token) are in the
+[auth guide](../auth-and-authz.md), and `/_metrics` (Prometheus) and `/_admin/*`
+(the control plane, including in-place `restore`) are in
 [administration](../administration.md). Browser callers additionally need the
-server's `cors:` block enabled — also covered in the auth guide.
+server's `cors:` block enabled — also covered in the auth guide; note a `*`
+origin is refused unless authentication is configured.
 
 ## Beyond `/query`
 
-The same per-database URL prefix carries three more endpoints for work the
-single-shot JSON path can't express: a full-database snapshot, SQLite session
-changesets, and streamed large objects. They share the auth, routing, and
+The same per-database URL prefix carries more endpoints for work the single-shot
+JSON path can't express: a full-database snapshot, SQLite session changesets,
+streamed large objects, and a live change feed. They share the auth, routing, and
 admission (`429`/`503`) behavior of `/query`; each adds its own body shape and
 status codes.
 
@@ -134,7 +136,9 @@ with `Content-Disposition: attachment; filename="<db>.sqlite"`. **Read access is
 enough:** a principal who can read every row via SQL gains nothing extra from a
 bulk copy. A vault (encrypted) database is serialized **decrypted**, exactly as
 its readers already see it — the client can't ask for the on-disk form. It is
-GET-only (`405` otherwise), and there is no companion `/import` endpoint.
+GET-only (`405` otherwise), and there is no companion per-database `/import`
+endpoint; bulk restore is a control-plane op (`POST /_admin/restore`, server-admin
+only — see [administration](../administration.md#backup-and-restore)).
 
 The image is materialized whole in RAM before it streams, so two limits guard
 the process:
@@ -241,3 +245,43 @@ on a read; or an unknown object id); `405` (wrong method); `413` (a write over
 `max_blob_bytes`); `422` (the blobstore operation itself failed — a provision,
 store open on a write, create, write, read, size, or delete error). The shared
 `429`/`503` admission codes apply as everywhere.
+
+### `/<db>/changes` — the live change feed (SSE)
+
+```
+GET /<db>/changes?since=<seq>&tables=<a,b>
+Authorization: Bearer <token>
+Accept: text/event-stream
+```
+
+A [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+stream of **committed row changes** — the LISTEN/NOTIFY quicSQL's single-owner
+architecture makes exact. It is off until the server enables [`changefeed:`](../change-feed.md),
+and only databases with a stable on-disk path (`file`, `vault`) are observable.
+**Read access** is required.
+
+Each event carries `{seq, table, op, rowid}` — **never column values** — so the
+feed tells a subscriber *what to re-read* and can never leak a column it
+shouldn't see. The stream opens with a `ready` (or `reset`) event, then one
+`change` event per committed row (`id:` = its sequence):
+
+```
+event: ready              ← or `reset`: your horizon left the buffer / server restarted — refetch, then follow
+data: {"seq":41}
+
+id: 42
+event: change
+data: {"seq":42,"table":"orders","op":"insert","rowid":7}
+
+: ping                    ← keepalive comment every 25s
+```
+
+Resume after a disconnect with `?since=<seq>` (or the standard `Last-Event-ID`
+header) and you continue exactly where you left off; if the gap outgrew the
+replay ring you get a `reset` instead (refetch, then follow). `?tables=a,b`
+filters server-side. A single huge transaction that overflows the per-commit
+buffer publishes one `reset` in place of per-row detail. Beyond
+`changefeed.max_subscribers` concurrent streams the server returns `503`. A
+slow consumer is disconnected (it resumes by sequence) rather than allowed to
+stall the commit path. Full narrative, sizing, and the `@quicsql/client`
+`subscribe()` wrapper are in the [change-feed guide](../change-feed.md).

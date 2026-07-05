@@ -44,7 +44,7 @@ Existing **libSQL / Turso clients work as-is**: quicSQL serves the Hrana `v2`/`v
 
 ## Documentation
 
-- **[`docs/`](docs/)** — the human guides: [getting started](docs/getting-started.md), [clients & languages](docs/clients/) (JavaScript/TypeScript, Python, PHP, Go, and more, plus the [HTTP API reference](docs/clients/http-api.md)), [databases & open modes](docs/databases.md), [auth & authorization](docs/auth-and-authz.md), [the Hrana pipeline](docs/hrana.md), and [mTLS in production](docs/mtls-production.md).
+- **[`docs/`](docs/)** — the human guides: [getting started](docs/getting-started.md), [clients & languages](docs/clients/) (the official [`@quicsql/client`](docs/clients/javascript.md) JS/TS SDK, plus Python, PHP, Go, and the [HTTP API reference](docs/clients/http-api.md)), [databases & open modes](docs/databases.md), [auth & authorization](docs/auth-and-authz.md), [the Hrana pipeline](docs/hrana.md), [the change feed](docs/change-feed.md), [administration & backup/restore](docs/administration.md), and [mTLS in production](docs/mtls-production.md).
 - **[pkg.go.dev/quicsql.net](https://pkg.go.dev/quicsql.net)** — the Go API reference (the client, the driver, and the embeddable `serverd`).
 - **[`AGENTS.md`](AGENTS.md)** — architecture, invariants, and conventions for anyone (human or AI agent) working *in* the codebase; `doc.go` on every package for pkg.go.dev.
 - **[`examples/`](examples/)** — runnable, self-contained programs (see [Examples](#examples)).

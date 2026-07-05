@@ -44,7 +44,7 @@ extensions/     the curated, network-safe extension bundle (regexp, fts5, vec0, 
 cmd/quicsql/    the standalone daemon (`quicsql --config quicsql.yaml`)
 internal/       httpjson/ (response envelope), raceskip/ (checkptr skip; local — can't import gosqlite's)
 examples/       in-module runnable examples: demo (transports + bench), auth (auth matrix), charged-server (deployable)
-docs/           human guides: auth-and-authz, mtls-production, hrana, databases
+docs/           human guides: getting-started, auth-and-authz, mtls-production, hrana, databases, change-feed, administration, clients/ (incl. the @quicsql/client JS SDK, http-api)
 ```
 
 ---
@@ -108,7 +108,7 @@ Always:
 1. Add tests in the package's `*_test.go` (prefer integration over the wire — see `client/*_test.go`, `httpapi/*_test.go`). Native C paths (Serialize, SESSION, blobstore) trip `-race` checkptr; skip them with `internal/raceskip`.
 2. **Update every doc the change touches, in the same change** — doc drift is the #1 failure mode:
    - `doc.go` for the package whose API moved.
-   - `docs/<guide>.md` — the human guide (auth-and-authz / mtls-production / hrana / databases).
+   - `docs/<guide>.md` — the human guide (getting-started / auth-and-authz / mtls-production / hrana / databases / change-feed / administration / clients/).
    - **`skills/<name>/SKILL.md`** — the agent-usage recipe. Skills ship to consumers and go stale silently; treat updating them as part of the feature. Add a new skill folder when a feature is a distinct task an agent would do.
    - `README` if the change affects the landing overview.
 3. Don't quote test counts in user-facing docs — describe behavior, not numbers.

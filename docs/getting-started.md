@@ -72,8 +72,9 @@ quicsql --config quicsql.yaml
 
 Every listener serves the same endpoints: `POST /<db>/query` (native JSON),
 `/<db>/v2|v3/pipeline` and `/<db>/v3/cursor` (Hrana), `/<db>/export`,
-`/<db>/changeset/*`, `/<db>/blob/*`, plus the server-scoped `/_health`,
-`/_metrics`, `/_admin/*`, and `/_auth/challenge`. The canonical port is
+`/<db>/backup`, `/<db>/changeset/*`, `/<db>/blob/*`, `/<db>/changes` (the SSE
+change feed), plus the server-scoped `/_health`, `/_metrics`, `/_admin/*`,
+`/_auth/challenge`, `/_auth/session`, and `/_auth/enroll`. The canonical port is
 **7775** (h1); the sequence continues h2c 7776 and h2 7777 — and **h3 shares
 7777** (QUIC/UDP alongside h2's TLS/TCP, the way HTTPS shares :443; the h3
 listener's `advertise: true` emits `Alt-Svc` so clients auto-upgrade).
@@ -235,10 +236,15 @@ defer inst.Shutdown(ctx)
 - **[Databases & backends](databases.md)** — every open mode gosqlite has,
   over the wire: files, in-memory, mvcc snapshots, and vault containers in every
   shape, plus pragmas, pool tuning, and secrets.
-- **[Auth & authorization](auth-and-authz.md)** — six authentication methods,
+- **[Auth & authorization](auth-and-authz.md)** — seven authentication methods
+  (including short-lived session tokens and device enrollment for browser apps),
   the `none < read-only < read-write < admin` capability model, and why
   read-only cannot be talked around.
 - **[The Hrana pipeline](hrana.md)** — transactions, batches, batons, and
   production limits.
+- **[The change feed](change-feed.md)** — `GET /<db>/changes` streams committed
+  row changes over Server-Sent Events (resume, filter, reset).
+- **[Administration](administration.md)** — the `/_admin` control plane, online
+  backup and in-place restore, WAL checkpoint, and vault maintenance.
 - **[Runnable examples](https://github.com/quicsql/quicsql/tree/main/examples/clients)** —
   every language above, asserting its results against a real server in CI.

@@ -13,11 +13,16 @@ stack has a first-class path in:
   ecosystem, served natively — so the **official libSQL SDKs connect to quicSQL
   by URL alone**, including interactive transactions.
 
+JavaScript/TypeScript additionally has an official quicSQL SDK,
+[`@quicsql/client`](javascript.md) — zero-dependency, browser-first, and the
+only client that exposes quicSQL's session tokens, keyring auth, and live change
+feeds.
+
 ## Which SDK, per language
 
 | Language | Recommended path | Guide |
 |---|---|---|
-| JavaScript / TypeScript | `@libsql/client` (also Drizzle, Prisma) | [JavaScript & TypeScript](javascript.md) |
+| JavaScript / TypeScript | `@quicsql/client` (also `@libsql/client`, Drizzle, Prisma) | [JavaScript & TypeScript](javascript.md) |
 | Python | `libsql` binding (also SQLAlchemy) | [Python](python.md) |
 | PHP 8 | `turso-client-php` extension, or plain curl | [PHP](php.md) |
 | Go | the quicSQL client & `database/sql` driver (also LiteORM) | [Go](go.md) |
@@ -53,7 +58,8 @@ extra trust configuration in each SDK.
 
 - **`@libsql/client` (JS) needs a trailing slash** on the URL —
   `http://host:7775/app/` — or its URL resolution silently drops the database
-  path. Details in the [JavaScript guide](javascript.md).
+  path. `@quicsql/client` makes the trailing slash optional. Details in the
+  [JavaScript guide](javascript.md).
 - **Deprecated Python packages don't work**: `libsql-client` and
   `libsql-experimental` predate Hrana or are archived; use the current
   [`libsql`](python.md) package.

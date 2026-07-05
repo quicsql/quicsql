@@ -36,6 +36,37 @@ the client allocate. A body over the cap fails with `server response exceeds the
 N-byte client cap`; `client.WithMaxResponse(n)` raises it for genuinely large
 blobs or exports, and `WithMaxResponse(0)` removes it entirely.
 
+## Bulk copy, restore & changesets
+
+`Export` buffers a whole database image in memory; **`BackupTo` streams** an
+online backup with no size ceiling, so it's the path for anything large. Its
+control-plane inverse, `AdminRestore`, swaps an image into a **file** database in
+place (validate → reserve → atomic rename; server-admin only) — the two together
+clone a database in two calls:
+
+```go
+var buf bytes.Buffer
+n, _ := src.BackupTo(ctx, "app", &buf)          // streaming, no RAM ceiling; read access
+_ = dst.AdminRestore(ctx, "app", &buf)          // destructive, in place; back up first
+```
+
+Changeset **capture** rides a Hrana stream: start a session, run writes, pull the
+accumulated changeset, then apply it elsewhere:
+
+```go
+st := c.OpenStream("app")
+defer st.Close(ctx)
+st.SessionStart(ctx, nil)                        // nil ⇒ track every table
+st.Exec(ctx, "UPDATE users SET balance = balance + 1", nil)
+cs, _ := st.SessionChangeset(ctx)                // the accumulated diff
+c.ApplyChangeset(ctx, "replica", cs)             // replicate onto another database/server
+```
+
+The control-plane helpers — `AdminMaintenance` (compact / checkpoint / logical
+reclaim, its last arg the checkpoint `mode`), `AdminSessions` / `AdminKill` (list
+and reap live Hrana sessions), and database create/detach — round out the
+surface; see the [administration guide](../administration.md) and pkg.go.dev.
+
 ## `database/sql`
 
 The driver registers under gosqlite's `sqlite` name **and** as `quicsql`, so a

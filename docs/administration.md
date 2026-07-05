@@ -17,7 +17,8 @@ server:
   meta_store:                  # runtime registry + audit log
     backend: vault             # vault (default) | file
     path: _meta.vault          # default; relative to data_dir
-    key: keys:metakey          # omit and the server WARNs: meta store not encrypted at rest
+    key: keys:metakey          # vault backend only (a raw cipher key); ignored for backend: file.
+                               #   Omit on a vault and the server WARNs: meta store not encrypted at rest
 
 control_plane:
   enabled: true
@@ -366,10 +367,15 @@ statement timeout (`504`):
 | `limits.max_sessions_per_db` | 64 | `503 "too many open sessions"` |
 | `limits.max_blob_bytes` | 1 GiB | `413` on a streamed blob write |
 | `limits.max_export_bytes` | 1 GiB | `413` on a full-database `/export` that exceeds it |
+| `limits.max_restore_bytes` | 4 GiB | `413 "restore image exceeds the size cap"` on a `/_admin/restore` upload (`<0` = no cap) |
 | `limits.idle_handle_timeout` | 0 (off) | idle handle closed, reopened on demand — note an idle-reaped **memory** database loses its contents |
 
-Full-database exports are additionally capped at `limits.max_export_bytes`
-(default 1 GiB), with at most 4 running concurrently (fixed). And one monitoring gotcha that catches everyone: **SQL
+Full-database copies are additionally capped: `/export` at `limits.max_export_bytes`
+(default 1 GiB, since it materializes in RAM), `/backup` at no size (it streams),
+and `/_admin/restore` at `limits.max_restore_bytes` (default 4 GiB, streamed to
+disk; `<0` removes it). `/export` and `/backup` share one pool of **at most 4
+running concurrently** (fixed); over that is a `503`. And one
+monitoring gotcha that catches everyone: **SQL
 errors are HTTP 200** with an `{"error": {...}}` envelope — only policy,
 timeout, and authorization failures map to 4xx/5xx. Alert on the error
 envelope, not the status code alone.
@@ -461,9 +467,10 @@ on-disk container): the [`snapshot`](#maintenance) maintenance op (writes the
 image to a `dest` within `data_dir`), [`GET /<db>/export`](clients/http-api.md)
 (streams the whole image, materialized in RAM, capped at 1 GiB), and
 [`GET /<db>/backup`](clients/http-api.md) (a **streaming online backup** with no
-RAM ceiling and no size cap — prefer it for anything large). For a vault database
-all three are **decrypted** — usable as a plain backup, but handle them as
-sensitive.
+RAM ceiling and no size cap — prefer it for anything large). **Read access** is
+enough for both `/export` and `/backup`, and the two draw from one server-wide
+pool of 4 concurrent copies (`503` beyond it). For a vault database all three are
+**decrypted** — usable as a plain backup, but handle them as sensitive.
 
 **Restore into a file database, in place:** `POST /_admin/restore?database=<db>`
 with the SQLite image as the raw body (server-admin only). The server validates
@@ -471,7 +478,12 @@ the image (magic header + it opens + `PRAGMA integrity_check`) *before* touching
 anything, then reserves the database (409 if it has active users), removes the
 stale `-wal`/`-shm` sidecars, and swaps the validated image in with an **atomic
 rename**; the handle reopens on the next request. Back up first — the previous
-contents are discarded.
+contents are discarded. The upload is bounded by **`limits.max_restore_bytes`
+(default 4 GiB**, streamed to disk; `413` if larger) — raise it to restore a
+bigger image in place, or set it **below 0** to remove the cap entirely. `/backup`
+itself has no ceiling, so you can also place a large file under `data_dir` out of
+band (stop the server and swap it, or serve a freshly-placed copy via
+`POST /_admin/create`; see the end of this section).
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $OPS" --data-binary @backup.sqlite \
@@ -503,8 +515,11 @@ freshly-placed file through `POST /_admin/create` works while it runs.
 The meta store — a vault container at `data_dir/_meta.vault` by default — holds
 two things the YAML config cannot: the databases **created at runtime** through
 the control plane, and the **audit log**. `server.meta_store.key` encrypts it at
-rest (a keyless vault meta store is plaintext and warned at startup). That key is
-load-bearing:
+rest (a keyless vault meta store is plaintext and warned at startup). It is
+**raw-key mode only** — a single cipher key, not the recipient/`identities` mode
+a vault *database* offers — and it must resolve from a secret source that isn't
+the meta store itself (env or a keys file; the `kms` source is a reserved seam,
+not yet wired), since the store can't decrypt its own key. That key is load-bearing:
 
 - **Losing the key aborts startup.** With the control plane enabled, a meta store
   that won't open (missing or wrong key) fails `serverd.Run` and the daemon exits
@@ -558,6 +573,12 @@ qsql admin detach      <url> <database>
 qsql admin maintenance <url> <db> compact|compact_online|trim|snapshot [--max-bytes N] [--dest PATH]
 qsql export <url> [file]                              # pull a full database image client-side
 ```
+
+The HTTP `/_admin` surface leads the CLI: the newer maintenance ops
+(`compact_logical`, `reclaimable`, and `checkpoint` with its `--mode`) and
+in-place `restore` are always reachable over HTTP (the [maintenance
+table](#maintenance) above) and the Go client even if a pinned `qsql` build
+doesn't yet expose a flag for them.
 
 The `<url>` is **optional** on every command: set the admin server once as
 qsql's default (`dsn:` in `config.yaml`, a named connection, or `QSQL_DSN`) and
