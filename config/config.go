@@ -67,6 +67,11 @@ type SecretSource struct {
 	Type     string `yaml:"type" json:"type"` // env | file | kms
 	Dir      string `yaml:"dir" json:"dir"`
 	Endpoint string `yaml:"endpoint" json:"endpoint"`
+	// Command is the argv a `kms` source execs to resolve a reference: it wraps a
+	// real KMS (AWS KMS, GCP KMS, Vault Transit, age, …), receives the secret name
+	// in $QUICSQL_SECRET_NAME, and writes the key bytes to stdout (verbatim — no
+	// trimming). Trusted operator config; run with no shell.
+	Command []string `yaml:"command" json:"command"`
 }
 
 // Routing selects how a request's target database is resolved — by URL path, by

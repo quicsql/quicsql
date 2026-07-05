@@ -531,8 +531,8 @@ the control plane, and the **audit log**. `server.meta_store.key` encrypts it at
 rest (a keyless vault meta store is plaintext and warned at startup). It is
 **raw-key mode only** — a single cipher key, not the recipient/`identities` mode
 a vault *database* offers — and it must resolve from a secret source that isn't
-the meta store itself (env or a keys file; the `kms` source is a reserved seam,
-not yet wired), since the store can't decrypt its own key. That key is load-bearing:
+the meta store itself (env, a keys file, or a `kms` command hook), since the
+store can't decrypt its own key. That key is load-bearing:
 
 - **Losing the key aborts startup.** With the control plane enabled, a meta store
   that won't open (missing or wrong key) fails `serverd.Run` and the daemon exits

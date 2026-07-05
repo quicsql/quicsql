@@ -281,7 +281,7 @@ secrets:
 
 - `type: file` — `name` is a filename inside the source's `dir` (reads escaping the dir via `..` are rejected).
 - `type: env` — `name` is an environment variable.
-- `type: kms` (with an `endpoint`) — **reserved and not yet implemented**; a key reference resolved through a `kms` source fails at startup. Use `file` or `env`.
+- `type: kms` (with a `command`) — execs an operator-provided command that wraps a real KMS (AWS KMS, GCP KMS, Vault Transit, `age`, …). The reference name arrives in `$QUICSQL_SECRET_NAME`; stdout is the key bytes (verbatim — use `printf`). Runs with no shell, so it integrates any KMS without a cloud SDK. Example: `command: ["/etc/quicsql/kms-unwrap.sh"]`, where the script runs `aws kms decrypt … | base64 -d`.
 
 How the referenced bytes are interpreted depends on the field: a `key` is the **raw cipher key** (32 bytes for adiantum, 64 for aes-xts); an `identity` is an **OpenSSH private key** (or a passphrase); a `recipient` is an **authorized_keys public line** (or a passphrase); `masters`/`writers`/`sign_with`/`write_as` are **ed25519 SSH keys** (public line or private key). A broken reference fails at startup, not on first request. (The server's own encrypted meta store uses the same references — see the config for `meta_store.key`.)
 

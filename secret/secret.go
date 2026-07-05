@@ -8,22 +8,27 @@
 // "ssh-", "ecdsa-", or "sk-") an SSH recipient, and anything else a passphrase
 // identity/recipient. The master/writer variants require an ed25519 SSH key (the
 // only keyring signer). A misclassified value fails to parse (fail closed) — it
-// never opens the wrong door. The kms source is a later seam.
+// never opens the wrong door. A `kms` source execs an operator-provided command
+// that wraps a real KMS and prints the key (see runKMSCommand).
 package secret
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"gosqlite.org/crypto/keyring"
 	"quicsql.net/config"
 )
 
-// ErrNotImplemented marks a resolver path a later phase fills in.
-var ErrNotImplemented = errors.New("secret: not implemented in this phase")
+// kmsTimeout bounds a kms command. Secret resolution is eager at startup, so a
+// hung helper must fail rather than block the daemon forever.
+const kmsTimeout = 30 * time.Second
 
 // ErrMalformedRef and ErrUnknownSource let a caller tell "this string is not a
 // secret reference" (so it can fall back to treating it as a literal value) from
@@ -89,7 +94,7 @@ func (r *mapResolver) Bytes(ref string) ([]byte, error) {
 		}
 		return os.ReadFile(full)
 	case "kms":
-		return nil, fmt.Errorf("secret: kms source %q: %w", src.Name, ErrNotImplemented)
+		return runKMSCommand(src, name)
 	default:
 		return nil, fmt.Errorf("secret: source %q unknown type %q", src.Name, src.Type)
 	}
@@ -139,6 +144,37 @@ func (r *mapResolver) MasterRecipient(ref string) (keyring.MasterRecipient, erro
 		return nil, err
 	}
 	return keyring.SSHMasterRecipient(b)
+}
+
+// runKMSCommand resolves a `kms` reference by executing the source's configured
+// command and returning its stdout verbatim as the key material. The command is
+// operator-provided (trusted config) — a thin wrapper around a real KMS (AWS KMS,
+// GCP KMS, HashiCorp Vault Transit, age, …). It runs with NO shell (argv, not a
+// command line), receives the secret name in the QUICSQL_SECRET_NAME environment
+// variable, and must write exactly the key bytes to stdout (no trimming, so a raw
+// cipher key round-trips byte-for-byte — use `printf`, not `echo`). This is how
+// quicSQL integrates any KMS without linking a cloud SDK.
+func runKMSCommand(src config.SecretSource, name string) ([]byte, error) {
+	if len(src.Command) == 0 {
+		return nil, fmt.Errorf("secret: kms source %q needs a command", src.Name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), kmsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, src.Command[0], src.Command[1:]...)
+	cmd.Env = append(os.Environ(), "QUICSQL_SECRET_NAME="+name)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("secret: kms source %q command failed: %w: %s", src.Name, err, msg)
+		}
+		return nil, fmt.Errorf("secret: kms source %q command failed: %w", src.Name, err)
+	}
+	if stdout.Len() == 0 {
+		return nil, fmt.Errorf("secret: kms source %q command produced no output for %q", src.Name, name)
+	}
+	return stdout.Bytes(), nil
 }
 
 // isPrivateKeyPEM reports whether b is a PEM block (a private key), matched on

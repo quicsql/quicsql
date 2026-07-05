@@ -120,3 +120,35 @@ func TestResolverPropagatesMissingSecret(t *testing.T) {
 		t.Fatal("a missing file must error, not silently succeed")
 	}
 }
+
+// TestKMSCommandSource proves a `kms` source execs its command, passes the secret
+// name in $QUICSQL_SECRET_NAME, and returns stdout verbatim — and surfaces a
+// failing command / a missing command as errors.
+func TestKMSCommandSource(t *testing.T) {
+	r, err := New([]config.SecretSource{{
+		Name: "k", Type: "kms",
+		Command: []string{"/bin/sh", "-c", `printf 'key-for-%s' "$QUICSQL_SECRET_NAME"`},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	b, err := r.Bytes("k:prod")
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(b) != "key-for-prod" {
+		t.Fatalf("kms Bytes = %q, want %q", b, "key-for-prod")
+	}
+
+	// A failing command surfaces an error carrying its stderr.
+	rf, _ := New([]config.SecretSource{{Name: "bad", Type: "kms", Command: []string{"/bin/sh", "-c", "echo boom >&2; exit 3"}}})
+	if _, err := rf.Bytes("bad:x"); err == nil {
+		t.Fatal("a failing kms command must error")
+	}
+
+	// A kms source with no command is a clear config error, not a panic.
+	rn, _ := New([]config.SecretSource{{Name: "nc", Type: "kms"}})
+	if _, err := rn.Bytes("nc:x"); err == nil {
+		t.Fatal("a kms source without a command must error")
+	}
+}
