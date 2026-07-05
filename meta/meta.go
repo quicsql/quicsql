@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"gosqlite.org"
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE TABLE IF NOT EXISTS enrolled (
 	name       TEXT PRIMARY KEY,    -- server-assigned principal name (u_…)
 	key        TEXT NOT NULL UNIQUE, -- canonical ssh-ed25519 authorized-keys line
-	created_at INTEGER NOT NULL      -- unix seconds
+	created_at INTEGER NOT NULL,     -- unix seconds
+	last_seen  INTEGER               -- unix seconds of last successful auth (NULL until first seen)
 );
 CREATE TABLE IF NOT EXISTS enroll_codes (
 	hash       TEXT PRIMARY KEY,   -- hex(sha256(single-use enrollment code))
@@ -89,6 +91,12 @@ func Open(cfg config.MetaStore, sec secret.Resolver, dataDir string, log *slog.L
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("meta: schema: %w", err)
+	}
+	// Migration: stores created before idle GC lack enrolled.last_seen.
+	if _, err := db.Exec(`ALTER TABLE enrolled ADD COLUMN last_seen INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		_ = db.Close()
+		return nil, fmt.Errorf("meta: migrate enrolled.last_seen: %w", err)
 	}
 	return &Store{db: db, log: log}, nil
 }
@@ -151,11 +159,12 @@ type Enrolled struct {
 	Name      string `json:"name"`
 	Key       string `json:"key"`
 	CreatedAt int64  `json:"created_at"`
+	LastSeen  int64  `json:"last_seen"` // last successful auth (== created_at if never seen)
 }
 
 // EnrolledList returns every enrolled principal, oldest first.
 func (s *Store) EnrolledList() ([]Enrolled, error) {
-	rows, err := s.db.Query(`SELECT name, key, created_at FROM enrolled ORDER BY created_at, name`)
+	rows, err := s.db.Query(`SELECT name, key, created_at, COALESCE(last_seen, created_at) FROM enrolled ORDER BY created_at, name`)
 	if err != nil {
 		return nil, fmt.Errorf("meta: list enrolled: %w", err)
 	}
@@ -163,10 +172,55 @@ func (s *Store) EnrolledList() ([]Enrolled, error) {
 	var out []Enrolled
 	for rows.Next() {
 		var e Enrolled
-		if err := rows.Scan(&e.Name, &e.Key, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Name, &e.Key, &e.CreatedAt, &e.LastSeen); err != nil {
 			return nil, fmt.Errorf("meta: scan enrolled: %w", err)
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// TouchEnrolled records the last-seen time for enrolled principals (idle-GC
+// bookkeeping), moving last_seen forward only. Names that aren't enrolled (e.g.
+// static keyring identities) match no row and are ignored.
+func (s *Store) TouchEnrolled(seen map[string]int64) error {
+	if len(seen) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("meta: touch enrolled: %w", err)
+	}
+	stmt, err := tx.Prepare(`UPDATE enrolled SET last_seen = ? WHERE name = ? AND (last_seen IS NULL OR last_seen < ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("meta: touch enrolled: %w", err)
+	}
+	defer stmt.Close()
+	for name, at := range seen {
+		if _, err := stmt.Exec(at, name, at); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("meta: touch enrolled %q: %w", name, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// IdleEnrolled returns the names of enrolled principals whose last activity
+// (last_seen, or created_at if never seen) predates cutoff — the idle-GC victims.
+func (s *Store) IdleEnrolled(cutoff int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT name FROM enrolled WHERE COALESCE(last_seen, created_at) < ?`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("meta: idle enrolled: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("meta: scan idle enrolled: %w", err)
+		}
+		out = append(out, name)
 	}
 	return out, rows.Err()
 }

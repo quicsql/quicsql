@@ -510,7 +510,7 @@ func (c *Config) validateEnroll() error {
 	if e.Policy == "token" && len(e.Tokens) == 0 && !e.Codes.Enabled {
 		return fmt.Errorf("config: auth.enroll.policy token requires auth.enroll.tokens or auth.enroll.codes.enabled")
 	}
-	if e.MaxPrincipals < 0 || e.RatePerIP < 0 || e.Codes.TTL < 0 {
+	if e.MaxPrincipals < 0 || e.RatePerIP < 0 || e.Codes.TTL < 0 || e.IdleTTL < 0 {
 		return fmt.Errorf("config: auth.enroll quotas must not be negative")
 	}
 	if len(e.Grants) == 0 {

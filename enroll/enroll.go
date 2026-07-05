@@ -61,6 +61,9 @@ type Service struct {
 	count   int // live size of the enrolled set (loaded at startup)
 	buckets map[string]*bucket
 	lastGC  time.Time
+
+	seenMu sync.Mutex       // guards seen (touched on the auth hot path)
+	seen   map[string]int64 // principal → last-auth unix, buffered until the reaper flushes it
 }
 
 // SetProvisioner wires database-per-user provisioning into the service. Called
@@ -78,6 +81,7 @@ func New(cfg config.Enroll, store *meta.Store, authn *auth.Authenticator, policy
 		tokens:  map[string]bool{},
 		buckets: map[string]*bucket{},
 		lastGC:  time.Now(),
+		seen:    map[string]int64{},
 	}
 	for _, ref := range cfg.Tokens {
 		h, err := auth.ResolveParam(sec, ref)
@@ -143,6 +147,91 @@ func (s *Service) Delete(name string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// Touch records that an enrolled principal just authenticated (idle-GC last-seen).
+// It is cheap — an in-memory write under a dedicated lock — and registered as the
+// authenticator's keyring-seen hook, so it runs on the auth hot path. The reaper
+// flushes the buffer to the meta store; a name that isn't enrolled is harmless.
+func (s *Service) Touch(name string) {
+	if s.cfg.IdleTTL <= 0 {
+		return
+	}
+	now := time.Now().Unix()
+	s.seenMu.Lock()
+	s.seen[name] = now
+	s.seenMu.Unlock()
+}
+
+// flushSeen persists the buffered last-seen times to the meta store, re-buffering
+// them on a write error so a transient failure doesn't lose activity.
+func (s *Service) flushSeen() {
+	s.seenMu.Lock()
+	if len(s.seen) == 0 {
+		s.seenMu.Unlock()
+		return
+	}
+	batch := s.seen
+	s.seen = make(map[string]int64, len(batch))
+	s.seenMu.Unlock()
+	if err := s.store.TouchEnrolled(batch); err != nil {
+		s.log.Error("quicsql/enroll: flush last-seen", "err", err)
+		s.seenMu.Lock()
+		for name, at := range batch {
+			if cur, ok := s.seen[name]; !ok || at > cur {
+				s.seen[name] = at
+			}
+		}
+		s.seenMu.Unlock()
+	}
+}
+
+// reap flushes last-seen, then removes every enrolled principal idle since before
+// now-IdleTTL (via Delete, so on_revoke governs their per-user database). Returns
+// how many were removed. Exposed for tests by taking an explicit now.
+func (s *Service) reap(now int64) int {
+	if s.cfg.IdleTTL <= 0 {
+		return 0
+	}
+	s.flushSeen()
+	idle, err := s.store.IdleEnrolled(now - int64(s.cfg.IdleTTL.Seconds()))
+	if err != nil {
+		s.log.Error("quicsql/enroll: idle scan", "err", err)
+		return 0
+	}
+	n := 0
+	for _, name := range idle {
+		switch ok, derr := s.Delete(name); {
+		case derr != nil:
+			s.log.Error("quicsql/enroll: idle GC delete", "principal", name, "err", derr)
+		case ok:
+			s.store.Audit(name, "enroll.idle_gc", "", "")
+			s.log.Info("quicsql/enroll: idle principal removed", "principal", name)
+			n++
+		}
+	}
+	return n
+}
+
+// StartIdleReaper runs idle GC every interval until ctx is cancelled, flushing
+// last-seen once more on shutdown. A no-op when IdleTTL is 0.
+func (s *Service) StartIdleReaper(ctx context.Context, interval time.Duration) {
+	if s.cfg.IdleTTL <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.flushSeen()
+				return
+			case <-t.C:
+				s.reap(time.Now().Unix())
+			}
+		}
+	}()
 }
 
 // ServeHTTP handles POST /_auth/enroll. Mounted pre-auth by the auth

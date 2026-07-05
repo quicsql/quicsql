@@ -252,6 +252,11 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 			}
 			authn.SetEnrollHandler(enr)
 			adminH.SetEnrollments(enr)
+			if cfg.Auth.Enroll.IdleTTL > 0 {
+				authn.SetKeyringSeenHook(enr.Touch)
+				enr.StartIdleReaper(reaperCtx, reapInterval)
+				log.Info("quicsql: enrollment idle GC on", "idle_ttl", cfg.Auth.Enroll.IdleTTL)
+			}
 			log.Info("quicsql: enrollment enabled at /_auth/enroll", "policy", cfg.Auth.Enroll.Policy, "enrolled", n, "max", cfg.Auth.Enroll.MaxPrincipals)
 		}
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))

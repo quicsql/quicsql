@@ -188,6 +188,10 @@ auth:
 
 `POST /_admin/enroll/codes` (server-admin) returns `{"code": "ec_…", "expires_at": …}` — the plaintext code is shown only there. The user enrolls with it in the usual `{"enroll_token": "ec_…"}` body. It is consumed **atomically at the moment a new principal is registered** (past the possession proof, idempotency, and cap gates), so a rejected attempt or two devices racing the same code never burns it twice — exactly one wins, and a spent or expired code is a `403`. Codes and static `tokens` can both be accepted at once, or use codes alone (then `tokens` may be empty). An already-enrolled key re-proving possession needs no code — it is already trusted.
 
+#### Idle cleanup
+
+Set `auth.enroll.idle_ttl` to auto-remove an enrolled principal that hasn't authenticated in that long — identical to an admin `delete`, so it also frees the principal's per-user database per `provision.on_revoke` (default `keep`, so data is preserved unless you chose `drop`). Last-seen is tracked cheaply — an in-memory touch on each successful auth, flushed to the meta store by a background reaper and surfaced as `last_seen` in `GET /_admin/principals` — so idle GC survives restart and never writes on the hot path. Leave `idle_ttl` unset (0) to keep enrollments forever.
+
 #### A database per user
 
 The `grants` template above puts every enrollee into *shared* databases. For a public app where users must **not** see each other's data, add a `provision` block: each enrollee gets their **own** database, created at enroll time and granted only to them.

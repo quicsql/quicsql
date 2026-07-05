@@ -152,6 +152,10 @@ type Enroll struct {
 	// grants an enrolled principal can hold, re-applied from config at startup
 	// (the template, not the meta store, is the authorization truth).
 	Grants []EnrollGrant `yaml:"grants" json:"grants"`
+	// IdleTTL, when > 0, auto-removes an enrolled principal that has not
+	// authenticated in this long (idle GC) — freeing its identity and, per
+	// Provision.OnRevoke, its per-user database. 0 disables it.
+	IdleTTL time.Duration `yaml:"idle_ttl" json:"idle_ttl"`
 	// Provision optionally gives each enrollee their OWN database (database-per-user
 	// containment) created at enroll time. Off by default.
 	Provision Provision `yaml:"provision" json:"provision"`

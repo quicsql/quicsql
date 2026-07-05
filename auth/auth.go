@@ -62,6 +62,11 @@ type Authenticator struct {
 	dynMu      sync.RWMutex
 	dynKeyring map[string]keyringCred
 
+	// seenHook, if set, fires with the principal name on every successful keyring
+	// auth — the enrollment service uses it to track last-seen for idle GC. Set
+	// once before serving; nil otherwise.
+	seenHook func(name string)
+
 	dummyHash []byte // a throwaway bcrypt hash, compared on unknown users to level password timing
 }
 
@@ -530,8 +535,16 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	if !keyring.VerifyState([]ed25519.PublicKey{cred.pub}, wire.KeyringSigningInput(chal, r.Method, r.URL.Path, r.URL.RawQuery), sigBytes) {
 		return nil, true, errInvalidCredential
 	}
+	if a.seenHook != nil {
+		a.seenHook(cred.name) // last-seen for enrollment idle GC (enrolled names only take effect)
+	}
 	return &authz.Principal{Name: cred.name, Method: "keyring"}, true, nil
 }
+
+// SetKeyringSeenHook registers a callback fired with the principal name on every
+// successful keyring auth (the enrollment service's idle-GC last-seen tracker).
+// Set once before serving.
+func (a *Authenticator) SetKeyringSeenHook(fn func(name string)) { a.seenHook = fn }
 
 func (a *Authenticator) tryPeercred(r *http.Request) (*authz.Principal, bool) {
 	c := connFrom(r.Context())

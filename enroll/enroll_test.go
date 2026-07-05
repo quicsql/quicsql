@@ -418,6 +418,42 @@ func TestMintCodeRequiresEnabled(t *testing.T) {
 	}
 }
 
+// TestEnrollIdleGC: an enrolled principal idle past IdleTTL is reaped (identity +
+// keyring + grants gone), while a recently-touched one survives.
+func TestEnrollIdleGC(t *testing.T) {
+	cfg := openCfg()
+	cfg.IdleTTL = time.Hour
+	h := newHarness(t, cfg)
+	priv, line := genKey(t)
+	if w := h.enroll(t, priv, line, ""); w.Code != http.StatusOK {
+		t.Fatalf("enroll = %d (%s)", w.Code, w.Body.String())
+	}
+	name := PrincipalName(line)
+
+	// Touched "now", it is NOT reaped 30 min out (< IdleTTL since activity).
+	h.svc.Touch(name)
+	if n := h.svc.reap(time.Now().Add(30 * time.Minute).Unix()); n != 0 {
+		t.Fatalf("reap removed %d recently-active principals, want 0", n)
+	}
+	if list, _ := h.svc.List(); len(list) != 1 {
+		t.Fatalf("recently-active principal was removed: %+v", list)
+	}
+
+	// Two hours out (past IdleTTL since its last activity) it is reaped.
+	if n := h.svc.reap(time.Now().Add(2 * time.Hour).Unix()); n != 1 {
+		t.Fatalf("reap removed %d idle principals, want 1", n)
+	}
+	if list, _ := h.svc.List(); len(list) != 0 {
+		t.Fatalf("idle principal still present: %+v", list)
+	}
+	// The evicted key no longer authenticates.
+	w := httptest.NewRecorder()
+	h.handler.ServeHTTP(w, h.signedRequest(t, http.MethodPost, "/appdb/query", "", priv, line))
+	if w.Code == http.StatusOK {
+		t.Fatal("an evicted key must no longer authenticate")
+	}
+}
+
 // TestEnrollProvisionsPerUserDB: enrolling materializes a per-user database,
 // grants the enrollee read-write on it, persists it (so it survives a restart),
 // and — with on_revoke: drop — deletes it when the enrollee is removed.
