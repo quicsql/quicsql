@@ -54,22 +54,29 @@ func New(reg *registry.Registry, store *meta.Store, feed FeedRegistry, metrics M
 	return &Provisioner{reg: reg, store: store, feed: feed, metrics: metrics, sec: sec, dataDir: dataDir, log: log}
 }
 
+// ErrBadSpec wraps a client-caused Create failure — an invalid spec, a path that
+// escapes data_dir, an unbuildable backend, or a database that won't open. A
+// caller maps it to 400. registry.ErrExists is returned unwrapped for a name
+// clash (map to 409); anything else is a server-side error (500).
+var ErrBadSpec = errors.New("provision: invalid or unopenable database")
+
 // Create materializes db into the registry, verifies it opens, persists it, and
 // registers its change feed — the create sequence minus HTTP and authorization.
 // It re-validates the spec and confines an on-disk path to data_dir. Returns
-// registry.ErrExists if the name is already served.
+// registry.ErrExists if the name is already served, ErrBadSpec for a client-fault
+// spec, or a plain error for a persist/registry failure.
 func (p *Provisioner) Create(ctx context.Context, db config.Database) error {
 	if err := config.ValidateDatabase(db); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrBadSpec, err)
 	}
 	if config.UsesPath(db.Backend) && db.Path != "" {
 		if _, ok := config.WithinDir(p.dataDir, db.Path); !ok {
-			return fmt.Errorf("provision: database %q path %q escapes data_dir", db.Name, db.Path)
+			return fmt.Errorf("%w: database %q path %q escapes data_dir", ErrBadSpec, db.Name, db.Path)
 		}
 	}
 	be, err := backend.For(db, p.sec, p.dataDir)
 	if err != nil {
-		return fmt.Errorf("provision: build backend for %q: %w", db.Name, err)
+		return fmt.Errorf("%w: build backend for %q: %v", ErrBadSpec, db.Name, err)
 	}
 	if err := p.reg.Add(db.Name, be); err != nil {
 		return err // ErrExists (or another registry error), unwrapped for the caller
@@ -88,7 +95,7 @@ func (p *Provisioner) Create(ctx context.Context, db config.Database) error {
 	if _, release, gerr := p.reg.Get(ctx, db.Name); gerr != nil {
 		_ = p.reg.Remove(db.Name)
 		feedRollback()
-		return fmt.Errorf("provision: open %q: %w", db.Name, gerr)
+		return fmt.Errorf("%w: open %q: %v", ErrBadSpec, db.Name, gerr)
 	} else {
 		release()
 	}

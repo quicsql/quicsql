@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"quicsql.net/authz"
-	"quicsql.net/backend"
 	"quicsql.net/config"
 	"quicsql.net/internal/httpjson"
 	"quicsql.net/meta"
 	"quicsql.net/obs"
+	"quicsql.net/provision"
 	"quicsql.net/registry"
 	"quicsql.net/secret"
 	"quicsql.net/session"
@@ -41,8 +41,8 @@ type Handler struct {
 	admins   map[string]bool // server-admin principal names
 	started  time.Time
 	log      *slog.Logger
-	enroll   Enrollments  // runtime-enrolled principal management (may be nil)
-	feedReg  FeedRegistry // change-feed registration for runtime create/detach (may be nil)
+	enroll   Enrollments            // runtime-enrolled principal management (may be nil)
+	prov     *provision.Provisioner // shared create/detach materialization (set during assembly)
 
 	// maxRestore bounds a /_admin/restore upload (streamed to disk): 0 uses the
 	// default, <0 removes the cap. Set from limits.max_restore_bytes.
@@ -66,15 +66,9 @@ type Enrollments interface {
 // routes. Called once during serverd assembly.
 func (h *Handler) SetEnrollments(e Enrollments) { h.enroll = e }
 
-// FeedRegistry is the change-feed broker surface the control plane drives:
-// runtime-created databases become observable, detached ones stop.
-type FeedRegistry interface {
-	Register(name, path string)
-	Forget(name string)
-}
-
-// SetFeed wires the change-feed broker. Called once during serverd assembly.
-func (h *Handler) SetFeed(f FeedRegistry) { h.feedReg = f }
+// SetProvisioner wires the shared database provisioner that materializes/tears
+// down databases for create/detach. Called once during serverd assembly.
+func (h *Handler) SetProvisioner(p *provision.Provisioner) { h.prov = p }
 
 // New builds the admin handler. admins are the server-admin principal names from
 // control_plane.admins; sessions (may be nil) backs the sessions/kill endpoints;
@@ -330,62 +324,25 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	be, err := backend.For(db, h.sec, h.dataDir)
-	if err != nil {
-		h.log.Error("quicsql/admin: build backend", "db", db.Name, "err", err)
-		h.auditFail(r, "create", db.Name, "build backend")
-		writeErr(w, http.StatusBadRequest, "cannot build backend for database")
-		return
-	}
-	if err := h.reg.Add(db.Name, be); err != nil {
-		if errors.Is(err, registry.ErrExists) {
-			// The database already exists and is being served — do NOT touch the
-			// feed here (registering/forgetting would clobber the live feed of the
-			// existing database with the same name).
+	// Materialize the database — backend build, registry add, feed registration,
+	// open-verify, and persistence, with the ordering-critical rollback — via the
+	// shared provisioner (the same code path self-service enrollment provisioning
+	// uses). Grants ride in the spec so a restart reloads them.
+	db.Grants = req.Grants
+	if err := h.prov.Create(r.Context(), db); err != nil {
+		switch {
+		case errors.Is(err, registry.ErrExists):
 			h.auditFail(r, "create", db.Name, "already exists")
 			writeErr(w, http.StatusConflict, "database already exists")
-			return
+		case errors.Is(err, provision.ErrBadSpec):
+			h.auditFail(r, "create", db.Name, "invalid spec: "+err.Error())
+			writeErr(w, http.StatusBadRequest, "database could not be created (invalid or unopenable spec)")
+		default:
+			h.log.Error("quicsql/admin: create database", "db", db.Name, "err", err)
+			h.auditFail(r, "create", db.Name, "create failed")
+			writeErr(w, http.StatusInternalServerError, "database could not be created")
 		}
-		h.auditFail(r, "create", db.Name, "register failed")
-		writeErr(w, http.StatusInternalServerError, "cannot register database")
 		return
-	}
-	// Register the feed only after reg.Add succeeds (so a duplicate can't clobber
-	// the existing database's feed), but before reg.Get below opens the first
-	// connection — hooks install at connection open, and an unobserved first
-	// connection would write invisibly. reg.Add does not itself open a connection.
-	feedRollback := func() {}
-	if h.feedReg != nil {
-		if p, ok := be.(backend.Pather); ok {
-			h.feedReg.Register(db.Name, p.Path())
-			feedRollback = func() { h.feedReg.Forget(db.Name) }
-		}
-	}
-	// Verify it actually opens before we persist / grant, so a bad spec is rejected
-	// now rather than on a client's first request; drop it again on failure.
-	if _, release, err := h.reg.Get(r.Context(), db.Name); err != nil {
-		_ = h.reg.Remove(db.Name)
-		feedRollback()
-		h.log.Error("quicsql/admin: open new database", "db", db.Name, "err", err)
-		h.auditFail(r, "create", db.Name, "open failed")
-		writeErr(w, http.StatusBadRequest, "database could not be opened")
-		return
-	} else {
-		release()
-	}
-	// Persist BEFORE granting, and roll the registry back on a persist failure, so
-	// the live state never diverges from what survives a restart (a "created"
-	// response always means durably created).
-	if h.store != nil {
-		db.Grants = req.Grants
-		if err := h.store.Put(db); err != nil {
-			_ = h.reg.Remove(db.Name)
-			feedRollback()
-			h.log.Error("quicsql/admin: persist database", "db", db.Name, "err", err)
-			h.auditFail(r, "create", db.Name, "persist failed")
-			writeErr(w, http.StatusInternalServerError, "database could not be persisted")
-			return
-		}
 	}
 	// Revoke first so this create's grant set is authoritative rather than
 	// max-merged with any stale grants left under this name.
@@ -418,7 +375,10 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	switch err := h.reg.Remove(req.Database); {
+	// Tear down via the shared provisioner (registry remove, feed + metrics forget,
+	// meta delete). The file is KEPT — detach is not a delete. Grants are the admin
+	// plane's concern, revoked below only once the teardown succeeds.
+	switch err := h.prov.Drop(req.Database, false); {
 	case errors.Is(err, registry.ErrUnknownDB):
 		h.auditFail(r, "detach", req.Database, "unknown database")
 		writeErr(w, http.StatusNotFound, "unknown database")
@@ -428,27 +388,16 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
 		return
 	case err != nil:
+		h.log.Error("quicsql/admin: detach database", "db", req.Database, "err", err)
 		h.auditFail(r, "detach", req.Database, "remove failed")
 		writeErr(w, http.StatusInternalServerError, "cannot detach database")
 		return
 	}
-	// Drop the database's grants so a later database that reuses this name does
-	// not inherit stale privileges (Policy.Grant keeps the max level, so without
-	// this a re-created name would silently retain the old grants).
+	// Drop the database's grants so a later database that reuses this name does not
+	// inherit stale privileges (Policy.Grant keeps the max level, so without this a
+	// re-created name would silently retain the old grants).
 	h.pol.Revoke(req.Database)
-	if h.feedReg != nil {
-		h.feedReg.Forget(req.Database) // closes its change-feed subscribers too
-	}
-	// Forget its metrics series so scrapes don't accrue detached databases.
-	if h.metrics != nil {
-		h.metrics.Forget(req.Database)
-	}
 	if h.store != nil {
-		// A failed delete leaves the persisted record behind, so reconcile would
-		// resurrect the database on restart — surface it rather than swallow it.
-		if err := h.store.Delete(req.Database); err != nil {
-			h.log.Error("quicsql/admin: detach persist delete failed (may resurrect on restart)", "db", req.Database, "err", err)
-		}
 		h.store.Audit(h.principal(r), "detach", req.Database, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "detached", "database": req.Database})

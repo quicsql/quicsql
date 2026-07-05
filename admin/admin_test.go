@@ -22,6 +22,7 @@ import (
 	"quicsql.net/authz"
 	"quicsql.net/backend"
 	"quicsql.net/config"
+	"quicsql.net/provision"
 	"quicsql.net/registry"
 	"quicsql.net/secret"
 	"quicsql.net/session"
@@ -38,7 +39,9 @@ func newAdmin(t *testing.T, admins []string, open bool, seed map[string]backend.
 	if sec == nil {
 		sec, _ = secret.New(nil)
 	}
-	return admin.New(reg, pol, nil, nil, sec, nil, dataDir, admins, time.Now(), nil), reg, pol
+	h := admin.New(reg, pol, nil, nil, sec, nil, dataDir, admins, time.Now(), nil)
+	h.SetProvisioner(provision.New(reg, nil, nil, nil, sec, dataDir, nil))
+	return h, reg, pol
 }
 
 func as(t *testing.T, h http.Handler, name, method, target, body string) *httptest.ResponseRecorder {

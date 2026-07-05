@@ -217,9 +217,15 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 	if cfg.ControlPlane.Enabled {
 		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
 		adminH.SetRestoreLimit(cfg.Limits.MaxRestoreBytes)
+		// One provisioner materializes/tears down databases for BOTH the control
+		// plane's create/detach and self-service enroll-time provisioning, so the
+		// ordering-critical sequence lives in exactly one place.
+		var pf provision.FeedRegistry
 		if broker != nil {
-			adminH.SetFeed(broker)
+			pf = broker
 		}
+		prov := provision.New(reg, store, pf, metrics, sec, cfg.Server.DataDir, log)
+		adminH.SetProvisioner(prov)
 		if cfg.Auth.Enroll.Enabled {
 			// Config validation guarantees the prerequisites here: explicit auth
 			// (never open mode) and the control plane (so store is non-nil).
@@ -235,11 +241,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 				if cfg.Limits.IdleHandleTimeout == 0 {
 					log.Warn("quicsql: auth.enroll.provision is on but limits.idle_handle_timeout is unset — every per-user database stays open once first used, so the open-handle set grows with total enrollees; set idle_handle_timeout so idle handles close and the working set tracks ACTIVE users")
 				}
-				var pf provision.FeedRegistry
-				if broker != nil {
-					pf = broker
-				}
-				enr.SetProvisioner(provision.New(reg, store, pf, metrics, sec, cfg.Server.DataDir, log))
+				enr.SetProvisioner(prov) // the same provisioner the control plane uses
 				log.Info("quicsql: enrollment provisions a per-user database", "backend", cfg.Auth.Enroll.Provision.Backend, "on_revoke", cfg.Auth.Enroll.Provision.OnRevoke)
 			}
 			n, err := enr.LoadExisting()
