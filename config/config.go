@@ -152,12 +152,49 @@ type Enroll struct {
 	// grants an enrolled principal can hold, re-applied from config at startup
 	// (the template, not the meta store, is the authorization truth).
 	Grants []EnrollGrant `yaml:"grants" json:"grants"`
+	// Provision optionally gives each enrollee their OWN database (database-per-user
+	// containment) created at enroll time. Off by default.
+	Provision Provision `yaml:"provision" json:"provision"`
 }
 
 // EnrollGrant is one templated grant: a database name and a capability level.
 type EnrollGrant struct {
 	DB    string `yaml:"db" json:"db"`
 	Level string `yaml:"level" json:"level"` // read-only | read-write
+}
+
+// Provision configures the per-enrollee database created at enroll time
+// (database-per-user). It is off by default, and every policy that varies by
+// use-case is a knob with a safe default — nothing here destroys data unless the
+// operator sets on_revoke: drop.
+type Provision struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// NameTemplate is the provisioned database's name; the token "{principal}"
+	// expands to the enrollee's server-assigned name (u_<hash>). It MUST contain
+	// "{principal}" so users don't collide on one database. Default "{principal}".
+	NameTemplate string `yaml:"name_template" json:"name_template"`
+	// Backend is the per-user database's backend — file | vault | memory-shared |
+	// mvcc | memdb. Default "vault" (encrypted + compressed at rest). On-disk
+	// backends get a path derived from the name, under data_dir.
+	Backend string `yaml:"backend" json:"backend"`
+	// Vault templates the per-user vault (key ref, compression, cipher) when
+	// Backend is "vault". The key ref is shared across all per-user vaults — this
+	// is encryption at rest; per-user isolation is by grant, not by key.
+	Vault *VaultConfig `yaml:"vault" json:"vault"`
+	// PragmasPreset and Pragmas template the per-user database's pragmas, exactly
+	// like a seed database.
+	PragmasPreset string         `yaml:"pragmas_preset" json:"pragmas_preset"`
+	Pragmas       map[string]any `yaml:"pragmas" json:"pragmas"`
+	// Level is the grant the enrollee receives on their OWN database — read-only or
+	// read-write (never admin). Default "read-write".
+	Level string `yaml:"level" json:"level"`
+	// MaxBytes caps a per-user database's size, enforced via PRAGMA max_page_count
+	// (a 4 KiB page is assumed). 0 = no size cap.
+	MaxBytes int64 `yaml:"max_bytes" json:"max_bytes"`
+	// OnRevoke decides the database's fate when the enrollee is deleted: "keep"
+	// (default — leave it in place, data preserved and re-grantable) or "drop"
+	// (detach it AND delete the file). Data is never destroyed unless "drop".
+	OnRevoke string `yaml:"on_revoke" json:"on_revoke"`
 }
 
 // SessionTokens enables minting short-lived bearer tokens at POST /_auth/session:

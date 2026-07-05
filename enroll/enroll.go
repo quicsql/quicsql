@@ -14,14 +14,17 @@
 package enroll
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -33,6 +36,8 @@ import (
 	"quicsql.net/config"
 	"quicsql.net/internal/httpjson"
 	"quicsql.net/meta"
+	"quicsql.net/provision"
+	"quicsql.net/registry"
 	"quicsql.net/secret"
 )
 
@@ -49,11 +54,17 @@ type Service struct {
 
 	tokens map[string]bool // hex(sha256(enrollment token)) — resolved at build
 
+	prov *provision.Provisioner // per-user database provisioning (nil ⇒ disabled)
+
 	mu      sync.Mutex
 	count   int // live size of the enrolled set (loaded at startup)
 	buckets map[string]*bucket
 	lastGC  time.Time
 }
+
+// SetProvisioner wires database-per-user provisioning into the service. Called
+// once during serverd assembly when auth.enroll.provision is enabled.
+func (s *Service) SetProvisioner(p *provision.Provisioner) { s.prov = p }
 
 // New builds the service, resolving enrollment-token secret references eagerly
 // so a broken reference fails startup.
@@ -120,6 +131,16 @@ func (s *Service) Delete(name string) (bool, error) {
 	s.mu.Lock()
 	s.count--
 	s.mu.Unlock()
+
+	// Fate of the per-user database, per on_revoke. "keep" (default) leaves it in
+	// place — data is preserved and re-granted if the same key re-enrolls. "drop"
+	// detaches it and deletes the file.
+	if s.provisionEnabled() && s.cfg.Provision.OnRevoke == "drop" {
+		dbName := s.provisionName(name)
+		if err := s.prov.Drop(dbName, true); err != nil && !errors.Is(err, registry.ErrUnknownDB) {
+			s.log.Warn("quicsql/enroll: could not drop per-user database on revoke", "principal", name, "db", dbName, "err", err)
+		}
+	}
 	return true, nil
 }
 
@@ -181,9 +202,87 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.authn.AddKeyring(canon, pub, name)
 	s.applyGrants(name)
 	s.count++
+
+	// Provision the enrollee's own database, if configured. Do it as part of the
+	// enrollment transaction: if it fails, roll the whole enroll back so we never
+	// leave a principal without the database it was promised.
+	if s.provisionEnabled() {
+		if err := s.provisionFor(name); err != nil {
+			_, _ = s.store.DeleteEnrolled(name)
+			s.authn.RemoveKeyringName(name)
+			s.policy.RevokePrincipal(name)
+			s.count--
+			s.store.Audit(name, "enroll.failed", "", "provision: "+err.Error())
+			s.log.Error("quicsql/enroll: provisioning failed, enrollment rolled back", "principal", name, "err", err)
+			httpjson.Error(w, http.StatusInternalServerError, "enrollment could not provision a database")
+			return
+		}
+	}
+
 	s.store.Audit(name, "enroll.created", "", "ip="+ip)
 	s.log.Info("quicsql/enroll: principal enrolled", "principal", name, "ip", ip)
 	httpjson.Write(w, http.StatusOK, map[string]any{"principal": name, "created": true})
+}
+
+// provisionEnabled reports whether per-user provisioning is wired and turned on.
+func (s *Service) provisionEnabled() bool { return s.prov != nil && s.cfg.Provision.Enabled }
+
+// provisionName resolves the per-user database name for a principal from the
+// name_template (the "{principal}" token expands to the principal name).
+func (s *Service) provisionName(principal string) string {
+	return strings.ReplaceAll(s.cfg.Provision.NameTemplate, "{principal}", principal)
+}
+
+// provisionSpec builds the per-user database spec from the provision template: the
+// backend/vault/pragmas, a data_dir-relative path derived from the name, the
+// enrollee's grant (persisted so it reloads at startup), and the optional size cap
+// (via PRAGMA max_page_count, 4 KiB pages).
+func (s *Service) provisionSpec(principal string) (config.Database, error) {
+	p := s.cfg.Provision
+	name := s.provisionName(principal)
+	if !config.ValidDBName(name) {
+		return config.Database{}, fmt.Errorf("provisioned database name %q is invalid", name)
+	}
+	db := config.Database{
+		Name:          name,
+		Backend:       p.Backend,
+		PragmasPreset: p.PragmasPreset,
+		Vault:         p.Vault,
+		Grants:        []config.Grant{{Principal: principal, Level: p.Level}},
+	}
+	if config.UsesPath(p.Backend) {
+		ext := ".db"
+		if p.Backend == "vault" {
+			ext = ".vault"
+		}
+		db.Path = name + ext
+		db.Mode = "rwc" // create the per-user file on first open
+	}
+	if len(p.Pragmas) > 0 || p.MaxBytes > 0 {
+		db.Pragmas = make(map[string]any, len(p.Pragmas)+1)
+		maps.Copy(db.Pragmas, p.Pragmas)
+		if p.MaxBytes > 0 {
+			db.Pragmas["max_page_count"] = p.MaxBytes / 4096
+		}
+	}
+	return db, nil
+}
+
+// provisionFor creates the enrollee's database and grants them access on the live
+// policy. An already-existing database (a prior run, or a "keep" re-enroll) is
+// tolerated — the grant is (re)applied and the call succeeds.
+func (s *Service) provisionFor(principal string) error {
+	spec, err := s.provisionSpec(principal)
+	if err != nil {
+		return err
+	}
+	if err := s.prov.Create(context.Background(), spec); err != nil && !errors.Is(err, registry.ErrExists) {
+		return err
+	}
+	if lvl, ok := authz.ParseLevel(s.cfg.Provision.Level); ok {
+		s.policy.Grant(spec.Name, principal, lvl)
+	}
+	return nil
 }
 
 func (s *Service) applyGrants(name string) {

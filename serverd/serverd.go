@@ -51,6 +51,7 @@ import (
 	"quicsql.net/limits"
 	"quicsql.net/meta"
 	"quicsql.net/obs"
+	"quicsql.net/provision"
 	"quicsql.net/registry"
 	"quicsql.net/secret"
 	"quicsql.net/session"
@@ -229,6 +230,14 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 				_ = reg.Close()
 				closeStore(store, log)
 				return nil, fmt.Errorf("init enrollment: %w", err)
+			}
+			if cfg.Auth.Enroll.Provision.Enabled {
+				var pf provision.FeedRegistry
+				if broker != nil {
+					pf = broker
+				}
+				enr.SetProvisioner(provision.New(reg, store, pf, metrics, sec, cfg.Server.DataDir, log))
+				log.Info("quicsql: enrollment provisions a per-user database", "backend", cfg.Auth.Enroll.Provision.Backend, "on_revoke", cfg.Auth.Enroll.Provision.OnRevoke)
 			}
 			n, err := enr.LoadExisting()
 			if err != nil {

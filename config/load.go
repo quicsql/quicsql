@@ -210,6 +210,20 @@ func (c *Config) applyDefaults() {
 		if c.Auth.Enroll.RatePerIP == 0 {
 			c.Auth.Enroll.RatePerIP = 0.1
 		}
+		if p := &c.Auth.Enroll.Provision; p.Enabled {
+			if p.NameTemplate == "" {
+				p.NameTemplate = "{principal}"
+			}
+			if p.Backend == "" {
+				p.Backend = "vault"
+			}
+			if p.Level == "" {
+				p.Level = "read-write"
+			}
+			if p.OnRevoke == "" {
+				p.OnRevoke = "keep"
+			}
+		}
 	}
 	if c.CORS.Enabled {
 		if len(c.CORS.Origins) == 0 {
@@ -505,6 +519,26 @@ func (c *Config) validateEnroll() error {
 		}
 		if g.Level != "read-only" && g.Level != "read-write" {
 			return fmt.Errorf("config: auth.enroll.grants level %q invalid (want read-only|read-write — never admin for self-enrolled principals)", g.Level)
+		}
+	}
+	if p := e.Provision; p.Enabled {
+		if !strings.Contains(p.NameTemplate, "{principal}") {
+			return fmt.Errorf("config: auth.enroll.provision.name_template %q must contain {principal} so per-user databases don't collide", p.NameTemplate)
+		}
+		if !KnownBackends[p.Backend] {
+			return fmt.Errorf("config: auth.enroll.provision.backend %q unknown", p.Backend)
+		}
+		if p.Level != "read-only" && p.Level != "read-write" {
+			return fmt.Errorf("config: auth.enroll.provision.level %q invalid (want read-only|read-write — never admin)", p.Level)
+		}
+		if p.OnRevoke != "keep" && p.OnRevoke != "drop" {
+			return fmt.Errorf("config: auth.enroll.provision.on_revoke %q invalid (want keep|drop)", p.OnRevoke)
+		}
+		if p.MaxBytes < 0 {
+			return fmt.Errorf("config: auth.enroll.provision.max_bytes must not be negative")
+		}
+		if p.Vault != nil && p.Backend != "vault" {
+			return fmt.Errorf("config: auth.enroll.provision has a vault block but backend is %q", p.Backend)
 		}
 	}
 	return nil

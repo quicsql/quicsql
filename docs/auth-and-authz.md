@@ -175,6 +175,26 @@ The endpoint lives on keyring-accepting listeners (an enrolled key authenticates
 
 Three deliberate design points. **Enrollment refuses to exist on an open-mode server** — config validation demands explicit auth first, so registering the first dynamic principal can never be the event that flips enforcement on mid-flight. **Config identities always win**: an enrolled key can never shadow an operator-defined principal. **The grants template is the authorization truth** — it is re-applied from config at every startup, so changing the template in YAML re-scopes every enrollee on restart; the meta store only remembers *who* enrolled, never what they may do. Operators manage the enrolled set at [`/_admin/principals`](administration.md) (list, delete — deletion revokes the key and every grant at once).
 
+#### A database per user
+
+The `grants` template above puts every enrollee into *shared* databases. For a public app where users must **not** see each other's data, add a `provision` block: each enrollee gets their **own** database, created at enroll time and granted only to them.
+
+```yaml
+auth:
+  enroll:
+    enabled: true
+    provision:
+      enabled: true
+      name_template: "{principal}"   # {principal} → the u_<hash> name; MUST appear (else users collide)
+      backend: vault                 # default vault (encrypted at rest); file | memory-shared | mvcc | memdb
+      vault: { key: keys:userdb }    # shared key ⇒ encryption at rest; isolation is by grant, not by key
+      level: read-write              # the enrollee's grant on their own db (never admin)
+      max_bytes: 104857600           # per-db size cap (PRAGMA max_page_count); 0 = no cap
+      on_revoke: keep                # keep (default — data preserved) | drop (detach + delete the file)
+```
+
+The per-user database is a first-class persisted database (it survives restart, and its owner-grant reloads with it), so nothing special happens at startup — it is served like any seed. Everything a use-case might vary is a knob with a **safe default**: `on_revoke` defaults to **`keep`** (deleting an enrollee never destroys data — re-enrolling the same key restores access to the same database), the backend defaults to an **encrypted vault**, and there is no size cap unless you set `max_bytes`. Provisioning is part of the enroll transaction: if the database can't be created, the whole enrollment is rolled back, so a principal is never left without the database it was promised. (The shared `grants` template and per-user `provision` can be used together — a user gets both shared grants and their own database.)
+
 ### The anonymous principal
 
 A request that authenticates via `none` (or an unmapped `peercred`) becomes **Anonymous** — a principal with an empty name. Anonymous is a real, first-class identity; it simply holds no *named* grants. It can still reach a database if that database has a wildcard grant (below) or if the server is in open mode. This is how you publish a deliberately public, read-only database without issuing anyone a credential.

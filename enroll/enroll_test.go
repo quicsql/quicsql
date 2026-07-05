@@ -16,9 +16,12 @@ import (
 
 	"quicsql.net/auth"
 	"quicsql.net/authz"
+	"quicsql.net/backend"
 	"quicsql.net/config"
 	"quicsql.net/internal/wire"
 	"quicsql.net/meta"
+	"quicsql.net/provision"
+	"quicsql.net/registry"
 	"quicsql.net/secret"
 )
 
@@ -323,5 +326,112 @@ func TestPrincipalNameDeterministicAndValid(t *testing.T) {
 	a, b := PrincipalName(line), PrincipalName(line)
 	if a != b || !strings.HasPrefix(a, "u_") || len(a) != 18 {
 		t.Fatalf("PrincipalName: %q / %q", a, b)
+	}
+}
+
+// provisionHarness is newHarness plus a registry + wired provisioner, so an enroll
+// materializes a real per-user database. onRevoke selects the delete policy.
+func provisionHarness(t *testing.T, onRevoke string) (*harness, *registry.Registry, *meta.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	sec, _ := secret.New(nil)
+	store, err := meta.Open(config.MetaStore{Backend: "file", Path: "meta.db"}, sec, dir, nil)
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	authn, _ := auth.New(&config.Config{}, sec, nil)
+	policy := authz.NewPolicy(false)
+	ecfg := config.Enroll{
+		Enabled: true, Policy: "open", MaxPrincipals: 10,
+		Provision: config.Provision{
+			Enabled: true, NameTemplate: "{principal}", Backend: "memory-shared",
+			Level: "read-write", OnRevoke: onRevoke,
+		},
+	}
+	svc, err := New(ecfg, store, authn, policy, sec, nil)
+	if err != nil {
+		t.Fatalf("enroll.New: %v", err)
+	}
+	authn.SetEnrollHandler(svc)
+	reg := registry.New(map[string]backend.Backend{}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+	svc.SetProvisioner(provision.New(reg, store, nil, nil, sec, dir, nil))
+
+	h := &harness{svc: svc, policy: policy}
+	m := authn.Middleware(config.Listener{Name: "l", Auth: []string{"keyring"}}, nil)
+	h.handler = m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.seen = authz.FromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	return h, reg, store
+}
+
+// TestEnrollProvisionsPerUserDB: enrolling materializes a per-user database,
+// grants the enrollee read-write on it, persists it (so it survives a restart),
+// and — with on_revoke: drop — deletes it when the enrollee is removed.
+func TestEnrollProvisionsPerUserDB(t *testing.T) {
+	h, reg, store := provisionHarness(t, "drop")
+	priv, line := genKey(t)
+
+	if w := h.enroll(t, priv, line, ""); w.Code != http.StatusOK {
+		t.Fatalf("enroll status = %d (%s)", w.Code, w.Body.String())
+	}
+	principal := PrincipalName(line)
+
+	// The per-user database is served, and only its owner has access.
+	if reg.Backend(principal) == nil {
+		t.Fatalf("per-user database %q was not provisioned", principal)
+	}
+	owner := &authz.Principal{Name: principal, Method: "keyring"}
+	if lvl := h.policy.Level(owner, principal); lvl != authz.ReadWrite {
+		t.Fatalf("owner grant on own db = %v, want read-write", lvl)
+	}
+	stranger := &authz.Principal{Name: "u_someoneelse", Method: "keyring"}
+	if lvl := h.policy.Level(stranger, principal); lvl != authz.None {
+		t.Fatalf("stranger level on another user's db = %v, want none", lvl)
+	}
+
+	// It is persisted with its grant, so a restart restores both.
+	dbs, _ := store.Databases()
+	var persisted *config.Database
+	for i := range dbs {
+		if dbs[i].Name == principal {
+			persisted = &dbs[i]
+		}
+	}
+	if persisted == nil {
+		t.Fatalf("per-user database not persisted to the meta store")
+	}
+	if len(persisted.Grants) != 1 || persisted.Grants[0].Principal != principal {
+		t.Fatalf("persisted grant = %+v, want the owner", persisted.Grants)
+	}
+
+	// on_revoke: drop — deleting the principal drops the database everywhere.
+	if _, err := h.svc.Delete(principal); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if reg.Backend(principal) != nil {
+		t.Fatal("on_revoke:drop must remove the database from the registry")
+	}
+	if dbs, _ := store.Databases(); len(dbs) != 0 {
+		t.Fatalf("on_revoke:drop left %d databases in the meta store, want 0", len(dbs))
+	}
+}
+
+// TestEnrollProvisionKeepsDBByDefault: with on_revoke: keep, deleting the
+// enrollee leaves the database in place (data preserved, re-grantable).
+func TestEnrollProvisionKeepsDBByDefault(t *testing.T) {
+	h, reg, _ := provisionHarness(t, "keep")
+	priv, line := genKey(t)
+	if w := h.enroll(t, priv, line, ""); w.Code != http.StatusOK {
+		t.Fatalf("enroll status = %d (%s)", w.Code, w.Body.String())
+	}
+	principal := PrincipalName(line)
+	if _, err := h.svc.Delete(principal); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if reg.Backend(principal) == nil {
+		t.Fatal("on_revoke:keep must leave the database in place")
 	}
 }
