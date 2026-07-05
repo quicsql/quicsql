@@ -15,6 +15,7 @@ package enroll
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
@@ -165,10 +166,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusUnauthorized, "enrollment requires a valid signed challenge (see /_auth/challenge)")
 		return
 	}
-	if s.cfg.Policy == "token" && !s.tokenOK(r) {
-		s.store.Audit("", "enroll.denied", "", "missing/invalid enrollment token ip="+ip)
-		httpjson.Error(w, http.StatusForbidden, "enrollment requires a valid enrollment token")
-		return
+	// Read the presented token now (the body is read once); validation and
+	// single-use consumption happen below, only once we know this is a NEW
+	// enrollment — an already-enrolled key re-proving possession needs no token.
+	presentedToken := ""
+	if s.cfg.Policy == "token" {
+		presentedToken = s.readEnrollToken(r)
 	}
 
 	name := PrincipalName(canon)
@@ -185,15 +188,43 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, e := range existing {
 		if e.Key == canon {
 			// Idempotent re-enroll: same key, same principal — a reinstalled app
-			// doesn't multiply identities.
+			// doesn't multiply identities, and needs no token (already trusted).
 			httpjson.Write(w, http.StatusOK, map[string]any{"principal": e.Name, "created": false})
 			return
 		}
+	}
+	// New enrollment: the token gate applies now (it never applies to the re-enroll
+	// above). A single-use code is validated here and consumed just below.
+	var codeHash string
+	if s.cfg.Policy == "token" {
+		ok, ch := s.validateToken(presentedToken)
+		if !ok {
+			s.store.Audit("", "enroll.denied", "", "missing/invalid enrollment token ip="+ip)
+			httpjson.Error(w, http.StatusForbidden, "enrollment requires a valid enrollment token")
+			return
+		}
+		codeHash = ch
 	}
 	if s.cfg.MaxPrincipals > 0 && s.count >= s.cfg.MaxPrincipals {
 		s.store.Audit("", "enroll.denied", "", "max_principals reached ip="+ip)
 		httpjson.Error(w, http.StatusTooManyRequests, "enrollment capacity reached")
 		return
+	}
+	// Consume the single-use code NOW — this is a confirmed new enrollment (past the
+	// idempotency and cap gates), so a re-enroll or a rejected attempt never burns
+	// one. The atomic consume also settles any race between two keys presenting the
+	// same code: exactly one wins.
+	if codeHash != "" {
+		consumed, cerr := s.store.ConsumeEnrollCode(codeHash, time.Now().Unix())
+		if cerr != nil {
+			httpjson.Error(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !consumed {
+			s.store.Audit("", "enroll.denied", "", "enrollment code already used or expired ip="+ip)
+			httpjson.Error(w, http.StatusForbidden, "enrollment code is no longer valid")
+			return
+		}
 	}
 	if err := s.store.PutEnrolled(name, canon); err != nil {
 		httpjson.Error(w, http.StatusInternalServerError, "internal error")
@@ -293,28 +324,74 @@ func (s *Service) applyGrants(name string) {
 	}
 }
 
-// tokenOK reads the request body ({"enroll_token": "…"}) and compares its hash
-// against the accepted set in constant time.
-func (s *Service) tokenOK(r *http.Request) bool {
+// readEnrollToken pulls the enroll_token from the request body ({"enroll_token": "…"}).
+func (s *Service) readEnrollToken(r *http.Request) string {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
-		return false
+		return ""
 	}
 	var req struct {
 		Token string `json:"enroll_token"`
 	}
-	if json.Unmarshal(body, &req) != nil || req.Token == "" {
-		return false
+	if json.Unmarshal(body, &req) != nil {
+		return ""
 	}
-	sum := sha256.Sum256([]byte(req.Token))
-	want := []byte(hex.EncodeToString(sum[:]))
-	ok := false
+	return req.Token
+}
+
+// validateToken validates the presented token WITHOUT consuming it: a static
+// shared token (constant-time) passes with an empty codeHash, a valid unused
+// single-use code passes with its hash (to be consumed only once the enrollment
+// is confirmed new). It never consumes a code, so a re-enroll or a downstream
+// failure can't burn one.
+func (s *Service) validateToken(token string) (ok bool, codeHash string) {
+	if token == "" {
+		return false, ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	hexsum := hex.EncodeToString(sum[:])
+	want := []byte(hexsum)
 	for h := range s.tokens {
 		if subtle.ConstantTimeCompare([]byte(h), want) == 1 {
-			ok = true
+			return true, "" // a static shared token; nothing to consume
 		}
 	}
-	return ok
+	if s.cfg.Codes.Enabled {
+		valid, err := s.store.EnrollCodeValid(hexsum, time.Now().Unix())
+		if err != nil {
+			s.log.Error("quicsql/enroll: check code", "err", err)
+			return false, ""
+		}
+		if valid {
+			return true, hexsum
+		}
+	}
+	return false, ""
+}
+
+// errCodesDisabled is returned by MintCode when single-use codes are off.
+var errCodesDisabled = errors.New("enroll: single-use codes are not enabled (auth.enroll.codes.enabled)")
+
+// MintCode generates a fresh single-use enrollment code, stores its hash with the
+// configured TTL, and returns the plaintext code (shown only here) plus its unix
+// expiry. Requires auth.enroll.codes.enabled.
+func (s *Service) MintCode() (code string, expiresAt int64, err error) {
+	if !s.cfg.Codes.Enabled {
+		return "", 0, errCodesDisabled
+	}
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", 0, err
+	}
+	code = "ec_" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+	sum := sha256.Sum256([]byte(code))
+	now := time.Now()
+	s.store.GCEnrollCodes(now.Unix()) // opportunistic housekeeping
+	expiresAt = now.Add(s.cfg.Codes.TTL).Unix()
+	if err := s.store.PutEnrollCode(hex.EncodeToString(sum[:]), now.Unix(), expiresAt); err != nil {
+		return "", 0, err
+	}
+	return code, expiresAt, nil
 }
 
 // PrincipalName derives the server-assigned principal name from a canonical

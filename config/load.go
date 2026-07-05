@@ -210,6 +210,9 @@ func (c *Config) applyDefaults() {
 		if c.Auth.Enroll.RatePerIP == 0 {
 			c.Auth.Enroll.RatePerIP = 0.1
 		}
+		if c.Auth.Enroll.Codes.Enabled && c.Auth.Enroll.Codes.TTL == 0 {
+			c.Auth.Enroll.Codes.TTL = 24 * time.Hour
+		}
 		if p := &c.Auth.Enroll.Provision; p.Enabled {
 			if p.NameTemplate == "" {
 				p.NameTemplate = "{principal}"
@@ -504,10 +507,10 @@ func (c *Config) validateEnroll() error {
 	default:
 		return fmt.Errorf("config: auth.enroll.policy %q invalid (want open|token)", e.Policy)
 	}
-	if e.Policy == "token" && len(e.Tokens) == 0 {
-		return fmt.Errorf("config: auth.enroll.policy token requires at least one auth.enroll.tokens entry")
+	if e.Policy == "token" && len(e.Tokens) == 0 && !e.Codes.Enabled {
+		return fmt.Errorf("config: auth.enroll.policy token requires auth.enroll.tokens or auth.enroll.codes.enabled")
 	}
-	if e.MaxPrincipals < 0 || e.RatePerIP < 0 {
+	if e.MaxPrincipals < 0 || e.RatePerIP < 0 || e.Codes.TTL < 0 {
 		return fmt.Errorf("config: auth.enroll quotas must not be negative")
 	}
 	if len(e.Grants) == 0 {

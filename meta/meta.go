@@ -9,7 +9,9 @@ package meta
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -38,6 +40,12 @@ CREATE TABLE IF NOT EXISTS enrolled (
 	name       TEXT PRIMARY KEY,    -- server-assigned principal name (u_…)
 	key        TEXT NOT NULL UNIQUE, -- canonical ssh-ed25519 authorized-keys line
 	created_at INTEGER NOT NULL      -- unix seconds
+);
+CREATE TABLE IF NOT EXISTS enroll_codes (
+	hash       TEXT PRIMARY KEY,   -- hex(sha256(single-use enrollment code))
+	created_at INTEGER NOT NULL,   -- unix seconds
+	expires_at INTEGER NOT NULL,   -- unix seconds
+	used_at    INTEGER             -- unix seconds; NULL until consumed
 );`
 
 // Store is the open meta store handle.
@@ -181,6 +189,47 @@ func (s *Store) DeleteEnrolled(name string) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// PutEnrollCode records a minted single-use enrollment code by its hash.
+func (s *Store) PutEnrollCode(hash string, createdAt, expiresAt int64) error {
+	if _, err := s.db.Exec(`INSERT INTO enroll_codes(hash, created_at, expires_at) VALUES(?,?,?)`,
+		hash, createdAt, expiresAt); err != nil {
+		return fmt.Errorf("meta: put enroll code: %w", err)
+	}
+	return nil
+}
+
+// EnrollCodeValid reports whether a code (by hash) exists, is unused, and is not
+// yet expired — a read-only pre-check before the enrollment's other gates run.
+func (s *Store) EnrollCodeValid(hash string, now int64) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM enroll_codes WHERE hash = ? AND used_at IS NULL AND expires_at > ?`,
+		hash, now).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// ConsumeEnrollCode atomically marks an unused, unexpired code used and reports
+// whether it won — the single-use guarantee: a concurrent second attempt updates
+// zero rows and reports false.
+func (s *Store) ConsumeEnrollCode(hash string, now int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE enroll_codes SET used_at = ? WHERE hash = ? AND used_at IS NULL AND expires_at > ?`,
+		now, hash, now)
+	if err != nil {
+		return false, fmt.Errorf("meta: consume enroll code: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// GCEnrollCodes deletes used or expired codes, bounding the table. Best-effort.
+func (s *Store) GCEnrollCodes(now int64) {
+	if _, err := s.db.Exec(`DELETE FROM enroll_codes WHERE used_at IS NOT NULL OR expires_at <= ?`, now); err != nil {
+		s.log.Error("quicsql/meta: gc enroll codes", "err", err)
+	}
 }
 
 // Audit appends one admin-action record. Best-effort: a failure is logged, not

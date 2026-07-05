@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -365,6 +366,56 @@ func provisionHarness(t *testing.T, onRevoke string) (*harness, *registry.Regist
 		w.WriteHeader(http.StatusOK)
 	}))
 	return h, reg, store
+}
+
+// TestEnrollSingleUseCode: a minted code enrolls exactly one new key, then is
+// spent; an already-enrolled key still re-enrolls idempotently without any token.
+func TestEnrollSingleUseCode(t *testing.T) {
+	cfg := config.Enroll{
+		Enabled: true, Policy: "token", MaxPrincipals: 10,
+		Codes:  config.EnrollCodes{Enabled: true, TTL: time.Hour},
+		Grants: []config.EnrollGrant{{DB: "appdb", Level: "read-write"}},
+	}
+	h := newHarness(t, cfg)
+
+	code, exp, err := h.svc.MintCode()
+	if err != nil {
+		t.Fatalf("MintCode: %v", err)
+	}
+	if !strings.HasPrefix(code, "ec_") || exp == 0 {
+		t.Fatalf("MintCode returned %q exp=%d", code, exp)
+	}
+	body := `{"enroll_token":"` + code + `"}`
+
+	priv1, line1 := genKey(t)
+	if w := h.enroll(t, priv1, line1, body); w.Code != http.StatusOK {
+		t.Fatalf("first enroll with code = %d (%s)", w.Code, w.Body.String())
+	}
+	// A DIFFERENT key cannot reuse the spent code.
+	priv2, line2 := genKey(t)
+	if w := h.enroll(t, priv2, line2, body); w.Code != http.StatusForbidden {
+		t.Fatalf("reuse of a spent code = %d, want 403", w.Code)
+	}
+	// A bogus code is refused.
+	priv3, line3 := genKey(t)
+	if w := h.enroll(t, priv3, line3, `{"enroll_token":"ec_bogus"}`); w.Code != http.StatusForbidden {
+		t.Fatalf("bogus code = %d, want 403", w.Code)
+	}
+	// The first key re-enrolls idempotently with NO token (already trusted).
+	if w := h.enroll(t, priv1, line1, ""); w.Code != http.StatusOK {
+		t.Fatalf("idempotent re-enroll without token = %d, want 200", w.Code)
+	}
+}
+
+// TestMintCodeRequiresEnabled: minting fails when codes are off.
+func TestMintCodeRequiresEnabled(t *testing.T) {
+	cfg := openCfg()
+	cfg.Policy = "token"
+	cfg.Tokens = []string{"deadbeef"}
+	h := newHarness(t, cfg)
+	if _, _, err := h.svc.MintCode(); err == nil {
+		t.Fatal("MintCode must fail when auth.enroll.codes.enabled is off")
+	}
 }
 
 // TestEnrollProvisionsPerUserDB: enrolling materializes a per-user database,

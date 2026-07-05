@@ -147,7 +147,13 @@ curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/principals
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/principals/delete \
   -d '{"name":"u_a3f9k2m8p1qxw7bn"}'
 # → {"deleted":"u_a3f9k2m8p1qxw7bn"}          (404 for an unknown or config-defined name)
+
+# Mint a single-use enrollment code (when auth.enroll.codes.enabled):
+curl -s -X POST -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/enroll/codes
+# → {"code":"ec_5f3k…","expires_at":1751752800}   (plaintext code shown once; hand it to one user)
 ```
+
+`POST /_admin/enroll/codes` mints a one-time enrollment code — a per-user invite that works exactly once (consumed atomically when a new principal registers), the alternative to the shared static `tokens`. It `400`s if `auth.enroll.codes.enabled` is off, `404`s when enrollment is off.
 
 Deletion revokes everything at once — the key stops authenticating and every
 templated grant disappears — and is audited (`principals.delete`), as are

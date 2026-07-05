@@ -232,6 +232,9 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 				return nil, fmt.Errorf("init enrollment: %w", err)
 			}
 			if cfg.Auth.Enroll.Provision.Enabled {
+				if cfg.Limits.IdleHandleTimeout == 0 {
+					log.Warn("quicsql: auth.enroll.provision is on but limits.idle_handle_timeout is unset — every per-user database stays open once first used, so the open-handle set grows with total enrollees; set idle_handle_timeout so idle handles close and the working set tracks ACTIVE users")
+				}
 				var pf provision.FeedRegistry
 				if broker != nil {
 					pf = broker

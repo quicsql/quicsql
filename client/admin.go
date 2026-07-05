@@ -110,6 +110,24 @@ func (c *Client) AdminSessions(ctx context.Context) ([]AdminSession, error) {
 	return body.Sessions, nil
 }
 
+// AdminMintEnrollCode mints a single-use enrollment code (server-admin only;
+// requires auth.enroll.codes.enabled). The returned code is shown only here —
+// hand it to one user, who enrolls with it exactly once before expiresAt (unix).
+func (c *Client) AdminMintEnrollCode(ctx context.Context) (code string, expiresAt int64, err error) {
+	raw, err := c.request(ctx, http.MethodPost, "/_admin/enroll/codes", "", nil)
+	if err != nil {
+		return "", 0, err
+	}
+	var body struct {
+		Code      string `json:"code"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return "", 0, fmt.Errorf("quicsql: malformed /_admin/enroll/codes response: %w", err)
+	}
+	return body.Code, body.ExpiresAt, nil
+}
+
 // AdminKill force-closes the session with the given id (server-admin only).
 // A session with a request in flight is refused with a 409.
 func (c *Client) AdminKill(ctx context.Context, session string) error {

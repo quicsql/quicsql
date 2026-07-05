@@ -155,6 +155,18 @@ type Enroll struct {
 	// Provision optionally gives each enrollee their OWN database (database-per-user
 	// containment) created at enroll time. Off by default.
 	Provision Provision `yaml:"provision" json:"provision"`
+	// Codes enables server-minted, single-use enrollment codes (POST
+	// /_admin/enroll/codes) — a one-time alternative to (or complement of) the
+	// static Tokens: an admin mints a code, hands it to a user, and it works once.
+	Codes EnrollCodes `yaml:"codes" json:"codes"`
+}
+
+// EnrollCodes configures server-minted single-use enrollment codes. When enabled,
+// POST /_admin/enroll/codes (server-admin) mints a fresh code, and a caller may
+// present it under policy: token exactly once.
+type EnrollCodes struct {
+	Enabled bool          `yaml:"enabled" json:"enabled"`
+	TTL     time.Duration `yaml:"ttl" json:"ttl"` // code lifetime (default 24h)
 }
 
 // EnrollGrant is one templated grant: a database name and a capability level.

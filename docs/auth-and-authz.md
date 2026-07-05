@@ -175,6 +175,19 @@ The endpoint lives on keyring-accepting listeners (an enrolled key authenticates
 
 Three deliberate design points. **Enrollment refuses to exist on an open-mode server** — config validation demands explicit auth first, so registering the first dynamic principal can never be the event that flips enforcement on mid-flight. **Config identities always win**: an enrolled key can never shadow an operator-defined principal. **The grants template is the authorization truth** — it is re-applied from config at every startup, so changing the template in YAML re-scopes every enrollee on restart; the meta store only remembers *who* enrolled, never what they may do. Operators manage the enrolled set at [`/_admin/principals`](administration.md) (list, delete — deletion revokes the key and every grant at once).
 
+#### Single-use enrollment codes
+
+The static `tokens` above are shared secrets: everyone enrolls with the same string, and a leak lets anyone in until you rotate it. For per-user invites, turn on **single-use codes** — an admin mints a fresh code, hands it to one person, and it works exactly once:
+
+```yaml
+auth:
+  enroll:
+    policy: token
+    codes: { enabled: true, ttl: 24h }   # ttl defaults to 24h
+```
+
+`POST /_admin/enroll/codes` (server-admin) returns `{"code": "ec_…", "expires_at": …}` — the plaintext code is shown only there. The user enrolls with it in the usual `{"enroll_token": "ec_…"}` body. It is consumed **atomically at the moment a new principal is registered** (past the possession proof, idempotency, and cap gates), so a rejected attempt or two devices racing the same code never burns it twice — exactly one wins, and a spent or expired code is a `403`. Codes and static `tokens` can both be accepted at once, or use codes alone (then `tokens` may be empty). An already-enrolled key re-proving possession needs no code — it is already trusted.
+
 #### A database per user
 
 The `grants` template above puts every enrollee into *shared* databases. For a public app where users must **not** see each other's data, add a `provision` block: each enrollee gets their **own** database, created at enroll time and granted only to them.
@@ -194,6 +207,8 @@ auth:
 ```
 
 The per-user database is a first-class persisted database (it survives restart, and its owner-grant reloads with it), so nothing special happens at startup — it is served like any seed. Everything a use-case might vary is a knob with a **safe default**: `on_revoke` defaults to **`keep`** (deleting an enrollee never destroys data — re-enrolling the same key restores access to the same database), the backend defaults to an **encrypted vault**, and there is no size cap unless you set `max_bytes`. Provisioning is part of the enroll transaction: if the database can't be created, the whole enrollment is rolled back, so a principal is never left without the database it was promised. (The shared `grants` template and per-user `provision` can be used together — a user gets both shared grants and their own database.)
+
+> **Scaling many per-user databases.** quicSQL holds **one open handle per database**, opened lazily on first use. The number you can *provision* is bounded only by disk and `max_principals` (raise it for a large fleet) — idle databases are just files. The number held **open at once** is the real limit: each open handle keeps a small connection pool (file descriptors + page cache). **Set `limits.idle_handle_timeout`** (it defaults to off, and the server warns when provisioning is on without it) — then a per-user handle closes after it's been idle and reopens on the next request, so the open set tracks *active* users, not total enrollees. With a modest idle timeout, a small `pool.max_open` (1–2), and a small `cache_size` in the provision template, one server comfortably keeps hundreds-to-low-thousands of databases open concurrently while backing tens of thousands on disk; raise the OS file-descriptor limit accordingly, and shard across servers beyond that.
 
 ### The anonymous principal
 

@@ -59,6 +59,7 @@ func (h *Handler) SetRestoreLimit(n int64) { h.maxRestore = n }
 type Enrollments interface {
 	List() ([]meta.Enrolled, error)
 	Delete(name string) (bool, error)
+	MintCode() (code string, expiresAt int64, err error)
 }
 
 // SetEnrollments wires the enrollment service into the /_admin/principals
@@ -115,6 +116,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePrincipals(w, r)
 	case "/principals/delete":
 		h.handlePrincipalDelete(w, r)
+	case "/enroll/codes":
+		h.handleMintEnrollCode(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "unknown admin endpoint")
 	}
@@ -182,6 +185,33 @@ func (h *Handler) handlePrincipalDelete(w http.ResponseWriter, r *http.Request) 
 	}
 	h.audit(r, "principals.delete", "", req.Name)
 	httpjson.Write(w, http.StatusOK, map[string]any{"deleted": req.Name})
+}
+
+// handleMintEnrollCode serves POST /_admin/enroll/codes: mint a fresh single-use
+// enrollment code (server-admin only). The plaintext code is returned once — hand
+// it to the user who will enroll with it exactly once, before it expires.
+func (h *Handler) handleMintEnrollCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	if !h.isServerAdmin(r) {
+		h.audit(r, "enroll.mint.denied", "", "")
+		writeErr(w, http.StatusForbidden, "server admin required")
+		return
+	}
+	if h.enroll == nil {
+		writeErr(w, http.StatusNotFound, "enrollment is not enabled")
+		return
+	}
+	code, exp, err := h.enroll.MintCode()
+	if err != nil {
+		h.audit(r, "enroll.mint.failed", "", err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit(r, "enroll.mint", "", "single-use code")
+	httpjson.Write(w, http.StatusOK, map[string]any{"code": code, "expires_at": exp})
 }
 
 // isServerAdmin reports whether the request's principal is a configured

@@ -62,6 +62,8 @@ auth:
 
 Idempotent per key (`created: false` on re-enroll); denials are 401 (possession) / 403 (token) / 429 (rate or cap), all audited. Manage at `GET /_admin/principals` + `POST /_admin/principals/delete {"name"}` (server-admin only; delete revokes key + grants together). The grants template in YAML is the authorization truth — restart re-applies it to every enrollee.
 
+**Single-use codes:** set `enroll.codes: { enabled: true, ttl: 24h }` for per-user invites instead of shared static `tokens` — an admin mints one at `POST /_admin/enroll/codes` (returns `{code, expires_at}` once), the user enrolls with it in the `{"enroll_token": "ec_…"}` body, and it's consumed atomically exactly once (spent/expired → 403; an already-enrolled key re-enrolls without any token).
+
 **Database-per-user:** add `enroll.provision` to give each enrollee their OWN database (created at enroll, granted only to them) instead of (or alongside) shared `grants` — the containment story for public multi-user apps. Everything questionable is a knob with a safe default: `name_template: "{principal}"` (must contain `{principal}`), `backend: vault` (encrypted at rest; shared key, isolation by grant), `level: read-write`, `max_bytes` (0 = no cap, else a `PRAGMA max_page_count` cap), `on_revoke: keep` (default — data preserved; `drop` detaches + deletes the file). The per-user db is persisted, so it survives restart; provisioning is part of the enroll transaction (rolls back the enroll on failure).
 
 ## CORS (browser apps)
