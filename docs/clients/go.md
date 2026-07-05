@@ -60,6 +60,8 @@ st.SessionStart(ctx, nil)                        // nil ⇒ track every table
 st.Exec(ctx, "UPDATE users SET balance = balance + 1", nil)
 cs, _ := st.SessionChangeset(ctx)                // the accumulated diff
 c.ApplyChangeset(ctx, "replica", cs)             // replicate onto another database/server
+// Reconcile a divergent replica, or apply only some tables:
+c.ApplyChangeset(ctx, "replica", cs, client.OnConflict("replace"), client.ApplyToTables("users"))
 ```
 
 The control-plane helpers — `AdminMaintenance` (compact / checkpoint / logical

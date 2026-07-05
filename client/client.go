@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -324,9 +325,34 @@ func (c *Client) BackupTo(ctx context.Context, db string, dst io.Writer) (int64,
 
 // ApplyChangeset applies a SQLite changeset (as produced by Stream.SessionChangeset)
 // to db. It requires write access on the server.
-func (c *Client) ApplyChangeset(ctx context.Context, db string, changeset []byte) error {
-	_, err := c.request(ctx, http.MethodPost, "/"+db+"/changeset/apply", "application/octet-stream", bytes.NewReader(changeset))
+func (c *Client) ApplyChangeset(ctx context.Context, db string, changeset []byte, opts ...ApplyOption) error {
+	path := "/" + db + "/changeset/apply"
+	if len(opts) > 0 {
+		q := url.Values{}
+		for _, o := range opts {
+			o(q)
+		}
+		if enc := q.Encode(); enc != "" {
+			path += "?" + enc
+		}
+	}
+	_, err := c.request(ctx, http.MethodPost, path, "application/octet-stream", bytes.NewReader(changeset))
 	return err
+}
+
+// ApplyOption tunes ApplyChangeset; options ride the request URL.
+type ApplyOption func(url.Values)
+
+// OnConflict sets the conflict policy for ApplyChangeset: "abort" (default — any
+// conflict rolls the whole apply back), "omit" (skip each conflicting change), or
+// "replace" (overwrite the target row on a value/PK conflict, omit the rest).
+func OnConflict(policy string) ApplyOption {
+	return func(q url.Values) { q.Set("on_conflict", policy) }
+}
+
+// ApplyToTables restricts ApplyChangeset to the named tables (a server-side filter).
+func ApplyToTables(tables ...string) ApplyOption {
+	return func(q url.Values) { q.Set("tables", strings.Join(tables, ",")) }
 }
 
 // InvertChangeset returns the inverse (undo) of a changeset. Read access.

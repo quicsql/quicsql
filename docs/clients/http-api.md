@@ -187,6 +187,15 @@ can't use a raw body. `apply` requires **write** access (it mutates the database
 on a fresh connection); `invert` and `concat` are pure transforms that read and
 write nothing, so **read** access suffices.
 
+**`apply` options** ride the query string (the body is the raw changeset):
+`?on_conflict=abort|omit|replace` picks the conflict policy and `?tables=a,b`
+restricts the apply to those tables. `abort` (the default) rolls the whole apply
+back on the first conflict; `omit` skips each conflicting change and applies the
+rest; `replace` overwrites the target row on a value or duplicate-PK conflict
+(SQLite only allows REPLACE for those two) and omits the others. So a divergent
+replica can be reconciled with `POST /app/changeset/apply?on_conflict=replace`,
+and a partial replica with `?tables=orders,items`.
+
 Errors beyond the shared codes: an empty body is `400` ("empty changeset"); a
 malformed `concat` body is `400` (bad JSON, or a value that isn't valid base64);
 a changeset SQLite rejects (wrong schema, corrupt) is `422`; a body over the

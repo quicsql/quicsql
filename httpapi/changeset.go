@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	sqlite "gosqlite.org"
 )
@@ -13,6 +14,11 @@ import (
 // changeset — the raw request body, as produced by a session_changeset capture —
 // to db on a fresh connection. It requires write access. This is the receiving
 // half of changeset replication: capture on one database (or server), apply here.
+//
+// Two query options tune the apply (the body is the raw changeset, so options
+// ride the URL): `on_conflict=abort|omit|replace` picks the conflict policy
+// (default `abort` — any conflict rolls the whole apply back), and `tables=a,b`
+// restricts the apply to those tables.
 func (h *Handler) handleChangesetApply(w http.ResponseWriter, r *http.Request, db string) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "use POST")
@@ -43,11 +49,58 @@ func (h *Handler) handleChangesetApply(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	if _, err := h.onConn(r, db, func(c *sqlite.Conn) (any, error) { return nil, c.ApplyChangeset(cs) }); err != nil {
+	opts, perr := changesetApplyOptions(r)
+	if perr != nil {
+		writeErr(w, http.StatusBadRequest, perr.Error())
+		return
+	}
+	if _, err := h.onConn(r, db, func(c *sqlite.Conn) (any, error) { return nil, c.ApplyChangeset(cs, opts...) }); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "apply changeset: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// changesetApplyOptions builds the gosqlite ApplyOptions from the request query:
+//
+//	on_conflict = abort (default) | omit | replace
+//	tables      = comma-separated allowlist (apply only these tables)
+//
+// "abort" installs no handler, so any conflict rolls the whole apply back — the
+// safe default. "omit" skips each conflicting change and applies the rest.
+// "replace" overwrites the target row on a value/PK conflict (SQLite only permits
+// REPLACE for those two conflict types) and omits the others.
+func changesetApplyOptions(r *http.Request) ([]sqlite.ApplyOption, error) {
+	var opts []sqlite.ApplyOption
+	switch pol := r.URL.Query().Get("on_conflict"); pol {
+	case "", "abort":
+		// no handler ⇒ abort on the first conflict
+	case "omit":
+		opts = append(opts, sqlite.WithConflictHandler(func(sqlite.ConflictType) sqlite.ConflictAction {
+			return sqlite.ChangesetOmit
+		}))
+	case "replace":
+		opts = append(opts, sqlite.WithConflictHandler(func(t sqlite.ConflictType) sqlite.ConflictAction {
+			switch t {
+			case sqlite.ConflictData, sqlite.ConflictConflict:
+				return sqlite.ChangesetReplace
+			default:
+				return sqlite.ChangesetOmit // REPLACE is illegal for these types
+			}
+		}))
+	default:
+		return nil, fmt.Errorf("on_conflict must be abort|omit|replace, got %q", pol)
+	}
+	if raw := r.URL.Query().Get("tables"); raw != "" {
+		allow := map[string]bool{}
+		for name := range strings.SplitSeq(raw, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				allow[name] = true
+			}
+		}
+		opts = append(opts, sqlite.WithTableFilter(func(table string) bool { return allow[table] }))
+	}
+	return opts, nil
 }
 
 // handleChangesetInvert serves POST /<db>/changeset/invert: it returns the
