@@ -107,11 +107,78 @@ type TLSProfile struct {
 }
 
 // Auth is the authentication configuration: the named principals and their
-// credential methods, plus the server-wide SQL policy.
+// credential methods, the server-wide SQL policy, and the optional session-token
+// service.
 type Auth struct {
-	AuthorizedKeys string      `yaml:"authorized_keys" json:"authorized_keys"`
-	Principals     []Principal `yaml:"principals" json:"principals"`
-	SQLPolicy      SQLPolicy   `yaml:"sql_policy" json:"sql_policy"`
+	AuthorizedKeys string        `yaml:"authorized_keys" json:"authorized_keys"`
+	Principals     []Principal   `yaml:"principals" json:"principals"`
+	SQLPolicy      SQLPolicy     `yaml:"sql_policy" json:"sql_policy"`
+	Session        SessionTokens `yaml:"session" json:"session"`
+	Enroll         Enroll        `yaml:"enroll" json:"enroll"`
+}
+
+// Enroll enables self-service device enrollment at POST /_auth/enroll (served
+// on keyring-accepting listeners): a caller proves possession of an ed25519
+// private key by signing a fresh challenge, and the server registers the public
+// key as a NEW principal with a server-assigned name (u_<key-hash>) and exactly
+// the Grants template — never client-chosen names, never more than the
+// template. Enrollment requires the control plane (the enrolled set lives in
+// the meta store, and /_admin/principals is the oversight surface) and refuses
+// to run on an open-mode server: registering the first dynamic principal must
+// never be the event that flips enforcement semantics mid-flight.
+type Enroll struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Policy gates who may enroll: "open" admits any key holder (dev/demo — the
+	// quotas below are the only brake) and "token" additionally demands a valid
+	// enrollment token in the request body.
+	Policy string `yaml:"policy" json:"policy"` // open | token
+	// Tokens are the accepted enrollment tokens for policy "token", each a
+	// hex(sha256(token)) or a secret reference — the same never-store-plaintext
+	// discipline as bearer credentials. Static and shared: rotate by config
+	// change; single-use minted codes are a planned refinement.
+	Tokens []string `yaml:"tokens" json:"tokens"`
+	// MaxPrincipals hard-caps the enrolled set (default 1000) — the backstop
+	// that bounds meta-store growth and policy size under abuse.
+	MaxPrincipals int `yaml:"max_principals" json:"max_principals"`
+	// RatePerIP is the sustained enrollment rate allowed per remote IP in
+	// requests/second (token bucket, burst 3; default 0.1 ≈ six per minute).
+	RatePerIP float64 `yaml:"rate_per_ip" json:"rate_per_ip"`
+	// Grants is the template applied to every enrollee — deliberately the ONLY
+	// grants an enrolled principal can hold, re-applied from config at startup
+	// (the template, not the meta store, is the authorization truth).
+	Grants []EnrollGrant `yaml:"grants" json:"grants"`
+}
+
+// EnrollGrant is one templated grant: a database name and a capability level.
+type EnrollGrant struct {
+	DB    string `yaml:"db" json:"db"`
+	Level string `yaml:"level" json:"level"` // read-only | read-write
+}
+
+// SessionTokens enables minting short-lived bearer tokens at POST /_auth/session:
+// a request authenticated by any other credential method exchanges it for a
+// bounded token (verified by the `session` listener auth method), so a client
+// that can't hold a long-lived secret — a browser, a short-lived job — carries a
+// revocable, expiring credential instead. Tokens are signed with a random
+// per-process key (like challenges and batons): a restart invalidates them and
+// clients simply re-mint.
+//
+// Two timers shape a token's life. IdleTTL is the sliding window: each issued
+// token is valid this long. When MaxTTL is 0 (the default) tokens are strictly
+// non-renewable — they die at IdleTTL, and a leaked one can't outlive it. When
+// MaxTTL > 0 tokens become renewable ("extend on use"): an active session slides
+// forward — transparently, via an `X-Quicsql-Session` response header the client
+// adopts, or explicitly via PUT /_auth/session — but never past MaxTTL from the
+// first mint, so a renewable token's whole chain is still bounded. Pick MaxTTL to
+// bound a leaked token's blast radius; revocation (DELETE) still cuts it instantly.
+type SessionTokens struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// IdleTTL bounds a single issued token's life and is the amount each renewal
+	// grants (default 15m). Keep it short — an idle session lapses after this.
+	IdleTTL time.Duration `yaml:"idle_ttl" json:"idle_ttl"`
+	// MaxTTL is the absolute ceiling from the first mint. 0 = non-renewable (a
+	// token dies at IdleTTL). > 0 = renewable up to this. Must be ≥ IdleTTL.
+	MaxTTL time.Duration `yaml:"max_ttl" json:"max_ttl"`
 }
 
 // CORS configures cross-origin resource sharing for browser-based clients. Off

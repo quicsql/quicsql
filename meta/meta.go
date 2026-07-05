@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS audit (
 	action    TEXT NOT NULL,
 	db        TEXT NOT NULL,
 	detail    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS enrolled (
+	name       TEXT PRIMARY KEY,    -- server-assigned principal name (u_…)
+	key        TEXT NOT NULL UNIQUE, -- canonical ssh-ed25519 authorized-keys line
+	created_at INTEGER NOT NULL      -- unix seconds
 );`
 
 // Store is the open meta store handle.
@@ -130,6 +135,52 @@ func (s *Store) Delete(name string) error {
 		return fmt.Errorf("meta: delete %q: %w", name, err)
 	}
 	return nil
+}
+
+// Enrolled is one runtime-enrolled principal: a server-assigned name bound to
+// an ed25519 public key.
+type Enrolled struct {
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// EnrolledList returns every enrolled principal, oldest first.
+func (s *Store) EnrolledList() ([]Enrolled, error) {
+	rows, err := s.db.Query(`SELECT name, key, created_at FROM enrolled ORDER BY created_at, name`)
+	if err != nil {
+		return nil, fmt.Errorf("meta: list enrolled: %w", err)
+	}
+	defer rows.Close()
+	var out []Enrolled
+	for rows.Next() {
+		var e Enrolled
+		if err := rows.Scan(&e.Name, &e.Key, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("meta: scan enrolled: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// PutEnrolled records one enrolled principal. The name and key are both unique;
+// re-enrolling an existing key is the caller's idempotency path, not an upsert.
+func (s *Store) PutEnrolled(name, key string) error {
+	if _, err := s.db.Exec(`INSERT INTO enrolled(name, key, created_at) VALUES(?,?,?)`,
+		name, key, time.Now().Unix()); err != nil {
+		return fmt.Errorf("meta: enroll %q: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteEnrolled forgets an enrolled principal, reporting whether it existed.
+func (s *Store) DeleteEnrolled(name string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM enrolled WHERE name = ?`, name)
+	if err != nil {
+		return false, fmt.Errorf("meta: delete enrolled %q: %w", name, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // Audit appends one admin-action record. Best-effort: a failure is logged, not

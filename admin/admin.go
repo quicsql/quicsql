@@ -10,6 +10,7 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -40,8 +41,20 @@ type Handler struct {
 	admins   map[string]bool // server-admin principal names
 	started  time.Time
 	log      *slog.Logger
+	enroll   Enrollments  // runtime-enrolled principal management (may be nil)
 	feedReg  FeedRegistry // change-feed registration for runtime create/detach (may be nil)
 }
+
+// Enrollments is the enrolled-principal management surface the enrollment
+// service provides; nil when enrollment is disabled.
+type Enrollments interface {
+	List() ([]meta.Enrolled, error)
+	Delete(name string) (bool, error)
+}
+
+// SetEnrollments wires the enrollment service into the /_admin/principals
+// routes. Called once during serverd assembly.
+func (h *Handler) SetEnrollments(e Enrollments) { h.enroll = e }
 
 // FeedRegistry is the change-feed broker surface the control plane drives:
 // runtime-created databases become observable, detached ones stop.
@@ -89,9 +102,77 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSessions(w, r)
 	case "/kill":
 		h.handleKill(w, r)
+	case "/principals":
+		h.handlePrincipals(w, r)
+	case "/principals/delete":
+		h.handlePrincipalDelete(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "unknown admin endpoint")
 	}
+}
+
+// handlePrincipals lists the runtime-enrolled principals. Server-admin only —
+// per-database admin grants don't extend to identity management.
+func (h *Handler) handlePrincipals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+	if !h.isServerAdmin(r) {
+		h.audit(r, "principals.denied", "", "")
+		writeErr(w, http.StatusForbidden, "server admin required")
+		return
+	}
+	if h.enroll == nil {
+		writeErr(w, http.StatusNotFound, "enrollment is not enabled")
+		return
+	}
+	list, err := h.enroll.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if list == nil {
+		list = []meta.Enrolled{}
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"principals": list})
+}
+
+// handlePrincipalDelete revokes one enrolled principal (meta store, keyring,
+// and grants together).
+func (h *Handler) handlePrincipalDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	if !h.isServerAdmin(r) {
+		h.audit(r, "principals.delete.denied", "", "")
+		writeErr(w, http.StatusForbidden, "server admin required")
+		return
+	}
+	if h.enroll == nil {
+		writeErr(w, http.StatusNotFound, "enrollment is not enabled")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil || req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "body must be {\"name\": \"u_…\"}")
+		return
+	}
+	existed, err := h.enroll.Delete(req.Name)
+	if err != nil {
+		h.audit(r, "principals.delete.failed", "", req.Name)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !existed {
+		writeErr(w, http.StatusNotFound, "no such enrolled principal")
+		return
+	}
+	h.audit(r, "principals.delete", "", req.Name)
+	httpjson.Write(w, http.StatusOK, map[string]any{"deleted": req.Name})
 }
 
 // isServerAdmin reports whether the request's principal is a configured

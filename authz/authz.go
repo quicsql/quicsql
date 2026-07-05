@@ -126,6 +126,17 @@ func (p *Policy) Revoke(db string) {
 	delete(p.grants, db)
 }
 
+// RevokePrincipal drops principal's grants on every database — the teardown half
+// of a runtime-enrolled principal, so a later enrollee that hashes to the same
+// name (or an operator reusing it) cannot inherit the old grants.
+func (p *Policy) RevokePrincipal(principal string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, m := range p.grants {
+		delete(m, principal)
+	}
+}
+
 // Level returns the effective capability of pr on db.
 func (p *Policy) Level(pr *Principal, db string) Level {
 	if p.open {

@@ -7,7 +7,11 @@
 // Methods: no-auth (anonymous), Unix-socket peer credentials, bearer token,
 // HTTP-basic password, mTLS client certificate, and an ed25519
 // challenge/response reusing crypto/keyring's signer verification — so the same
-// key that opens a vault can be the network principal.
+// key that opens a vault can be the network principal. Optionally, any of those
+// credentials can be exchanged at POST /_auth/session for a short-lived,
+// revocable session token (the `session` listener method), so a client that
+// shouldn't hold a long-lived secret — a browser tab, a batch job — carries a
+// bounded one instead.
 package auth
 
 import (
@@ -16,12 +20,15 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -38,6 +45,8 @@ import (
 // concurrent use.
 type Authenticator struct {
 	challenger *challenger
+	sessions   *sessionMinter // nil unless auth.session.enabled
+	enroll     http.Handler   // nil unless auth.enroll.enabled (set by serverd wiring)
 	log        *slog.Logger
 
 	bearer   map[string]string       // hex(sha256(token)) → principal name
@@ -46,6 +55,12 @@ type Authenticator struct {
 	mtlsSPKI map[string]string       // hex(sha256(SPKI)) → principal name
 	keyring  map[string]keyringCred  // canonical ssh-ed25519 key → credential
 	peercred map[uint32]string       // uid → principal name
+
+	// dynKeyring holds runtime-enrolled ed25519 identities. Unlike the static
+	// maps (read-only after New), it mutates while requests read it, so it has
+	// its own lock. Static config always wins a canonical-key collision.
+	dynMu      sync.RWMutex
+	dynKeyring map[string]keyringCred
 
 	dummyHash []byte // a throwaway bcrypt hash, compared on unknown users to level password timing
 }
@@ -70,13 +85,19 @@ func New(cfg *config.Config, sec secret.Resolver, log *slog.Logger) (*Authentica
 	}
 	a := &Authenticator{
 		challenger: ch, log: log,
-		bearer:    map[string]string{},
-		password:  map[string]passwordCred{},
-		mtlsCN:    map[string]string{},
-		mtlsSPKI:  map[string]string{},
-		keyring:   map[string]keyringCred{},
-		peercred:  map[uint32]string{},
-		dummyHash: dummy,
+		bearer:     map[string]string{},
+		password:   map[string]passwordCred{},
+		mtlsCN:     map[string]string{},
+		mtlsSPKI:   map[string]string{},
+		keyring:    map[string]keyringCred{},
+		peercred:   map[uint32]string{},
+		dynKeyring: map[string]keyringCred{},
+		dummyHash:  dummy,
+	}
+	if cfg.Auth.Session.Enabled {
+		if a.sessions, err = newSessionMinter(cfg.Auth.Session.IdleTTL, cfg.Auth.Session.MaxTTL); err != nil {
+			return nil, err
+		}
 	}
 	for _, pc := range cfg.Auth.Principals {
 		for _, mm := range pc.Methods {
@@ -229,8 +250,9 @@ type Middleware struct {
 }
 
 // Wrap returns next wrapped with authentication. /_auth/challenge (the
-// challenge/response nonce endpoint) and /_health are public; everything else
-// authenticates and attaches the principal.
+// challenge/response nonce endpoint) and /_health are public; /_auth/session
+// (mint/revoke a session token) authenticates inside its own handler; everything
+// else authenticates and attaches the principal.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -238,6 +260,17 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			// The challenge/response nonce endpoint, served only where the listener
 			// actually accepts keyring auth.
 			m.serveChallenge(w, r)
+			return
+		case r.URL.Path == "/_auth/session" && m.accepted["session"] && m.a.sessions != nil:
+			// The session mint/revoke endpoint, served only where the listener
+			// actually accepts the tokens it issues.
+			m.serveSession(w, r)
+			return
+		case r.URL.Path == "/_auth/enroll" && m.accepted["keyring"] && m.a.enroll != nil:
+			// Enrollment lives where keyring auth does: an enrolled key will
+			// authenticate via the keyring method, so only keyring listeners
+			// expose registration. The handler does its own possession proof.
+			m.a.enroll.ServeHTTP(w, r)
 			return
 		case r.URL.Path == "/_health":
 			next.ServeHTTP(w, r.WithContext(authz.NewContext(r.Context(), authz.Anonymous)))
@@ -248,19 +281,42 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			m.deny(w, err)
 			return
 		}
+		// Transparent "extend on use": if the caller authenticated with a
+		// renewable session token that's past the halfway point of its idle
+		// window, hand back a freshly-extended one (capped at max_ttl) in a
+		// response header. The client adopts it, so an active session slides
+		// forward without re-authenticating; an idle one still lapses at idle_ttl.
+		if p.Method == "session" && m.a.sessions != nil && m.a.sessions.renewable() {
+			if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+				if nt, ne, ok := m.a.sessions.maybeRefresh(strings.TrimSpace(tok)); ok {
+					w.Header().Set("X-Quicsql-Session", nt)
+					w.Header().Set("X-Quicsql-Session-Expires", ne.UTC().Format(time.RFC3339))
+				}
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(authz.NewContext(r.Context(), p)))
 	})
 }
 
 // hardMethods are tried in priority order; each, when a credential is present,
 // either authenticates or fails the request (a present-but-invalid credential is
-// never silently downgraded to anonymous). peercred is "soft" — an unmapped uid
-// simply falls through — and `none` is the terminal anonymous fallback.
-var hardMethods = []string{"mtls", "keyring", "bearer", "password"}
+// never silently downgraded to anonymous). session precedes bearer because both
+// read `Authorization: Bearer` — the qs_ prefix routes a token to exactly one of
+// them. peercred is "soft" — an unmapped uid simply falls through — and `none`
+// is the terminal anonymous fallback.
+var hardMethods = []string{"mtls", "keyring", "session", "bearer", "password"}
 
 func (m *Middleware) authenticate(r *http.Request) (*authz.Principal, error) {
+	return m.authenticateFor(r, false)
+}
+
+// authenticateFor resolves the request to a principal. skipSession excludes the
+// session method — the mint path uses it so a session token can never mint its
+// successor (a leaked token then expires with its TTL instead of living forever
+// through self-renewal).
+func (m *Middleware) authenticateFor(r *http.Request, skipSession bool) (*authz.Principal, error) {
 	for _, mth := range hardMethods {
-		if !m.accepted[mth] {
+		if !m.accepted[mth] || (skipSession && mth == "session") {
 			continue
 		}
 		p, present, err := m.a.try(mth, r)
@@ -287,6 +343,8 @@ func (a *Authenticator) try(method string, r *http.Request) (*authz.Principal, b
 		return a.tryMTLS(r)
 	case "keyring":
 		return a.tryKeyring(r)
+	case "session":
+		return a.trySession(r)
 	case "bearer":
 		return a.tryBearer(r)
 	case "password":
@@ -317,6 +375,29 @@ func (a *Authenticator) tryBearer(r *http.Request) (*authz.Principal, bool, erro
 		return nil, true, errInvalidCredential
 	}
 	return &authz.Principal{Name: name, Method: "bearer"}, true, nil
+}
+
+// trySession claims qs_-prefixed Authorization bearer values; anything else is
+// "not present" so a static bearer token on the same listener still reaches
+// tryBearer. A present-but-invalid session token is decisive (401), like every
+// hard method.
+func (a *Authenticator) trySession(r *http.Request) (*authz.Principal, bool, error) {
+	if a.sessions == nil {
+		return nil, false, nil
+	}
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return nil, false, nil
+	}
+	tok = strings.TrimSpace(tok)
+	if !strings.HasPrefix(tok, sessionPrefix) {
+		return nil, false, nil
+	}
+	name, err := a.sessions.verify(tok)
+	if err != nil {
+		return nil, true, errInvalidCredential
+	}
+	return &authz.Principal{Name: name, Method: "session"}, true, nil
 }
 
 func (a *Authenticator) tryPassword(r *http.Request) (*authz.Principal, bool, error) {
@@ -355,6 +436,71 @@ func (a *Authenticator) tryMTLS(r *http.Request) (*authz.Principal, bool, error)
 	return nil, false, nil
 }
 
+// lookupKeyring resolves a canonical key line to a credential: static config
+// first (so an operator identity can never be shadowed by an enrollee), then
+// the runtime-enrolled set.
+func (a *Authenticator) lookupKeyring(canon string) (keyringCred, bool) {
+	if cred, ok := a.keyring[canon]; ok {
+		return cred, true
+	}
+	a.dynMu.RLock()
+	cred, ok := a.dynKeyring[canon]
+	a.dynMu.RUnlock()
+	return cred, ok
+}
+
+// AddKeyring admits a runtime-enrolled ed25519 identity (the enrollment
+// service's registration path). A canonical key already present statically is
+// left alone — config wins.
+func (a *Authenticator) AddKeyring(canon string, pub ed25519.PublicKey, name string) {
+	if _, exists := a.keyring[canon]; exists {
+		return
+	}
+	a.dynMu.Lock()
+	a.dynKeyring[canon] = keyringCred{pub: pub, name: name}
+	a.dynMu.Unlock()
+}
+
+// RemoveKeyringName revokes every runtime-enrolled key bound to name.
+func (a *Authenticator) RemoveKeyringName(name string) {
+	a.dynMu.Lock()
+	for canon, cred := range a.dynKeyring {
+		if cred.name == name {
+			delete(a.dynKeyring, canon)
+		}
+	}
+	a.dynMu.Unlock()
+}
+
+// VerifyPresented checks the keyring header triple against the key PRESENTED in
+// the request itself (not the roster): a valid, unexpired challenge and a
+// signature over this request's binding by that key. It is the
+// possession-proof primitive the enrollment endpoint uses — the caller proves
+// it holds the private half of the key it is asking to register.
+func (a *Authenticator) VerifyPresented(r *http.Request) (canon string, pub ed25519.PublicKey, err error) {
+	sig := r.Header.Get("X-Quicsql-Signature")
+	keyLine, chal := r.Header.Get("X-Quicsql-Key"), r.Header.Get("X-Quicsql-Challenge")
+	if sig == "" || keyLine == "" || chal == "" || !a.challenger.valid(chal) {
+		return "", nil, errInvalidCredential
+	}
+	canon, pub, _, err = parseEd25519AuthorizedKey([]byte(keyLine))
+	if err != nil {
+		return "", nil, errInvalidCredential
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		return "", nil, errInvalidCredential
+	}
+	if !keyring.VerifyState([]ed25519.PublicKey{pub}, wire.KeyringSigningInput(chal, r.Method, r.URL.Path, r.URL.RawQuery), sigBytes) {
+		return "", nil, errInvalidCredential
+	}
+	return canon, pub, nil
+}
+
+// SetEnrollHandler mounts the enrollment endpoint (nil leaves it absent). Set
+// once during serverd assembly, before any listener serves.
+func (a *Authenticator) SetEnrollHandler(h http.Handler) { a.enroll = h }
+
 func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, error) {
 	sig := r.Header.Get("X-Quicsql-Signature")
 	if sig == "" {
@@ -368,7 +514,7 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	if err != nil {
 		return nil, true, errInvalidCredential
 	}
-	cred, ok := a.keyring[canon]
+	cred, ok := a.lookupKeyring(canon)
 	if !ok {
 		return nil, true, errInvalidCredential
 	}
@@ -416,6 +562,101 @@ func (m *Middleware) serveChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, map[string]string{"challenge": c})
+}
+
+// serveSession mints (POST), renews (PUT), or revokes (DELETE) a session token.
+//
+// Minting exchanges a NON-session credential — the request authenticates with
+// the session method excluded, so a token can't mint its successor — for a fresh
+// idle_ttl-bounded token. The anonymous principal is refused: a caller that
+// never proved an identity has nothing for a token to represent.
+//
+// Renewing (only when max_ttl > 0) presents a still-valid renewable token and
+// gets a fresh one whose idle window is pushed forward, never past the original
+// hard deadline. It is the explicit counterpart to the transparent per-request
+// refresh header; a client can drive its own sliding session with it.
+//
+// Revoking requires presenting the (still-valid) token itself in Authorization;
+// it is self-service logout, not an admin kill switch.
+func (m *Middleware) serveSession(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		p, err := m.authenticateFor(r, true)
+		if err != nil {
+			m.deny(w, err)
+			return
+		}
+		if p.IsAnonymous() {
+			m.deny(w, errUnauthenticated)
+			return
+		}
+		tok, exp, hardExp, err := m.a.sessions.mint(p.Name)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		m.log.Debug("quicsql/auth: session token minted", "listener", m.listener, "principal", p.Name, "via", p.Method)
+		writeSessionToken(w, tok, p.Name, exp, hardExp)
+	case http.MethodPut:
+		tok, ok := m.sessionTokenFromHeader(r)
+		if !ok {
+			m.deny(w, errUnauthenticated)
+			return
+		}
+		nt, exp, hardExp, err := m.a.sessions.renew(tok)
+		if err != nil {
+			if errors.Is(err, errNotRenewable) {
+				writeJSONError(w, http.StatusConflict, "session tokens are not renewable (set auth.session.max_ttl)")
+				return
+			}
+			m.deny(w, err)
+			return
+		}
+		writeSessionToken(w, nt, "", exp, hardExp)
+	case http.MethodDelete:
+		tok, ok := m.sessionTokenFromHeader(r)
+		if !ok {
+			m.deny(w, errUnauthenticated)
+			return
+		}
+		if err := m.a.sessions.revoke(tok); err != nil {
+			m.deny(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "use POST (mint), PUT (renew), or DELETE (revoke)")
+	}
+}
+
+// sessionTokenFromHeader extracts a qs_-prefixed session token from the
+// Authorization header, or reports ok=false.
+func (m *Middleware) sessionTokenFromHeader(r *http.Request) (string, bool) {
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return "", false
+	}
+	tok = strings.TrimSpace(tok)
+	if !strings.HasPrefix(tok, sessionPrefix) {
+		return "", false
+	}
+	return tok, true
+}
+
+// writeSessionToken writes the mint/renew response, including max_expires_at (the
+// absolute deadline) for a renewable token so the client knows the sliding cap.
+func writeSessionToken(w http.ResponseWriter, tok, principal string, exp, hardExp time.Time) {
+	body := map[string]any{
+		"token":      tok,
+		"expires_at": exp.UTC().Format(time.RFC3339),
+	}
+	if principal != "" {
+		body["principal"] = principal
+	}
+	if !hardExp.IsZero() {
+		body["max_expires_at"] = hardExp.UTC().Format(time.RFC3339)
+	}
+	httpjson.Write(w, http.StatusOK, body)
 }
 
 func (m *Middleware) deny(w http.ResponseWriter, err error) {

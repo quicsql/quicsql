@@ -94,6 +94,27 @@ func TestValidateAuth(t *testing.T) {
 				Grants: []Grant{{Principal: "app", Level: "read-write"}, {Principal: "*", Level: "read-only"}}}},
 			Listeners: []Listener{{Name: "l", Transport: "unix", Auth: []string{"peercred", "none"}}},
 		}, false},
+		{"session listener without enable", &Config{Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"session"}}}}, true},
+		{"session listener enabled", &Config{
+			Auth:      Auth{Session: SessionTokens{Enabled: true, IdleTTL: 900000000000}},
+			Listeners: []Listener{{Name: "l", Transport: "h1", Auth: []string{"session"}}}}, false},
+		{"session negative idle_ttl", &Config{Auth: Auth{Session: SessionTokens{Enabled: true, IdleTTL: -1}}}, true},
+		{"session negative max_ttl", &Config{Auth: Auth{Session: SessionTokens{Enabled: true, MaxTTL: -1}}}, true},
+		{"session max_ttl below idle_ttl", &Config{Auth: Auth{Session: SessionTokens{Enabled: true, IdleTTL: 3600000000000, MaxTTL: 60000000000}}}, true},
+		{"session renewable ok", &Config{Auth: Auth{Session: SessionTokens{Enabled: true, IdleTTL: 900000000000, MaxTTL: 28800000000000}}}, false},
+		{"cors bad origin", &Config{CORS: CORS{Enabled: true, Origins: []string{"app.example.com"}}}, true},
+		{"cors null origin", &Config{CORS: CORS{Enabled: true, Origins: []string{"null"}}}, true},
+		{"cors wildcard subdomain", &Config{CORS: CORS{Enabled: true, Origins: []string{"https://*.example.com"}}}, true},
+		{"cors origin with path", &Config{CORS: CORS{Enabled: true, Origins: []string{"https://app.example.com/x"}}}, true},
+		{"cors wildcard needs auth", &Config{CORS: CORS{Enabled: true, Origins: []string{"*"}}}, true},
+		{"cors wildcard with a grant ok", &Config{
+			CORS:      CORS{Enabled: true, Origins: []string{"*"}},
+			Databases: []Database{{Name: "d", Backend: "file", Mode: "rw", Grants: []Grant{{Principal: "*", Level: "read-only"}}}}}, false},
+		{"cors wildcard with a principal ok", &Config{
+			CORS: CORS{Enabled: true, Origins: []string{"*"}},
+			Auth: Auth{Principals: []Principal{{Name: "app", Methods: []map[string]any{{"bearer": map[string]any{"token_hash": "abc"}}}}}}}, false},
+		{"cors explicit origins no auth ok", &Config{CORS: CORS{Enabled: true, Origins: []string{"https://app.example.com:8443"}}}, false},
+		{"cors disabled skips checks", &Config{CORS: CORS{Origins: []string{"garbage"}}}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

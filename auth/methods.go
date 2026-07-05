@@ -85,3 +85,16 @@ func parseEd25519AuthorizedKey(line []byte) (canonical string, pub ed25519.Publi
 	canonical = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
 	return canonical, edpub, comment, nil
 }
+
+// ResolveParam resolves a config parameter that may be a secret reference,
+// with resolve's exact semantics — exported for sibling packages (the
+// enrollment service) that follow the same credential discipline.
+func ResolveParam(sec secret.Resolver, v string) (string, error) { return resolve(sec, v) }
+
+// ParseEd25519PublicKey parses an ssh-ed25519 authorized-keys line into its
+// public key — exported for the enrollment service, which persists canonical
+// key lines and re-admits them at startup.
+func ParseEd25519PublicKey(line string) (ed25519.PublicKey, error) {
+	_, pub, _, err := parseEd25519AuthorizedKey([]byte(line))
+	return pub, err
+}

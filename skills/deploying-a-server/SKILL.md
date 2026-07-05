@@ -33,6 +33,8 @@ listeners:
   - { name: unix, transport: unix, address: /run/quicsql/sql.sock, auth: [peercred, none] }
 ```
 
+Serving **browser apps**? Add a top-level `cors:` block (`enabled: true`, `origins: [...]` or `"*"`) — without it cross-origin pages can't call the server at all — and consider `auth.session` tokens so pages hold only short-lived credentials. Both in the `auth-and-tls` skill.
+
 ## Composing programmatically (serverd.Run)
 
 Use this when a config file can't express what you need — most often a **server-side custom SQL function** (registered before the server opens any connection), or a custom extension set. This is how server-side functions/VFS/extensions reach remote clients: the server runs them; clients call them via SQL.

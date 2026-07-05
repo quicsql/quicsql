@@ -59,7 +59,7 @@ func UsesPath(backend string) bool { return pathBackends[backend] }
 // principal may define a credential for.
 var (
 	ListenerAuthMethods = map[string]bool{
-		"none": true, "peercred": true, "bearer": true, "password": true, "mtls": true, "keyring": true,
+		"none": true, "peercred": true, "bearer": true, "password": true, "mtls": true, "keyring": true, "session": true,
 	}
 	KnownAuthMethods = map[string]bool{
 		"peercred": true, "bearer": true, "password": true, "mtls": true, "keyring": true,
@@ -195,6 +195,20 @@ func (c *Config) applyDefaults() {
 	for i := range c.Databases {
 		if c.Databases[i].Mode == "" {
 			c.Databases[i].Mode = "rwc"
+		}
+	}
+	if c.Auth.Session.Enabled && c.Auth.Session.IdleTTL == 0 {
+		c.Auth.Session.IdleTTL = 15 * time.Minute
+	}
+	if c.Auth.Enroll.Enabled {
+		if c.Auth.Enroll.Policy == "" {
+			c.Auth.Enroll.Policy = "token" // fail-safe default: open enrollment is opt-in
+		}
+		if c.Auth.Enroll.MaxPrincipals == 0 {
+			c.Auth.Enroll.MaxPrincipals = 1000
+		}
+		if c.Auth.Enroll.RatePerIP == 0 {
+			c.Auth.Enroll.RatePerIP = 0.1
 		}
 	}
 	if c.CORS.Enabled {
@@ -392,7 +406,22 @@ func (c *Config) validateAuth() error {
 			if m == "mtls" && lc.TLS == "" {
 				return fmt.Errorf("config: listener %q: mtls auth requires a tls profile (with client_ca)", lc.Name)
 			}
+			if m == "session" && !c.Auth.Session.Enabled {
+				return fmt.Errorf("config: listener %q accepts session auth but auth.session.enabled is false", lc.Name)
+			}
 		}
+	}
+	if c.Auth.Session.IdleTTL < 0 || c.Auth.Session.MaxTTL < 0 {
+		return fmt.Errorf("config: auth.session idle_ttl and max_ttl must not be negative")
+	}
+	if c.Auth.Session.MaxTTL > 0 && c.Auth.Session.MaxTTL < c.Auth.Session.IdleTTL {
+		return fmt.Errorf("config: auth.session.max_ttl (%s) must be ≥ idle_ttl (%s)", c.Auth.Session.MaxTTL, c.Auth.Session.IdleTTL)
+	}
+	if c.Auth.Session.Enabled && c.Auth.Session.IdleTTL > 24*time.Hour {
+		c.warnings = append(c.warnings, "config: auth.session.idle_ttl exceeds 24h — the idle window is meant to be short (use max_ttl for a long-lived sliding session); prefer minutes to hours")
+	}
+	if err := c.validateEnroll(); err != nil {
+		return err
 	}
 
 	principals := map[string]bool{}
@@ -435,6 +464,47 @@ func (c *Config) validateAuth() error {
 	for _, a := range c.ControlPlane.Admins {
 		if !principals[a] {
 			return fmt.Errorf("config: control_plane admin %q is not a configured principal", a)
+		}
+	}
+	return nil
+}
+
+// validateEnroll checks the auth.enroll block. Enrollment is refused outright on
+// a server without explicit auth or without the control plane: the first dynamic
+// principal must never flip an open server into enforcement mid-flight, and an
+// enrolled set with no /_admin oversight (and no meta store to live in) would be
+// unmanageable by construction.
+func (c *Config) validateEnroll() error {
+	e := c.Auth.Enroll
+	if !e.Enabled {
+		return nil
+	}
+	if !c.AuthConfigured() {
+		return fmt.Errorf("config: auth.enroll.enabled requires explicit auth (at least one principal or grant) — enrollment must not flip an open-mode server")
+	}
+	if !c.ControlPlane.Enabled {
+		return fmt.Errorf("config: auth.enroll.enabled requires control_plane.enabled (the meta store holds the enrolled set; /_admin/principals manages it)")
+	}
+	switch e.Policy {
+	case "open", "token":
+	default:
+		return fmt.Errorf("config: auth.enroll.policy %q invalid (want open|token)", e.Policy)
+	}
+	if e.Policy == "token" && len(e.Tokens) == 0 {
+		return fmt.Errorf("config: auth.enroll.policy token requires at least one auth.enroll.tokens entry")
+	}
+	if e.MaxPrincipals < 0 || e.RatePerIP < 0 {
+		return fmt.Errorf("config: auth.enroll quotas must not be negative")
+	}
+	if len(e.Grants) == 0 {
+		c.warnings = append(c.warnings, "config: auth.enroll.grants is empty — enrolled principals will authenticate but hold no access")
+	}
+	for _, g := range e.Grants {
+		if !ValidDBName(g.DB) {
+			return fmt.Errorf("config: auth.enroll.grants names invalid database %q", g.DB)
+		}
+		if g.Level != "read-only" && g.Level != "read-write" {
+			return fmt.Errorf("config: auth.enroll.grants level %q invalid (want read-only|read-write — never admin for self-enrolled principals)", g.Level)
 		}
 	}
 	return nil

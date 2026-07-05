@@ -45,6 +45,7 @@ import (
 	"quicsql.net/backend"
 	"quicsql.net/config"
 	"quicsql.net/engine"
+	"quicsql.net/enroll"
 	"quicsql.net/feed"
 	"quicsql.net/httpapi"
 	"quicsql.net/limits"
@@ -216,6 +217,29 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		adminH := admin.New(reg, policy, store, sessions, sec, metrics, cfg.Server.DataDir, cfg.ControlPlane.Admins, started, log)
 		if broker != nil {
 			adminH.SetFeed(broker)
+		}
+		if cfg.Auth.Enroll.Enabled {
+			// Config validation guarantees the prerequisites here: explicit auth
+			// (never open mode) and the control plane (so store is non-nil).
+			enr, err := enroll.New(cfg.Auth.Enroll, store, authn, policy, sec, log)
+			if err != nil {
+				stopReaper()
+				sessions.CloseAll()
+				_ = reg.Close()
+				closeStore(store, log)
+				return nil, fmt.Errorf("init enrollment: %w", err)
+			}
+			n, err := enr.LoadExisting()
+			if err != nil {
+				stopReaper()
+				sessions.CloseAll()
+				_ = reg.Close()
+				closeStore(store, log)
+				return nil, fmt.Errorf("load enrolled principals: %w", err)
+			}
+			authn.SetEnrollHandler(enr)
+			adminH.SetEnrollments(enr)
+			log.Info("quicsql: enrollment enabled at /_auth/enroll", "policy", cfg.Auth.Enroll.Policy, "enrolled", n, "max", cfg.Auth.Enroll.MaxPrincipals)
 		}
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
 		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))

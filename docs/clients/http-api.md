@@ -102,12 +102,16 @@ spanning round trips — `BEGIN`, decisions in application code, `COMMIT` — us
 the [Hrana pipeline](../hrana.md) (what the libSQL SDKs use), or the SDK for
 your language which wraps it.
 
-Beyond `/query`, each database also serves `/export` (a full database
-snapshot), `/changeset/*` (SQLite session changesets), and `/blob/*` (streamed
-large objects) — specified [below](#beyond-query). Server-scoped endpoints live
-elsewhere: `/_health` (unauthenticated liveness) is in the
-[auth guide](../auth-and-authz.md), and `/_metrics` (Prometheus) and `/_admin/*`
-(the control plane) are in [administration](../administration.md).
+Beyond `/query`, each database also serves `/export` (a full in-memory database
+snapshot), `/backup` (a streaming online backup with no size ceiling),
+`/changeset/*` (SQLite session changesets), and `/blob/*` (streamed large
+objects) — specified [below](#beyond-query). Server-scoped endpoints live
+elsewhere: `/_health` (unauthenticated liveness), `/_auth/challenge` (the
+keyring nonce), and `/_auth/session` (mint/renew/revoke a short-lived session
+token) are in the [auth guide](../auth-and-authz.md), and `/_metrics`
+(Prometheus) and `/_admin/*` (the control plane) are in
+[administration](../administration.md). Browser callers additionally need the
+server's `cors:` block enabled — also covered in the auth guide.
 
 ## Beyond `/query`
 

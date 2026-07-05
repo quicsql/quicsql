@@ -116,6 +116,45 @@ const { columns, rows } = await res.json();
 Full request/response shapes — including `statements` batches and how errors
 come back — are in the [HTTP API reference](http-api.md).
 
+## Browsers
+
+Two server-side settings make quicSQL callable from a web page; both are off by default:
+
+```yaml
+cors:
+  enabled: true
+  origins: ["https://app.example.com"]   # or ["*"]
+auth:
+  session: { enabled: true, idle_ttl: 15m, max_ttl: 8h }   # max_ttl ⇒ renewable sliding sessions
+listeners:
+  - { name: h2, transport: h2, address: 0.0.0.0:7777, tls: main, auth: [password, session] }
+```
+
+`cors:` answers the browser's preflight (without it, every cross-origin call fails before it starts — see [auth & authz](../auth-and-authz.md)). Session tokens keep a long-lived secret out of the page: sign in once, hold only a short-lived revocable token.
+
+```js
+// Sign in once: exchange a real credential for a short-lived token.
+const res = await fetch("https://db.example.com:7777/_auth/session", {
+  method: "POST",
+  headers: { authorization: "Basic " + btoa("analyst:hunter2") },
+});
+const { token, expires_at } = await res.json(); // token starts with "qs_"; keep it in memory, not localStorage
+
+// Then use it with @libsql/client/web, the fetch API, or anything else:
+import { createClient } from "@libsql/client/web";
+const db = createClient({ url: "https://db.example.com:7777/app/", authToken: token });
+
+// Log out (revoke the token server-side):
+await fetch("https://db.example.com:7777/_auth/session", {
+  method: "DELETE",
+  headers: { authorization: `Bearer ${token}` },
+});
+```
+
+When the token expires (401), re-mint and retry — a token deliberately cannot renew itself.
+
+With the server's [`changefeed:`](../change-feed.md) enabled, `@quicsql/client` also streams committed changes live — `db.subscribe({tables, onChange})` — with automatic reconnect and resume. Notes for local development: pages on HTTPS may call `http://localhost`/`127.0.0.1` (browsers treat loopback as secure), but a LAN address needs real TLS, and current Chrome/Firefox show a local-network permission prompt when a public site calls a private address.
+
 ## Runnable versions
 
 [`examples/clients/node-libsql`](https://github.com/quicsql/quicsql/tree/main/examples/clients/node-libsql),

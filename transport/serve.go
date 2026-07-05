@@ -257,7 +257,7 @@ func warnCleartextAuth(log *slog.Logger, lc config.Listener) {
 	}
 	for _, m := range lc.Auth {
 		switch m {
-		case "bearer", "password":
+		case "bearer", "password", "session":
 			log.Warn("quicsql: listener accepts a credential over a cleartext transport — the token/password is exposed on the wire; prefer TLS or a unix socket",
 				"listener", lc.Name, "transport", lc.Transport, "method", m)
 		case "keyring":

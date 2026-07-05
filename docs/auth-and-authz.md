@@ -62,7 +62,7 @@ auth:
 
 Here `tourist` may present *either* a bearer token *or* a client certificate; both resolve to the same identity and therefore the same grants.
 
-### The six methods
+### The seven methods
 
 | Method | The client presents… | The server stores… | Good for |
 | --- | --- | --- | --- |
@@ -72,12 +72,13 @@ Here `tourist` may present *either* a bearer token *or* a client certificate; bo
 | `password` | HTTP Basic `user:password` | a bcrypt hash | humans, `psql`-style tooling |
 | `mtls` | a client TLS certificate | the cert's subject CN, or a hash of its public key | strong service identity, zero shared secrets |
 | `keyring` | an ed25519 signature over a server challenge | an `ssh-ed25519` public key | reusing the same key that unlocks a vault; SSH-style key rosters |
+| `session` | `Authorization: Bearer qs_…` (a token minted at `/_auth/session`) | nothing (self-contained token, HMAC-verified) | browsers, short-lived jobs — a bounded, revocable stand-in for a long-lived credential ([below](#session-tokens-short-lived-revocable-credentials)) |
 
 Two properties are worth internalizing:
 
 **The server never stores your secret in the clear.** For `bearer` it stores only `sha256` of the token; for `password` only a bcrypt hash. You compute the hash once when you write the config (or point it at a secret source) and hand the *raw* token/password to the client. A leaked config does not leak usable credentials. `mtls` and `keyring` are even stronger: they store only public material (a certificate subject or a public key), and the private half never leaves the client.
 
-**A wrong credential is rejected, never downgraded.** If a listener accepts `bearer` and a request arrives *with* a `Bearer` header that does not match, the request is denied — it does **not** silently fall back to anonymous. This is the "hard method" rule: presenting a credential is a claim, and a failed claim is a `401`. The methods are tried in priority order `mtls → keyring → bearer → password`; the first one whose credential is *present* decides the outcome. Two "soft" cases fall through instead of failing: an unmapped Unix `peercred` uid, and a CA-verified client certificate that maps to no principal (so a client with a general-purpose mTLS identity can still authenticate via `bearer`/`keyring` on a listener that accepts them — on an `mtls`-only listener nothing else matches, so it still ends in a `401`). `none` is the terminal fallback that yields the anonymous principal.
+**A wrong credential is rejected, never downgraded.** If a listener accepts `bearer` and a request arrives *with* a `Bearer` header that does not match, the request is denied — it does **not** silently fall back to anonymous. This is the "hard method" rule: presenting a credential is a claim, and a failed claim is a `401`. The methods are tried in priority order `mtls → keyring → session → bearer → password`; the first one whose credential is *present* decides the outcome (`session` and `bearer` share the `Authorization` header — the `qs_` token prefix routes a value to exactly one of them). Two "soft" cases fall through instead of failing: an unmapped Unix `peercred` uid, and a CA-verified client certificate that maps to no principal (so a client with a general-purpose mTLS identity can still authenticate via `bearer`/`keyring` on a listener that accepts them — on an `mtls`-only listener nothing else matches, so it still ends in a `401`). `none` is the terminal fallback that yields the anonymous principal.
 
 ### Per-listener acceptance
 
@@ -119,6 +120,60 @@ client                                             server
 The challenge carries its own expiry and a keyed HMAC, so the server can validate it purely by recomputing the HMAC — it keeps no list of outstanding challenges. The HMAC key is random per process, so a challenge minted before a restart is refused after it (fail-closed). The signature is computed over the challenge **bound to the request's method, path, and raw query string**, so a captured signature cannot be replayed onto a different request — not onto a more privileged method or path, and not onto a different operation target expressed in the query (a signature captured for `?id=42` cannot be re-aimed at `?id=99`, nor a `?store=` swapped underneath it). The challenge's short lifetime further bounds how long even the *identical* request could be replayed. Because the binding is per request — not per challenge — the client still caches and reuses one challenge across a burst of requests, signing each one separately. The client library does the whole dance for you before each request; you just supply the key.
 
 Keep the keyring method on a TLS or Unix-socket listener. The query binding stops cross-target replay, but the request **body is deliberately not signed** — bodies stream (a blob write can be gigabytes), so neither side can pre-hash them. That leaves one residual vector, and only over cleartext: on an `h1`/`h2c` listener an observer sees the signature and can replay it onto the *same* method, path, and query with a *different* body — say a different statement to the same `/app/query` — for as long as the challenge lives, since the challenge is **not single-use**. Over TLS the signature never reaches the wire, so the vector closes. quicSQL therefore does not *forbid* keyring-over-cleartext (an operator may knowingly run it on a trusted network) but **warns loudly at startup** whenever a keyring method is bound to a cleartext listener — read that warning as "move this to TLS or a Unix socket."
+
+### Session tokens: short-lived, revocable credentials
+
+Some clients shouldn't hold a long-lived secret at all — a browser tab (where anything stored is one XSS away from leaking), a batch job, a support script. The `session` method lets such a client trade a *real* credential for a **short-lived, revocable token** once, then carry only the token:
+
+```yaml
+auth:
+  session: { enabled: true, idle_ttl: 15m }   # idle_ttl defaults to 15m; max_ttl 0 ⇒ non-renewable
+listeners:
+  - { name: h2, transport: h2, address: 0.0.0.0:7777, tls: main, auth: [password, keyring, session] }
+```
+
+```
+POST /_auth/session          (authenticated with any OTHER method: password, keyring, bearer, mtls, peercred)
+  → { "token": "qs_…", "expires_at": "2026-07-04T18:00:00Z", "principal": "app" }
+
+…then, on every request:      Authorization: Bearer qs_…
+
+DELETE /_auth/session         (with the token in Authorization) → 204, token revoked
+```
+
+Properties worth knowing:
+
+- **A token is a stand-in, not an upgrade.** It authenticates as the same principal that minted it, with the same grants. The anonymous principal cannot mint one (there is no identity for the token to represent).
+- **A token cannot mint its successor.** The mint path deliberately refuses session-token authentication, so a leaked token dies with its TTL instead of living forever through self-renewal. When it expires, the client re-authenticates with the real credential and mints a new one.
+- **Revocation is self-service.** `DELETE /_auth/session` presenting the token invalidates it immediately — a logout button, or cleanup at the end of a job.
+- **Stateless, like challenges and batons.** The token carries its own expiry and an HMAC under a random per-process key; the server keeps no per-token state except the revocation set. A server restart invalidates every outstanding token — fail-closed, and clients just re-mint.
+- **Optionally sliding ("extend on use").** By default a token dies at `idle_ttl` and cannot be renewed — a leaked one can't outlive it. Set `max_ttl` to make tokens **renewable**: an *active* session slides forward while a still-idle one lapses at `idle_ttl`, but no renewal ever crosses `max_ttl` from the first mint, so the whole chain stays bounded. Two knobs, two timers: `idle_ttl` is the idle window, `max_ttl` is the absolute ceiling (must be ≥ `idle_ttl`). Renewal happens **transparently** — a request whose token is past the halfway point of its idle window gets a freshly-extended token back in an `X-Quicsql-Session` response header, which `@quicsql/client` adopts automatically (fire `onSessionRenewed` to re-persist it) — or **explicitly** via `PUT /_auth/session` (`client.renewSession()`). This is opt-in precisely because it trades some of the "dies at `idle_ttl`" guarantee for convenience: pick `max_ttl` to bound a leaked token's blast radius, and revocation (`DELETE`) still cuts any token instantly.
+- **The endpoint follows the listener.** `/_auth/session` exists only on listeners whose `auth:` list includes `session`, and tokens only authenticate there. Minting on one listener and using the token on another works when both accept `session` — handy for "mint over the Unix socket, use over h2".
+- **It is still a bearer secret.** Anyone holding the token is the principal until expiry or revocation. Serve it over TLS (the cleartext startup warning covers `session` like `bearer`), and keep the TTL short — that bounded lifetime is the whole point.
+- **The `qs_` prefix is reserved.** On a listener accepting both `session` and `bearer`, an `Authorization: Bearer qs_…` value is always routed to the session method. Do not mint a *static* bearer token that begins with `qs_` — it would be treated as a (failed) session token and rejected, never reaching the bearer check. Any other prefix is fine.
+
+### Device enrollment: self-service principals for public apps
+
+A public client — a browser app with no backend, a fleet of devices — can't ship a credential, because anything in a public bundle is public. Enrollment inverts the flow: the client *generates* an ed25519 keypair on first run (in a browser, a non-extractable WebCrypto key) and registers the **public** half at `POST /_auth/enroll`, proving possession by signing a fresh challenge exactly like keyring auth. The server mints a principal with a **server-assigned name** (`u_<key-hash>` — never client-chosen, so nobody enrolls themselves as `admin`) and applies exactly the configured grants template:
+
+```yaml
+control_plane: { enabled: true, admins: [ops] }   # required: the enrolled set lives in the meta store
+auth:
+  enroll:
+    enabled: true
+    policy: token                                  # default; `open` admits any key holder (dev/demo)
+    tokens: ["keys:join_code_hash"]                # hex(sha256(token)) or secret refs, like bearer
+    max_principals: 1000                           # hard cap (default 1000)
+    rate_per_ip: 0.1                               # sustained enrolls/sec per IP, burst 3 (default ≈6/min)
+    grants:
+      - { db: appdb, level: read-write }           # the ONLY grants an enrollee gets; never admin
+listeners:
+  - { name: h2, transport: h2, address: 0.0.0.0:7777, tls: main, auth: [keyring, session] }
+```
+
+The endpoint lives on keyring-accepting listeners (an enrolled key authenticates via `keyring` afterward). The request carries the same `X-Quicsql-*` header triple as keyring auth — key, challenge, signature over the request binding — plus, under `policy: token`, a body of `{"enroll_token": "…"}`. Responses: `200 {"principal": "u_…", "created": true}`; re-enrolling the same key is **idempotent** (`created: false`, same principal — a reinstalled app doesn't multiply identities); `401` for a failed possession proof, `403` for a bad enrollment token, `429` when the per-IP rate or the `max_principals` cap says no. Every outcome, including denials, is audited.
+
+Three deliberate design points. **Enrollment refuses to exist on an open-mode server** — config validation demands explicit auth first, so registering the first dynamic principal can never be the event that flips enforcement on mid-flight. **Config identities always win**: an enrolled key can never shadow an operator-defined principal. **The grants template is the authorization truth** — it is re-applied from config at every startup, so changing the template in YAML re-scopes every enrollee on restart; the meta store only remembers *who* enrolled, never what they may do. Operators manage the enrolled set at [`/_admin/principals`](administration.md) (list, delete — deletion revokes the key and every grant at once).
 
 ### The anonymous principal
 
@@ -328,6 +383,7 @@ A `401` also carries a `WWW-Authenticate: Bearer, Basic realm="quicsql"` header.
 - **Humans and interactive tools:** `password`. Familiar, works with anything that speaks HTTP Basic.
 - **Reusing a vault key as a network identity, or SSH-style key rosters:** `keyring`. The same ed25519 key that unlocks a vault becomes the network principal; a roster file (`authorized_keys`) lets ops manage identities SSH-style, one key per line, the comment naming the principal.
 - **Co-located processes over a Unix socket:** `peercred`. The kernel vouches for the peer's uid; no secret to manage at all.
+- **Browsers and anything that shouldn't hold a durable secret:** `session`. Sign in once with a real credential, mint a short-lived token at `/_auth/session`, keep only the token in the page (plus `cors:` so the browser may call at all).
 
 ## Quick reference
 
@@ -341,9 +397,11 @@ A `401` also carries a `WWW-Authenticate: Bearer, Basic realm="quicsql"` header.
 | `keyring` | `ed25519` | an `ssh-ed25519 …` line; or list many in `auth.authorized_keys` |
 | `peercred` | `uid` | numeric Unix user id; Unix-socket listeners only |
 
+`session` has no per-principal keys — enable it server-wide with `auth.session: { enabled: true, idle_ttl: 15m }` (add `max_ttl` for renewable sliding sessions) and list it in a listener's `auth:`; tokens are minted at `POST /_auth/session` from any other credential, renewed at `PUT /_auth/session`, and revoked at `DELETE /_auth/session`.
+
 **Levels:** `none` (default, no access) · `read-only` · `read-write` · `admin` (per-database admin; server-wide if the principal is in `control_plane.admins`). Effective level = **max(named grant, `*` wildcard grant)**; open mode overrides everything to read-write until you configure any principal or grant.
 
-**Public endpoints (no auth):** `GET /_health`, and `GET /_auth/challenge` on keyring-accepting listeners.
+**Public endpoints (no auth):** `GET /_health`, and `GET /_auth/challenge` on keyring-accepting listeners. (`/_auth/session` exists on session-accepting listeners and `/_auth/enroll` on keyring-accepting listeners when enabled, but both prove identity inside their handlers; CORS preflights, when `cors:` is enabled, are answered pre-auth by design.)
 
 **Secrets:** any hash/key field (`token_hash`, `password_hash`, `ed25519`, vault keys) may be inline or a `<source>:<name>` reference resolved at startup from a `secrets` source, so plaintext never needs to live in the config file. Two source types work today: `env` (reads the named environment variable) and `file` (reads `<dir>/<name>`, contained to `dir` — a `..` or absolute path that escapes is rejected). A third type, `kms`, is **reserved and not yet implemented**: a config may declare it (its `endpoint` field is parsed and held for the future backend), but resolving a `kms:` reference fails at startup with `ErrNotImplemented`. Do not depend on it yet.
 

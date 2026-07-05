@@ -133,6 +133,34 @@ its schedule: the reaper ticks every **15 seconds** (fixed), so an idle session
 with `tx_idle_timeout: 2s` actually lives up to ~17 s. Treat idle timeouts as
 granularity-15s.
 
+## Enrolled principals: list, delete
+
+When [device enrollment](auth-and-authz.md) is enabled, the runtime-enrolled
+principals are managed here (server-admin only — per-database `admin` grants do
+not extend to identity management; both routes 404 when enrollment is off):
+
+```sh
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/principals
+# → {"principals":[{"name":"u_a3f9k2m8p1qxw7bn","key":"ssh-ed25519 AAAA…","created_at":1751666400}]}
+
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/principals/delete \
+  -d '{"name":"u_a3f9k2m8p1qxw7bn"}'
+# → {"deleted":"u_a3f9k2m8p1qxw7bn"}          (404 for an unknown or config-defined name)
+```
+
+Deletion revokes everything at once — the key stops authenticating and every
+templated grant disappears — and is audited (`principals.delete`), as are
+denied and failed attempts. Config-defined principals are not listed and cannot
+be deleted here; they live in YAML.
+
+One caveat if [session tokens](auth-and-authz.md) are also enabled: a session
+token the deleted principal already minted is stateless and keyed by principal
+name, so it keeps working until it expires (bounded by `auth.session.idle_ttl`,
+or `max_ttl` for a renewable one). Its
+*templated* grants are gone the instant you delete, but a `*` wildcard grant
+would still apply to it for that window. Keep the session TTL short, or detach
+the wildcard-granted database, if immediate cutoff matters.
+
 ## Maintenance
 
 `POST /_admin/maintenance` with `{"database", "op", …}` — gated by server-admin
