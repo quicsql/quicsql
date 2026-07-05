@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	sqlite "gosqlite.org"
 	"quicsql.net/admin"
 	"quicsql.net/authz"
 	"quicsql.net/backend"
@@ -194,6 +196,212 @@ func TestVaultOfflineCompact(t *testing.T) {
 	if err := dbh2.Handle.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("row lost across compact: n=%d err=%v", n, err)
 	}
+}
+
+func TestCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	sec, _ := secret.New(nil)
+	be, _ := backend.For(config.Database{Name: "c", Backend: "file", Path: "c.db", Mode: "rwc", PragmasPreset: "recommended"}, sec, dir)
+	h, reg, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"c": be}, sec, dir)
+
+	dbh, release, _ := reg.Get(context.Background(), "c")
+	if _, err := dbh.Handle.Exec("CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3);"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	release()
+
+	rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"c","op":"checkpoint","mode":"truncate"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checkpoint: got %d (%s)", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status, Mode       string
+		WALFrames          int `json:"wal_frames"`
+		CheckpointedFrames int `json:"checkpointed_frames"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body)
+	}
+	if out.Status != "checkpointed" || out.Mode != "truncate" {
+		t.Fatalf("checkpoint response = %+v", out)
+	}
+	// An unknown mode is a 400.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"c","op":"checkpoint","mode":"bogus"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad checkpoint mode: got %d, want 400", rec.Code)
+	}
+	// Default (empty) mode is passive and succeeds.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"c","op":"checkpoint"}`); rec.Code != http.StatusOK {
+		t.Fatalf("default-mode checkpoint: got %d (%s)", rec.Code, rec.Body)
+	}
+}
+
+func TestLogicalReclaim(t *testing.T) {
+	dir := t.TempDir()
+	sdir := t.TempDir()
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	_ = os.WriteFile(filepath.Join(sdir, "k"), key, 0o600)
+	sec, _ := secret.New([]config.SecretSource{{Name: "f", Type: "file", Dir: sdir}})
+	dbcfg := config.Database{Name: "v", Backend: "vault", Path: "v.vault", Mode: "rwc", Vault: &config.VaultConfig{Key: "f:k"}}
+	be, err := backend.For(dbcfg, sec, dir)
+	if err != nil {
+		t.Fatalf("For: %v", err)
+	}
+	// A file backend for the negative case (logical reclaim is vault-only).
+	fbe, _ := backend.For(config.Database{Name: "f", Backend: "file", Path: "f.db", Mode: "rwc"}, sec, dir)
+	h, reg, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"v": be, "f": fbe}, sec, dir)
+
+	dbh, release, err := reg.Get(context.Background(), "v")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := dbh.Handle.Exec("CREATE TABLE t(x)"); err != nil {
+		t.Fatalf("seed schema: %v", err)
+	}
+	for range 500 {
+		if _, err := dbh.Handle.Exec("INSERT INTO t VALUES(zeroblob(1024))"); err != nil {
+			t.Fatalf("seed rows: %v", err)
+		}
+	}
+	if _, err := dbh.Handle.Exec("DELETE FROM t"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	release()
+
+	// The read-only probe reports a (non-negative) reclaimable figure.
+	rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"reclaimable"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reclaimable: got %d (%s)", rec.Code, rec.Body)
+	}
+	var probe struct {
+		ReclaimableBytes int64 `json:"reclaimable_bytes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &probe); err != nil {
+		t.Fatalf("decode probe: %v (%s)", err, rec.Body)
+	}
+	if probe.ReclaimableBytes < 0 {
+		t.Fatalf("reclaimable_bytes = %d, want ≥ 0", probe.ReclaimableBytes)
+	}
+
+	// The online logical compaction runs and reports bytes freed.
+	rec = as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"compact_logical"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("compact_logical: got %d (%s)", rec.Code, rec.Body)
+	}
+
+	// The row count survives the compaction (data integrity).
+	dbh2, release2, _ := reg.Get(context.Background(), "v")
+	defer release2()
+	var n int
+	if err := dbh2.Handle.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("after logical compact: n=%d err=%v (want 0)", n, err)
+	}
+
+	// A non-vault backend rejects logical reclaim.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"f","op":"reclaimable"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("logical reclaim on file backend: got %d, want 400", rec.Code)
+	}
+}
+
+func TestRestoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	sec, _ := secret.New(nil)
+	be, err := backend.For(config.Database{Name: "app", Backend: "file", Path: "app.db", Mode: "rwc"}, sec, dir)
+	if err != nil {
+		t.Fatalf("For: %v", err)
+	}
+	h, reg, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"app": be}, sec, dir)
+
+	// Seed a known state and capture its image with a straight SQLite serialize
+	// (what /export or /backup would hand a client).
+	dbh, release, _ := reg.Get(context.Background(), "app")
+	if _, err := dbh.Handle.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t(v) VALUES('one'),('two');"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	image, err := sqlite.Serialize(context.Background(), dbh.Handle.DB)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	// Diverge from the captured state.
+	if _, err := dbh.Handle.Exec("INSERT INTO t(v) VALUES('three'); DELETE FROM t WHERE v='one';"); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	release() // idle, so restore can reserve
+
+	// Restore the captured image.
+	req := httptest.NewRequest(http.MethodPost, "/_admin/restore?database=app", bytes.NewReader(image))
+	req = req.WithContext(authz.NewContext(req.Context(), &authz.Principal{Name: "root", Method: "test"}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore: %d %s", rec.Code, rec.Body)
+	}
+
+	// The database now reflects the restored (pre-divergence) state exactly.
+	dbh2, release2, err := reg.Get(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer release2()
+	rows, err := dbh2.Handle.Query("SELECT v FROM t ORDER BY id")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var v string
+		_ = rows.Scan(&v)
+		got = append(got, v)
+	}
+	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("restored state = %v, want [one two]", got)
+	}
+}
+
+func TestRestoreGuards(t *testing.T) {
+	dir := t.TempDir()
+	sec, _ := secret.New(nil)
+	fbe, _ := backend.For(config.Database{Name: "app", Backend: "file", Path: "app.db", Mode: "rwc"}, sec, dir)
+	mbe, _ := backend.For(config.Database{Name: "mem", Backend: "memory", Mode: "rwc"}, sec, dir)
+	h, _, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"app": fbe, "mem": mbe}, sec, dir)
+
+	post := func(name, target string, body []byte) int {
+		req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body))
+		if name != "" {
+			req = req.WithContext(authz.NewContext(req.Context(), &authz.Principal{Name: name, Method: "test"}))
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	valid := []byte(sqliteMagicTest())
+
+	// Non-admin is refused.
+	if code := post("stranger", "/_admin/restore?database=app", valid); code != http.StatusForbidden {
+		t.Fatalf("non-admin restore: %d, want 403", code)
+	}
+	// A garbage (non-SQLite) image is rejected before any swap.
+	if code := post("root", "/_admin/restore?database=app", []byte("not a database")); code != http.StatusBadRequest {
+		t.Fatalf("garbage image: %d, want 400", code)
+	}
+	// A memory backend is not restorable.
+	if code := post("root", "/_admin/restore?database=mem", valid); code != http.StatusBadRequest {
+		t.Fatalf("memory restore: %d, want 400", code)
+	}
+	// A missing ?database= is a 400.
+	if code := post("root", "/_admin/restore", valid); code != http.StatusBadRequest {
+		t.Fatalf("no database param: %d, want 400", code)
+	}
+}
+
+// sqliteMagicTest builds a minimal valid SQLite image for the guard tests.
+func sqliteMagicTest() string {
+	db, _ := sqlite.Open(sqlite.Config{Path: ":memory:"})
+	_, _ = db.Exec("CREATE TABLE x(a)")
+	img, _ := sqlite.Serialize(context.Background(), db.DB)
+	_ = db.Close()
+	return string(img)
 }
 
 func TestSnapshot(t *testing.T) {

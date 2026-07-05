@@ -2,6 +2,7 @@ package admin
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 
@@ -12,15 +13,19 @@ import (
 
 // maintenanceRequest selects a maintenance op on one database.
 //
-//	op: "compact"        — OFFLINE: drain + reserve the handle, densely rewrite (vault only)
-//	    "compact_online" — ONLINE:  return freed blocks to the OS on the live handle (vault only)
-//	    "trim"           — ONLINE:  release the trailing free run (vault only)
-//	    "snapshot"       — copy the database to `dest` via VACUUM INTO (any backend)
+//	op: "compact"         — OFFLINE: drain + reserve the handle, densely rewrite (vault only)
+//	    "compact_online"  — ONLINE:  return freed blocks to the OS on the live handle (vault only)
+//	    "compact_logical" — ONLINE:  rewrite the live container to its logical footprint (vault only)
+//	    "trim"            — ONLINE:  release the trailing free run (vault only)
+//	    "reclaimable"     — ONLINE:  report how much a logical compaction would free (vault only)
+//	    "checkpoint"      — ONLINE:  WAL checkpoint on the live handle (any WAL database)
+//	    "snapshot"        — copy the (decrypted, for a vault) database image to `dest` (any backend)
 type maintenanceRequest struct {
 	Database string `json:"database"`
 	Op       string `json:"op"`
 	MaxBytes int64  `json:"max_bytes"` // online reclaim cap; <=0 = unbounded
 	Dest     string `json:"dest"`      // snapshot destination path
+	Mode     string `json:"mode"`      // checkpoint mode: passive|full|restart|truncate
 }
 
 func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
@@ -48,12 +53,119 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		h.offlineCompact(w, r, req)
 	case "compact_online", "trim":
 		h.onlineReclaim(w, r, req)
+	case "compact_logical", "reclaimable":
+		h.logicalReclaim(w, r, req)
+	case "checkpoint":
+		h.checkpoint(w, r, req)
 	case "snapshot":
 		h.snapshot(w, r, req)
 	default:
 		h.auditFail(r, req.Op, req.Database, "unknown maintenance op")
 		writeErr(w, http.StatusBadRequest, "unknown maintenance op")
 	}
+}
+
+// logicalReclaim runs the O(live-data) reclaim against the LIVE handle, or (for
+// "reclaimable") just reports how much it would free — both read/write the open
+// container, so a registry ref is pinned to keep it open.
+func (h *Handler) logicalReclaim(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
+	be := h.reg.Backend(req.Database)
+	reclaimer, ok := be.(backend.LogicalReclaimer)
+	if !ok {
+		h.auditFail(r, req.Op, req.Database, "backend does not support logical reclaim")
+		writeErr(w, http.StatusBadRequest, "logical reclaim is only supported for vault databases")
+		return
+	}
+	_, releaseRef, err := h.reg.Get(r.Context(), req.Database)
+	if err != nil {
+		h.auditFail(r, req.Op, req.Database, "open failed")
+		h.writeGetErr(w, req.Database, err)
+		return
+	}
+	defer releaseRef()
+
+	if req.Op == "reclaimable" {
+		n, err := reclaimer.ReclaimableBytes()
+		if err != nil {
+			h.log.Error("quicsql/admin: reclaimable probe", "db", req.Database, "err", err)
+			h.auditFail(r, req.Op, req.Database, "probe failed")
+			writeErr(w, http.StatusInternalServerError, "reclaimable probe failed")
+			return
+		}
+		// A read-only probe is not audited as a mutation.
+		writeJSON(w, http.StatusOK, map[string]any{"database": req.Database, "reclaimable_bytes": n})
+		return
+	}
+	n, err := reclaimer.CompactLogicalOnline()
+	if err != nil {
+		h.log.Error("quicsql/admin: logical compact", "db", req.Database, "err", err)
+		h.auditFail(r, req.Op, req.Database, "reclaim failed")
+		writeErr(w, http.StatusInternalServerError, "logical reclaim failed")
+		return
+	}
+	h.audit(r, req.Op, req.Database, "online")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reclaimed", "database": req.Database, "bytes_reclaimed": n})
+}
+
+// checkpointModes maps the request vocabulary to sqlite checkpoint modes.
+var checkpointModes = map[string]sqlite.CheckpointMode{
+	"":         sqlite.CheckpointPassive, // default: never blocks
+	"passive":  sqlite.CheckpointPassive,
+	"full":     sqlite.CheckpointFull,
+	"restart":  sqlite.CheckpointRestart,
+	"truncate": sqlite.CheckpointTruncate,
+}
+
+// checkpoint runs a WAL checkpoint on the live handle, bounding WAL growth
+// without a restart. Any WAL-mode database qualifies; a non-WAL database returns
+// the engine's error. Modes: passive (default, never blocks), full, restart,
+// truncate (zeroes the WAL file).
+func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
+	mode, ok := checkpointModes[req.Mode]
+	if !ok {
+		h.auditFail(r, "checkpoint", req.Database, "bad mode: "+req.Mode)
+		writeErr(w, http.StatusBadRequest, "checkpoint mode must be passive|full|restart|truncate")
+		return
+	}
+	dbh, releaseRef, err := h.reg.Get(r.Context(), req.Database)
+	if err != nil {
+		h.auditFail(r, "checkpoint", req.Database, "open failed")
+		h.writeGetErr(w, req.Database, err)
+		return
+	}
+	defer releaseRef()
+	conn, err := dbh.Handle.Conn(r.Context())
+	if err != nil {
+		h.auditFail(r, "checkpoint", req.Database, "conn failed")
+		writeErr(w, http.StatusInternalServerError, "cannot acquire a connection")
+		return
+	}
+	defer conn.Close()
+
+	var logFrames, checkpointed int
+	rawErr := conn.Raw(func(dc any) error {
+		c, ok := dc.(*sqlite.Conn)
+		if !ok {
+			return fmt.Errorf("connection is not *sqlite.Conn (%T)", dc)
+		}
+		logFrames, checkpointed, err = c.WALCheckpoint("", mode)
+		return err
+	})
+	if rawErr != nil {
+		h.log.Error("quicsql/admin: checkpoint", "db", req.Database, "err", rawErr)
+		h.auditFail(r, "checkpoint", req.Database, "checkpoint failed")
+		writeErr(w, http.StatusInternalServerError, "checkpoint failed (is the database in WAL mode?)")
+		return
+	}
+	modeName := req.Mode
+	if modeName == "" {
+		modeName = "passive"
+	}
+	h.audit(r, "checkpoint", req.Database, modeName)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "checkpointed", "database": req.Database,
+		"mode": modeName, "wal_frames": logFrames, "checkpointed_frames": checkpointed,
+	})
 }
 
 // offlineCompact reserves the path (draining the idle handle; ErrBusy if it has

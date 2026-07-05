@@ -30,6 +30,7 @@ var EndpointTokens = map[string]bool{
 	"v2":        true,
 	"v3":        true,
 	"export":    true,
+	"backup":    true, // /<db>/backup — streaming online backup (SQLite file)
 	"changeset": true, // /<db>/changeset/{apply,invert,concat}
 	"blob":      true, // /<db>/blob/{create,write,read,size,delete}
 }

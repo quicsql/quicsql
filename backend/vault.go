@@ -48,6 +48,19 @@ func (b *vaultBackend) Trim(maxBytes int64) (int64, error) {
 	return vault.Trim(b.cfg.Path, maxBytes)
 }
 
+// ReclaimableBytes reports how much the live container could shed with a logical
+// compaction — a read-only probe (backend.LogicalReclaimer).
+func (b *vaultBackend) ReclaimableBytes() (int64, error) {
+	return vault.ReclaimableBytes(b.cfg.Path)
+}
+
+// CompactLogicalOnline rewrites the live container down to its logical footprint
+// (the O(live-data) reclaim after large deletes), returning bytes freed
+// (backend.LogicalReclaimer).
+func (b *vaultBackend) CompactLogicalOnline() (int64, error) {
+	return vault.CompactLogicalOnline(b.cfg.Path)
+}
+
 // newVault resolves the vault.Options for a database. The option surface splits
 // by role (see the plan): raw key, compression, cipher, authenticate, and anchor
 // apply to both create and open; the rest is chosen by whether the container

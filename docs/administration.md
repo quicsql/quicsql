@@ -133,7 +133,7 @@ its schedule: the reaper ticks every **15 seconds** (fixed), so an idle session
 with `tx_idle_timeout: 2s` actually lives up to ~17 s. Treat idle timeouts as
 granularity-15s.
 
-## Vault maintenance
+## Maintenance
 
 `POST /_admin/maintenance` with `{"database", "op", …}` — gated by server-admin
 **or** an `admin` grant on that database:
@@ -142,7 +142,10 @@ granularity-15s.
 |---|---|---|---|
 | `compact` | vault | offline-in-place | dense rewrite of the container into minimal size |
 | `compact_online` | vault | online | returns freed blocks to the OS; `"max_bytes"` caps the pass |
+| `compact_logical` | vault | online | rewrites the live container down to its logical footprint (the O(live-data) reclaim after big deletes) |
 | `trim` | vault | online | releases only the trailing free run — cheapest; `"max_bytes"` caps it too |
+| `reclaimable` | vault | online (read-only) | reports `reclaimable_bytes` a logical compaction would free — a probe, not a mutation |
+| `checkpoint` | **any WAL** | online | WAL checkpoint on the live handle; `"mode"` is `passive` (default) / `full` / `restart` / `truncate` |
 | `snapshot` | **any** | online | serializes the whole logical database to `"dest"` |
 
 ```sh
@@ -151,17 +154,29 @@ curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance
 # → {"status":"compacted","database":"orders"}          (verified: 2 248 704 → 2 170 880 bytes)
 
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
-  -d '{"database":"orders","op":"compact_online","max_bytes":1048576}'
-# → {"status":"reclaimed","database":"orders","bytes_reclaimed":65536}
+  -d '{"database":"orders","op":"reclaimable"}'
+# → {"database":"orders","reclaimable_bytes":131072}     (a probe — how much compact_logical would free)
+
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"orders","op":"compact_logical"}'
+# → {"status":"reclaimed","database":"orders","bytes_reclaimed":131072}
+
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"users","op":"checkpoint","mode":"truncate"}'
+# → {"status":"checkpointed","database":"users","mode":"truncate","wal_frames":0,"checkpointed_frames":0}
 
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
   -d '{"database":"orders","op":"snapshot","dest":"orders-backup.db"}'
 # → {"status":"snapshot","database":"orders","dest":"/var/lib/quicsql/orders-backup.db","bytes":2228224}
 ```
 
-The online reclaim ops (`compact_online`, `trim`) report how much they returned to
-the OS in `bytes_reclaimed`; both take an optional `"max_bytes"` to cap a single
-pass.
+The online reclaim ops (`compact_online`, `trim`, `compact_logical`) report how
+much they returned to the OS in `bytes_reclaimed`; `compact_online`/`trim` take an
+optional `"max_bytes"` to cap a single pass. Use `reclaimable` first to see
+whether a `compact_logical` is worth running. `checkpoint` bounds WAL growth
+without a restart — `truncate` also zeroes the WAL file — and reports the WAL
+frame counts; it needs a WAL-mode database (the `recommended` pragma preset
+enables WAL).
 
 Offline `compact` does **not** require downtime in the scheduling sense: it
 drains and reserves the idle handle in place (409 *"database busy"* if the
@@ -413,33 +428,44 @@ docker run \
 
 ## Backup and restore
 
-The two backup artifacts are both the **decrypted logical SQLite image**, not the
-on-disk container: the [`snapshot`](#vault-maintenance) maintenance op (writes the
-image to a `dest` within `data_dir`) and [`GET /<db>/export`](clients/http-api.md)
-(streams the same image to a remote client). For a vault database both are
-**decrypted** — usable as a plain backup, but handle them as sensitive.
+**Three backup artifacts**, all the **decrypted logical SQLite image** (not the
+on-disk container): the [`snapshot`](#maintenance) maintenance op (writes the
+image to a `dest` within `data_dir`), [`GET /<db>/export`](clients/http-api.md)
+(streams the whole image, materialized in RAM, capped at 1 GiB), and
+[`GET /<db>/backup`](clients/http-api.md) (a **streaming online backup** with no
+RAM ceiling and no size cap — prefer it for anything large). For a vault database
+all three are **decrypted** — usable as a plain backup, but handle them as
+sensitive.
 
-Restore is **out-of-band**: there is deliberately **no `/import` route and no
-restore op**. You reintroduce a backup by serving the file, in one of three
-shapes:
+**Restore into a file database, in place:** `POST /_admin/restore?database=<db>`
+with the SQLite image as the raw body (server-admin only). The server validates
+the image (magic header + it opens + `PRAGMA integrity_check`) *before* touching
+anything, then reserves the database (409 if it has active users), removes the
+stale `-wal`/`-shm` sidecars, and swaps the validated image in with an **atomic
+rename**; the handle reopens on the next request. Back up first — the previous
+contents are discarded.
 
-- **From a snapshot / export image → serve it as a `file` database.** The image
-  is an ordinary SQLite file. Place it under `data_dir` and either add a
-  `databases:` seed pointing at it or `POST /_admin/create` with
-  `{"database":{"name":"…","backend":"file","path":"restored.db"}}` — `create`
-  test-opens it, so a corrupt image is rejected up front. To restore *over* a
-  damaged database, `detach` it first, then `create` the name anew (create
-  revokes stale grants, so re-supply `grants`).
-- **Back into a vault (encrypted at rest).** The plain image **cannot** be opened
-  as a vault container. Provision a fresh `vault` database and load the data into
-  it over SQL (the snapshot served as a `file` DB is a convenient source), then
-  cut clients over to the vault.
-- **From a cold copy of the vault container.** A byte-for-byte `cp` of the
-  `.vault` file — taken **while the server was stopped** (the vault is
-  single-owner; never copy a live one) — restores as the *same* vault database:
-  put it back at its `path` and serve it with the same `key`/identity (the
-  keyslots travel inside the container). This is the only artifact that stays
-  encrypted end to end.
+```sh
+curl -s -X POST -H "Authorization: Bearer $OPS" --data-binary @backup.sqlite \
+  http://127.0.0.1:7775/_admin/restore?database=orders
+# → {"status":"restored","database":"orders","bytes":2228224}
+```
+
+The Go client wraps it as `AdminRestore(ctx, db, io.Reader)` (streamed);
+`BackupTo` on one server and `AdminRestore` on another is a clone in two calls.
+
+**Vaults restore out-of-band** — a plain image can't be swapped into an encrypted
+container, so `/_admin/restore` rejects a vault backend (400). Reintroduce a vault
+backup one of two ways:
+
+- **Load a logical image into a fresh vault over SQL.** Serve the snapshot/export
+  as a `file` database, provision a new `vault` database, and copy the data across
+  with SQL; then cut clients over to the vault.
+- **From a cold copy of the `.vault` container.** A byte-for-byte `cp` taken
+  **while the server was stopped** (the vault is single-owner; never copy a live
+  one) restores as the *same* vault database — put it back at its `path` and serve
+  it with the same `key`/identity (the keyslots travel inside the container). This
+  is the only artifact that stays encrypted end to end.
 
 Swapping files under `data_dir` requires the server **stopped**; serving a
 freshly-placed file through `POST /_admin/create` works while it runs.

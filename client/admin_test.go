@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,58 @@ import (
 	"quicsql.net/client"
 	"quicsql.net/config"
 )
+
+// TestBackupRestoreRoundTrip clones a database in two calls: BackupTo captures a
+// streaming image, and AdminRestore swaps it back after the live data diverges.
+func TestBackupRestoreRoundTrip(t *testing.T) {
+	addr := startAdminServer(t)
+	ctx := context.Background()
+	root := client.H1(addr, client.WithBearer("root-token"))
+	defer root.Close()
+	app := client.H1(addr, client.WithBearer("app-token"))
+	defer app.Close()
+
+	if _, err := app.Exec(ctx, "data", "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := app.Exec(ctx, "data", "INSERT INTO t(v) VALUES('one'),('two')"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	n, err := root.BackupTo(ctx, "data", &buf)
+	if err != nil {
+		t.Fatalf("BackupTo: %v", err)
+	}
+	if n < 512 || string(buf.Bytes()[:16]) != "SQLite format 3\x00" {
+		t.Fatalf("backup is not a SQLite image (%d bytes)", n)
+	}
+	image := append([]byte(nil), buf.Bytes()...)
+
+	// Diverge from the captured state.
+	if _, err := app.Exec(ctx, "data", "INSERT INTO t(v) VALUES('three')"); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	if _, err := app.Exec(ctx, "data", "DELETE FROM t WHERE v = 'one'"); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+
+	if err := root.AdminRestore(ctx, "data", bytes.NewReader(image)); err != nil {
+		t.Fatalf("AdminRestore: %v", err)
+	}
+
+	res, err := app.Query(ctx, "data", "SELECT v FROM t ORDER BY id")
+	if err != nil {
+		t.Fatalf("verify query: %v", err)
+	}
+	var got []string
+	for _, row := range res.Rows {
+		got = append(got, row[0].(string))
+	}
+	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("restored state = %v, want [one two]", got)
+	}
+}
 
 // startAdminServer stands up a server with the control plane enabled: bearer
 // principal "root" is a server-admin, "app" is a plain user with data-plane

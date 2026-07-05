@@ -70,6 +70,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleDetach(w, r)
 	case "/maintenance":
 		h.handleMaintenance(w, r)
+	case "/restore":
+		h.handleRestore(w, r)
 	case "/info":
 		h.handleInfo(w, r)
 	case "/sessions":

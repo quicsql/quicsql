@@ -142,6 +142,23 @@ the process:
   request beyond that waits for a slot; if its own request context is cancelled
   or times out while waiting, it returns `503` ("too many concurrent exports").
 
+### `/backup` — a streaming online backup
+
+```
+GET /<db>/backup
+Authorization: Bearer <token>
+```
+
+Same idea as `/export` — a standalone SQLite file (`application/octet-stream`,
+`Content-Disposition: attachment`) any SQLite tool can open — but produced by the
+SQLite **online-backup API**: it page-copies the live database into a temp file
+with **bounded memory** and streams that, so there is **no RAM ceiling and no
+size cap**, and it doesn't block writers (the backup restarts any page rewritten
+mid-copy). Read access is enough, and a vault database backs up to its decrypted
+logical image, exactly like `/export`. Prefer `/backup` for anything large;
+`/export` remains for the simple in-memory-image case. GET-only. Concurrent
+backups share the export slot pool (`503` beyond it).
+
 ### `/changeset/*` — SQLite session changesets
 
 These move **changesets** — the binary diff SQLite's

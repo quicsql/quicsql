@@ -289,6 +289,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleQuery(w, r, db)
 	case "/export":
 		h.handleExport(w, r, db)
+	case "/backup":
+		h.handleBackup(w, r, db)
 	case "/changeset/apply":
 		h.handleChangesetApply(w, r, db)
 	case "/changeset/invert":

@@ -23,7 +23,9 @@ Reached over any authenticated transport, as an admin principal:
 
 - **Databases** — create a database at runtime, detach one, list them (filtered to what the caller may administer). A created database is persisted in the meta store and survives restart.
 - **Introspection** — per-database stats, live sessions, and kill a session.
-- **Vault maintenance** — offline **compact** (rewrite densely), online **reclaim** (wire op `compact_online`) and **trim** (return freed blocks to the OS on the live handle), **snapshot**.
+- **Vault maintenance** — offline **compact** (rewrite densely); online **compact_online** / **trim** / **compact_logical** (return freed blocks / the trailing run / rewrite to the logical footprint on the live handle); **reclaimable** (read-only probe of what compact_logical would free); **snapshot** (decrypted logical image to a data_dir path).
+- **WAL checkpoint** — `op: checkpoint`, `mode: passive|full|restart|truncate` on any WAL-mode database; bounds WAL growth without a restart and reports the frame counts.
+- **Backup / restore** — `GET /<db>/backup` streams a standalone SQLite file with no size ceiling (online backup; read access). `POST /_admin/restore?database=<db>` with an image body swaps it into a **file** database in place (validate → reserve → atomic rename; server-admin only; back up first). Vaults restore out-of-band (see the administration guide).
 
 From the Go client, admin calls go through the same authenticated client (`client.Export`, `client.ApplyChangeset`, `BlobProvision`, and the control-plane helpers); over the wire they are ordinary authenticated requests to `/_admin/…`.
 

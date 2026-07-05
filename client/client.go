@@ -293,9 +293,33 @@ func (c *Client) Exec(ctx context.Context, db, sql string, args ...any) (*Result
 
 // Export downloads the entire database as a SQLite serialization — the byte image
 // a backup contains, which sqlite.Deserialize (or the sqlite3 CLI) can open. It
-// requires read access on the server.
+// requires read access on the server. Export buffers the whole image in memory
+// on both ends; for a large database prefer BackupTo, which streams.
 func (c *Client) Export(ctx context.Context, db string) ([]byte, error) {
 	return c.request(ctx, http.MethodGet, "/"+db+"/export", "", nil)
+}
+
+// BackupTo streams an online backup of db — a standalone SQLite file the sqlite3
+// CLI can open — to dst, without buffering it in memory (the streaming
+// counterpart to Export, with no RAM ceiling). Read access. Returns bytes written.
+func (c *Client) BackupTo(ctx context.Context, db string, dst io.Writer) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/"+db+"/backup", nil)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.authenticate(ctx, req); err != nil {
+		return 0, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := c.readBody(resp)
+		return 0, fmt.Errorf("quicsql: GET /%s/backup: %s: %s", db, resp.Status, firstMessage(raw))
+	}
+	return io.Copy(dst, resp.Body)
 }
 
 // ApplyChangeset applies a SQLite changeset (as produced by Stream.SessionChangeset)

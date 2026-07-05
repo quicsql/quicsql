@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 )
 
 // This file is the typed surface of the `/_admin` control plane and the
@@ -131,18 +133,36 @@ func (c *Client) AdminCreate(ctx context.Context, request any) error {
 	return c.adminPost(ctx, "/_admin/create", request)
 }
 
-// AdminMaintenance runs a maintenance op on a database: "compact" (offline,
-// vault), "compact_online"/"trim" (online, vault; maxBytes caps a reclaim), or
-// "snapshot" (any backend; dest is a server-side path inside data_dir). It
-// returns the server's raw JSON status for display.
-func (c *Client) AdminMaintenance(ctx context.Context, database, op string, maxBytes int64, dest string) (json.RawMessage, error) {
+// AdminMaintenance runs a maintenance op on a database and returns the server's
+// raw JSON status for display. Ops:
+//   - "compact" (offline, vault) · "compact_online"/"trim" (online, vault;
+//     maxBytes caps a reclaim) · "compact_logical" (online, vault: rewrite to the
+//     logical footprint) · "reclaimable" (online, vault: report bytes a logical
+//     compaction would free)
+//   - "checkpoint" (any WAL database; mode is passive|full|restart|truncate)
+//   - "snapshot" (any backend; dest is a server-side path inside data_dir)
+//
+// Pass "" for maxBytes/dest/mode fields an op doesn't use.
+func (c *Client) AdminMaintenance(ctx context.Context, database, op string, maxBytes int64, dest, mode string) (json.RawMessage, error) {
 	body, err := json.Marshal(map[string]any{
-		"database": database, "op": op, "max_bytes": maxBytes, "dest": dest,
+		"database": database, "op": op, "max_bytes": maxBytes, "dest": dest, "mode": mode,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return c.request(ctx, http.MethodPost, "/_admin/maintenance", "application/json", bytes.NewReader(body))
+}
+
+// AdminRestore replaces a file database's contents with the SQLite image read
+// from src (as produced by BackupTo/Export or the sqlite3 CLI). It streams the
+// upload, and the server validates the image and swaps it in atomically under a
+// reservation — refused with a busy error if the database has active users.
+// Server-admin only; file backends only. Back up first: the previous contents
+// are discarded.
+func (c *Client) AdminRestore(ctx context.Context, database string, src io.Reader) error {
+	q := url.Values{"database": {database}}
+	_, err := c.request(ctx, http.MethodPost, "/_admin/restore?"+q.Encode(), "application/octet-stream", src)
+	return err
 }
 
 // adminPost marshals v and POSTs it to path, discarding the response body.

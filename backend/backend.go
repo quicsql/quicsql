@@ -285,6 +285,15 @@ type OnlineReclaimer interface {
 	Trim(maxBytes int64) (int64, error)
 }
 
+// LogicalReclaimer is implemented by the vault backend: the O(live-data) reclaim
+// path — rewrite the live container down to its logical footprint after big
+// deletes — plus a read-only probe of how much that would free. Both run against
+// the LIVE handle (open in this process).
+type LogicalReclaimer interface {
+	ReclaimableBytes() (int64, error)
+	CompactLogicalOnline() (int64, error)
+}
+
 // For selects and constructs the backend for one database entry.
 func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
 	installSecurity() // register the ATTACH/DETACH deny before any connection opens
