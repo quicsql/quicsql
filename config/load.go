@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -140,6 +141,7 @@ func WithinDir(dir, p string) (string, bool) {
 var knownTopLevel = map[string]bool{
 	"server": true, "secrets": true, "routing": true, "tls": true, "listeners": true,
 	"auth": true, "databases": true, "control_plane": true, "limits": true, "logging": true,
+	"cors": true,
 }
 
 var inertTopLevel = map[string]string{
@@ -194,6 +196,14 @@ func (c *Config) applyDefaults() {
 			c.Databases[i].Mode = "rwc"
 		}
 	}
+	if c.CORS.Enabled {
+		if len(c.CORS.Origins) == 0 {
+			c.CORS.Origins = []string{"*"}
+		}
+		if c.CORS.MaxAge == 0 {
+			c.CORS.MaxAge = 2 * time.Hour
+		}
+	}
 }
 
 // Validate catches the invariants Phase 0 depends on: unique, non-reserved
@@ -220,10 +230,56 @@ func (c *Config) Validate() error {
 	if err := c.validateAuth(); err != nil {
 		return err
 	}
+	if err := c.validateCORS(); err != nil {
+		return err
+	}
 	switch c.Logging.Format {
 	case "", "text", "json":
 	default:
 		return fmt.Errorf("config: logging.format %q invalid (want text|json)", c.Logging.Format)
+	}
+	return nil
+}
+
+// validateCORS checks the cors block: each origin is "*" or a scheme://host[:port]
+// origin (no path, no wildcard subdomains — exact match is the only safe compare),
+// and max_age is not negative. "null" is rejected outright: sandboxed-iframe and
+// file:// pages serialize their origin as the literal string "null", so allowing
+// it admits any of them.
+func (c *Config) validateCORS() error {
+	if !c.CORS.Enabled {
+		return nil
+	}
+	// A wildcard origin echoes Access-Control-Allow-Origin: * on every response,
+	// which is only safe when reading the data itself requires a credential the
+	// attacker's page can't hold. In open mode (no auth configured) the anonymous
+	// principal is read-write, so `*` would let ANY website read and write this
+	// server's databases cross-origin. Refuse the combination — the operator must
+	// either configure auth or list explicit origins. (applyDefaults turns an
+	// empty origins list into ["*"], so this also catches `cors: {enabled: true}`
+	// with nothing else.)
+	for _, o := range c.CORS.Origins {
+		if o == "*" && !c.AuthConfigured() {
+			return fmt.Errorf(`config: cors.origins "*" (the default when origins is empty) with no authentication configured would let any website read and write this server — configure auth (a principal or grant) or list explicit origins`)
+		}
+	}
+	for _, o := range c.CORS.Origins {
+		if o == "*" {
+			continue
+		}
+		if o == "null" {
+			return fmt.Errorf("config: cors.origins may not contain %q (it would match any sandboxed or file:// page)", o)
+		}
+		rest, ok := strings.CutPrefix(o, "https://")
+		if !ok {
+			rest, ok = strings.CutPrefix(o, "http://")
+		}
+		if !ok || rest == "" || strings.ContainsAny(rest, "/ \t*") {
+			return fmt.Errorf("config: cors.origins entry %q invalid (want \"*\" or scheme://host[:port], no path)", o)
+		}
+	}
+	if c.CORS.MaxAge < 0 {
+		return fmt.Errorf("config: cors.max_age must not be negative")
 	}
 	return nil
 }

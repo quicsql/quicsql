@@ -79,6 +79,11 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 	if opts.Wrap != nil {
 		handler = opts.Wrap(lc, handler)
 	}
+	// CORS wraps OUTSIDE auth: a browser preflight carries no credential, so it
+	// must be answered before authentication can reject it.
+	if cfg.CORS.Enabled {
+		handler = withCORS(cfg.CORS, handler)
+	}
 	// On the TCP transports, advertise any opt-in h3 endpoint (advertise: true) via
 	// Alt-Svc, so a client that connected over TCP can discover and upgrade to h3 —
 	// the same mechanism browsers use to move to h3 on :443.

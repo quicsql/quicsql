@@ -195,6 +195,18 @@ Transport and auth are separate layers, but they interact in ways worth stating 
 
 A common, solid layout: a public TLS listener (`h2`/`h3`) accepting `mtls`, `bearer`, `keyring`, and `password`; a loopback cleartext listener (`h1`) for local health checks and admin scripts; and a Unix socket with `peercred` for co-located processes.
 
+### Browsers and CORS
+
+A browser page from another origin cannot call quicSQL at all until the server opts in — browsers first send a credential-less `OPTIONS` *preflight*, and without approval headers the real request never happens. Enable the `cors:` block to serve browser apps:
+
+```yaml
+cors:
+  enabled: true
+  origins: ["https://app.example.com"]   # or ["*"]; default "*" when omitted
+```
+
+The preflight is answered **before** authentication (it carries no credential by design — a `401` there would kill every cross-origin call), while the actual request still authenticates normally; CORS approval is never an authorization grant. The approved request headers include `Authorization` and the `X-Quicsql-*` keyring trio, so `bearer`, `session`, `password`, and `keyring` all work from a browser (`mtls` does not — browsers give scripts no client-certificate control). The `origins` list is matched exactly; `"*"` is safe with quicSQL's header-based credentials (they are not cookie-style "credentials" to the browser) but narrow it when you can. Pair CORS with a TLS listener: pages on HTTPS can call `http://localhost` during development, but any non-localhost cleartext listener is blocked as mixed content.
+
 ## A complete worked example
 
 Here is a small but realistic config that uses every layer, followed by how a client presents each credential.

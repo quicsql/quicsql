@@ -21,6 +21,7 @@ type Config struct {
 	ControlPlane ControlPlane          `yaml:"control_plane" json:"control_plane"`
 	Limits       Limits                `yaml:"limits" json:"limits"`
 	Logging      Logging               `yaml:"logging" json:"logging"`
+	CORS         CORS                  `yaml:"cors" json:"cors"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
 }
@@ -110,6 +111,28 @@ type Auth struct {
 	AuthorizedKeys string      `yaml:"authorized_keys" json:"authorized_keys"`
 	Principals     []Principal `yaml:"principals" json:"principals"`
 	SQLPolicy      SQLPolicy   `yaml:"sql_policy" json:"sql_policy"`
+}
+
+// CORS configures cross-origin resource sharing for browser-based clients. Off
+// by default: without it a browser page from another origin cannot call the
+// server at all. Enabling it answers preflight (OPTIONS) requests before
+// authentication — a preflight carries no credential by design — and stamps the
+// approval headers on actual responses. Origins lists the allowed page origins
+// ("https://app.example.com"); the "*" wildcard allows any origin, which is safe
+// for header-credential auth (bearer/session/keyring — none of them are browser
+// "credentials" in the cookie sense) but should be narrowed when possible.
+type CORS struct {
+	Enabled bool     `yaml:"enabled" json:"enabled"`
+	Origins []string `yaml:"origins" json:"origins"` // page origins, or "*" (default when empty)
+	// AllowHeaders extends the built-in allowed request headers (Authorization,
+	// Content-Type, and the X-Quicsql-* keyring trio) for custom proxies/clients.
+	AllowHeaders []string `yaml:"allow_headers" json:"allow_headers"`
+	// ExposeHeaders names response headers browser scripts may read beyond the
+	// CORS-safelisted set.
+	ExposeHeaders []string `yaml:"expose_headers" json:"expose_headers"`
+	// MaxAge is how long a browser may cache a preflight approval (default 2h,
+	// Chrome's cap).
+	MaxAge time.Duration `yaml:"max_age" json:"max_age"`
 }
 
 // Principal is one named identity and the credential methods (one map per method)
