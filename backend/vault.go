@@ -61,6 +61,20 @@ func (b *vaultBackend) CompactLogicalOnline() (int64, error) {
 	return vault.CompactLogicalOnline(b.cfg.Path)
 }
 
+// SnapshotEncrypted writes a densely-packed, re-sealed copy of the closed
+// container to dst (backend.EncryptedSnapshotter): an encrypted vault stays
+// encrypted — re-sealed with the SAME runtime options, so no plaintext touches
+// disk — while a compression-only vault yields a compressed plaintext copy. The
+// registry must hold the path reservation (handle closed) while this runs.
+//
+// Raw-key vaults re-seal cleanly (the key opens and re-seals). A recipient/
+// identity-mode vault opened at runtime carries no create-time recipients, so it
+// cannot be re-sealed in-band — vault.Snapshot refuses rather than write plaintext;
+// snapshot such a vault out of band.
+func (b *vaultBackend) SnapshotEncrypted(dst string) error {
+	return vault.Snapshot(dst, b.cfg.Path, b.opts, b.opts)
+}
+
 // newVault resolves the vault.Options for a database. The option surface splits
 // by role (see the plan): raw key, compression, cipher, authenticate, and anchor
 // apply to both create and open; the rest is chosen by whether the container

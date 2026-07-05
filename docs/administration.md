@@ -175,7 +175,8 @@ the wildcard-granted database, if immediate cutoff matters.
 | `trim` | vault | online | releases only the trailing free run — cheapest; `"max_bytes"` caps it too |
 | `reclaimable` | vault | online (read-only) | reports `reclaimable_bytes` a logical compaction would free — a probe, not a mutation |
 | `checkpoint` | **any WAL** | online | WAL checkpoint on the live handle; `"mode"` is `passive` (default) / `full` / `restart` / `truncate` |
-| `snapshot` | **any** | online | serializes the whole logical database to `"dest"` |
+| `snapshot` | **any** | online | serializes the whole logical database (**decrypted**, for a vault) to `"dest"` |
+| `snapshot_encrypted` | vault | offline-in-place | re-sealed **encrypted** copy of the container to `"dest"` — no plaintext on disk |
 
 ```sh
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
@@ -197,6 +198,10 @@ curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
   -d '{"database":"orders","op":"snapshot","dest":"orders-backup.db"}'
 # → {"status":"snapshot","database":"orders","dest":"/var/lib/quicsql/orders-backup.db","bytes":2228224}
+
+curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/maintenance \
+  -d '{"database":"orders","op":"snapshot_encrypted","dest":"orders-backup.vault"}'
+# → {"status":"snapshot_encrypted","database":"orders","dest":"/var/lib/quicsql/orders-backup.vault","bytes":2170880}
 ```
 
 The online reclaim ops (`compact_online`, `trim`, `compact_logical`) report how
@@ -213,12 +218,20 @@ database has active users), and clients see a lazy re-open on their next
 request. The reclaim ops run against the live handle.
 
 > [!WARNING]
-> A snapshot is written **decrypted** — it is the logical SQLite image, not the
+> A `snapshot` is written **decrypted** — it is the logical SQLite image, not the
 > vault container. That's what makes it a usable backup, and what makes it
 > dangerous if `data_dir` is replicated somewhere untrusted. Mitigations built
 > in: `dest` is confined to `data_dir` (escapes → 400), the file is created
 > `O_EXCL` mode 0600 (existing dest → 409), and the image is buffered in RAM —
 > plan for database-sized memory during a snapshot.
+>
+> For an encrypted vault, prefer **`snapshot_encrypted`**: it re-seals a
+> standalone copy of the container so **no plaintext ever touches disk** (same
+> `dest`-within-`data_dir` and no-clobber rules). It reserves the database (drains
+> the idle handle — 409 if busy) for a consistent read and streams via a temp
+> file, so it isn't RAM-bound like `snapshot`. Raw-key vaults re-seal in-band;
+> a recipient/identity-mode vault carries no runtime recipients and can't be
+> re-sealed this way (→ 500) — snapshot those out of band.
 
 ## The audit log
 

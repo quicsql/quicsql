@@ -294,6 +294,15 @@ type LogicalReclaimer interface {
 	CompactLogicalOnline() (int64, error)
 }
 
+// EncryptedSnapshotter is implemented by the vault backend: write a densely
+// packed, re-sealed standalone copy of the container to a NEW path — the
+// encrypted analogue of the decrypted Serialize snapshot, so an encrypted vault's
+// backup never touches disk as plaintext. The registry must hold the path
+// reservation (handle closed) while this runs.
+type EncryptedSnapshotter interface {
+	SnapshotEncrypted(dst string) error
+}
+
 // For selects and constructs the backend for one database entry.
 func For(db config.Database, sec secret.Resolver, dataDir string) (Backend, error) {
 	installSecurity() // register the ATTACH/DETACH deny before any connection opens

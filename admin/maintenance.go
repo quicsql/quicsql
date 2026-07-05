@@ -20,6 +20,7 @@ import (
 //	    "reclaimable"     — ONLINE:  report how much a logical compaction would free (vault only)
 //	    "checkpoint"      — ONLINE:  WAL checkpoint on the live handle (any WAL database)
 //	    "snapshot"        — copy the (decrypted, for a vault) database image to `dest` (any backend)
+//	    "snapshot_encrypted" — OFFLINE: re-sealed encrypted copy of a vault to `dest` (vault only)
 type maintenanceRequest struct {
 	Database string `json:"database"`
 	Op       string `json:"op"`
@@ -59,6 +60,8 @@ func (h *Handler) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		h.checkpoint(w, r, req)
 	case "snapshot":
 		h.snapshot(w, r, req)
+	case "snapshot_encrypted":
+		h.snapshotEncrypted(w, r, req)
 	default:
 		h.auditFail(r, req.Op, req.Database, "unknown maintenance op")
 		writeErr(w, http.StatusBadRequest, "unknown maintenance op")
@@ -291,6 +294,61 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenan
 	}
 	h.audit(r, "snapshot", req.Database, dest)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "snapshot", "database": req.Database, "dest": dest, "bytes": len(data)})
+}
+
+// snapshotEncrypted writes a re-sealed, standalone backup of a vault container to
+// req.Dest — the ENCRYPTED analogue of "snapshot". Where "snapshot" Serializes the
+// decrypted logical image (plaintext on disk), this keeps an encrypted vault
+// encrypted, so a backup never exposes plaintext. Vault backends only.
+//
+// The database is RESERVED first (its idle handle drained + closed, WAL
+// checkpointed): vault.Snapshot reads the container file directly and requires it
+// not be open, and the reservation also gives a consistent point-in-time read.
+// dest is constrained to within data_dir and must not already exist.
+func (h *Handler) snapshotEncrypted(w http.ResponseWriter, r *http.Request, req maintenanceRequest) {
+	dest, ok := h.contained(req.Dest)
+	if !ok {
+		h.auditFail(r, "snapshot_encrypted", req.Database, "dest escapes data_dir: "+req.Dest)
+		writeErr(w, http.StatusBadRequest, "snapshot dest must be a path within data_dir")
+		return
+	}
+	snap, ok := h.reg.Backend(req.Database).(backend.EncryptedSnapshotter)
+	if !ok {
+		h.auditFail(r, "snapshot_encrypted", req.Database, "backend is not a vault")
+		writeErr(w, http.StatusBadRequest, "encrypted snapshot is only supported for vault databases")
+		return
+	}
+	if _, err := os.Stat(dest); err == nil {
+		h.auditFail(r, "snapshot_encrypted", req.Database, "dest exists: "+dest)
+		writeErr(w, http.StatusConflict, "snapshot dest already exists")
+		return
+	}
+	// vault.Snapshot needs the container closed; reserve to drain the handle.
+	release, err := h.reg.Reserve(req.Database)
+	if err != nil {
+		if errors.Is(err, registry.ErrBusy) {
+			h.auditFail(r, "snapshot_encrypted", req.Database, "database busy")
+			writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
+			return
+		}
+		h.auditFail(r, "snapshot_encrypted", req.Database, "reserve failed")
+		writeErr(w, http.StatusInternalServerError, "cannot reserve database")
+		return
+	}
+	defer release()
+	if err := snap.SnapshotEncrypted(dest); err != nil {
+		_ = os.Remove(dest) // a partial/temp artifact must not linger
+		h.log.Error("quicsql/admin: encrypted snapshot", "db", req.Database, "err", err)
+		h.auditFail(r, "snapshot_encrypted", req.Database, "snapshot failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, "encrypted snapshot failed (a recipient-mode vault cannot be re-sealed in-band)")
+		return
+	}
+	var size int64
+	if info, statErr := os.Stat(dest); statErr == nil {
+		size = info.Size()
+	}
+	h.audit(r, "snapshot_encrypted", req.Database, dest)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "snapshot_encrypted", "database": req.Database, "dest": dest, "bytes": size})
 }
 
 // writeGetErr maps a registry Get failure to a status, matching the data plane's

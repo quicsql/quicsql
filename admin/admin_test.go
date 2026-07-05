@@ -198,6 +198,72 @@ func TestVaultOfflineCompact(t *testing.T) {
 	}
 }
 
+func TestSnapshotEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	sdir := t.TempDir()
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	_ = os.WriteFile(filepath.Join(sdir, "k"), key, 0o600)
+	sec, _ := secret.New([]config.SecretSource{{Name: "f", Type: "file", Dir: sdir}})
+
+	vbe, err := backend.For(config.Database{Name: "v", Backend: "vault", Path: "v.vault", Mode: "rwc",
+		Vault: &config.VaultConfig{Key: "f:k"}}, sec, dir)
+	if err != nil {
+		t.Fatalf("For vault: %v", err)
+	}
+	fbe, _ := backend.For(config.Database{Name: "f", Backend: "file", Path: "f.db", Mode: "rwc"}, sec, dir)
+	h, reg, _ := newAdmin(t, []string{"root"}, false, map[string]backend.Backend{"v": vbe, "f": fbe}, sec, dir)
+
+	// Materialize the container + rows, then release so it is idle (snapshot reserves).
+	dbh, release, err := reg.Get(context.Background(), "v")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := dbh.Handle.Exec("CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3);"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	release()
+
+	rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"v","op":"snapshot_encrypted","dest":"snap.vault"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot_encrypted: got %d (%s)", rec.Code, rec.Body)
+	}
+
+	// The artifact must be an ENCRYPTED vault container, NOT a decrypted SQLite
+	// image — its header is not the SQLite magic (the whole point vs "snapshot").
+	raw, err := os.ReadFile(filepath.Join(dir, "snap.vault"))
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if len(raw) < 16 {
+		t.Fatalf("snapshot too small: %d bytes", len(raw))
+	}
+	if string(raw[:16]) == "SQLite format 3\x00" {
+		t.Fatal("encrypted snapshot must not be a plaintext SQLite image")
+	}
+
+	// And it must open as a vault with the same key, rows intact.
+	snapBe, err := backend.For(config.Database{Name: "snap", Backend: "vault", Path: "snap.vault", Mode: "ro",
+		Vault: &config.VaultConfig{Key: "f:k"}}, sec, dir)
+	if err != nil {
+		t.Fatalf("For snapshot: %v", err)
+	}
+	sdb, err := snapBe.Open(context.Background())
+	if err != nil {
+		t.Fatalf("open snapshot vault: %v", err)
+	}
+	defer sdb.Close()
+	var n int
+	if err := sdb.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil || n != 3 {
+		t.Fatalf("snapshot rows: n=%d err=%v, want 3", n, err)
+	}
+
+	// A non-vault (file) backend rejects encrypted snapshot.
+	if rec := as(t, h, "root", http.MethodPost, "/_admin/maintenance", `{"database":"f","op":"snapshot_encrypted","dest":"x.vault"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("encrypted snapshot on file backend: got %d, want 400", rec.Code)
+	}
+}
+
 func TestCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	sec, _ := secret.New(nil)
