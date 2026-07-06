@@ -120,6 +120,50 @@ type Auth struct {
 	SQLPolicy      SQLPolicy     `yaml:"sql_policy" json:"sql_policy"`
 	Session        SessionTokens `yaml:"session" json:"session"`
 	Enroll         Enroll        `yaml:"enroll" json:"enroll"`
+	Accounts       Accounts      `yaml:"accounts" json:"accounts"`
+}
+
+// Accounts enables the multi-credential account model (accounts design): device
+// keys, an attach flow, and recovery replace single-key enrollment. Like Enroll it
+// requires the control plane + explicit auth, and provisions a per-account database.
+type Accounts struct {
+	Enabled        bool            `yaml:"enabled" json:"enabled"`
+	Provision      Provision       `yaml:"provision" json:"provision"`
+	CodeTTL        time.Duration   `yaml:"code_ttl" json:"code_ttl"`           // attach/recovery code lifetime (default 24h)
+	RecoveryHold   time.Duration   `yaml:"recovery_hold" json:"recovery_hold"` // reduced-scope destructive hold after a recovery-code redeem
+	IdleTTL        time.Duration   `yaml:"idle_ttl" json:"idle_ttl"`           // 0 ⇒ keep forever
+	RatePerIP      float64         `yaml:"rate_per_ip" json:"rate_per_ip"`     // per-IP join/recover rate
+	MaxCredentials int             `yaml:"max_credentials" json:"max_credentials"`
+	MaxAttachCodes int             `yaml:"max_attach_codes" json:"max_attach_codes"`
+	Session        AccountSession  `yaml:"session" json:"session"`
+	Assurance      AssuranceCfg    `yaml:"assurance" json:"assurance"`
+	Password       AccountPassword `yaml:"password" json:"password"`
+}
+
+// AccountPassword enables password login (accounts design Phase 2.1). A password is a
+// DATA-ONLY credential — a phished password can read/write the database but never
+// manages other credentials or reaches root. Pepper is REQUIRED when enabled: it keys
+// every Argon2id hash with material held OUTSIDE the SQLite file (a secret reference),
+// so a stolen store is not crackable.
+type AccountPassword struct {
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	Pepper    string `yaml:"pepper" json:"pepper"`         // secret ref (source:name); required when enabled
+	MinLength int    `yaml:"min_length" json:"min_length"` // sole-factor floor (default 15; NIST 800-63B-4)
+}
+
+// AccountSession selects how session tokens travel. Secure default: header-bearer
+// (CSRF-moot). cookie/both auto-enable CSRF defenses (accounts design §21-G1).
+type AccountSession struct {
+	Transport string `yaml:"transport" json:"transport"` // header (default) | cookie | both
+}
+
+// AssuranceCfg is the operator-tunable step-up policy. Defaults are the secure
+// phishing-resistant gate; loosening credential_mgmt/destructive to "strong" (accept
+// TOTP) warns at startup (accounts design §21-A1/G2).
+type AssuranceCfg struct {
+	CredentialMgmt string        `yaml:"credential_mgmt" json:"credential_mgmt"` // phishing_resistant (default) | strong
+	Destructive    string        `yaml:"destructive" json:"destructive"`
+	StepUpWindow   time.Duration `yaml:"step_up_window" json:"step_up_window"` // default 10m
 }
 
 // Enroll enables self-service device enrollment at POST /_auth/enroll (served

@@ -39,6 +39,7 @@ import (
 	"net/http"
 	"time"
 
+	"quicsql.net/account"
 	"quicsql.net/admin"
 	"quicsql.net/auth"
 	"quicsql.net/authz"
@@ -50,6 +51,7 @@ import (
 	"quicsql.net/httpapi"
 	"quicsql.net/limits"
 	"quicsql.net/meta"
+	"quicsql.net/notify"
 	"quicsql.net/obs"
 	"quicsql.net/provision"
 	"quicsql.net/registry"
@@ -57,6 +59,53 @@ import (
 	"quicsql.net/session"
 	"quicsql.net/transport"
 )
+
+// assurancePolicy maps the configured step-up policy to authz.AssurancePolicy. The
+// zero (empty) value resolves to the SECURE default (phishing-resistant); loosening
+// an action class to "strong" (accept phishable TOTP) warns loudly at startup.
+func assurancePolicy(a config.AssuranceCfg, log *slog.Logger) authz.AssurancePolicy {
+	return authz.AssurancePolicy{
+		CredentialMgmt: assuranceFactors(a.CredentialMgmt, "credential_mgmt", log),
+		Destructive:    assuranceFactors(a.Destructive, "destructive", log),
+		StepUpWindow:   a.StepUpWindow,
+	}
+}
+
+// acctEnrollments adapts the account service to the admin principal-management
+// surface (/_admin/principals list + delete). Admin-minted codes don't apply to the
+// account model — owners mint attach codes at /_auth/credentials/attach-code.
+type acctEnrollments struct{ svc *account.Service }
+
+func (a acctEnrollments) List() ([]meta.Enrolled, error) {
+	accts, err := a.svc.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]meta.Enrolled, len(accts))
+	for i, ac := range accts {
+		out[i] = meta.Enrolled{Name: ac.Principal, CreatedAt: ac.CreatedAt, LastSeen: ac.LastSeen}
+	}
+	return out, nil
+}
+
+func (a acctEnrollments) Delete(name string) (bool, error) { return a.svc.Delete(name) }
+
+func (a acctEnrollments) MintCode() (string, int64, error) {
+	return "", 0, fmt.Errorf("account model: owners mint attach codes at /_auth/credentials/attach-code")
+}
+
+func assuranceFactors(v, field string, log *slog.Logger) authz.Factor {
+	switch v {
+	case "", "phishing_resistant":
+		return 0 // AssurancePolicy.withDefaults ⇒ phishing-resistant
+	case "strong":
+		log.Warn("quicsql: auth.accounts.assurance." + field + " loosened to 'strong' — phishable TOTP can now authorize this action; the secure default is phishing_resistant")
+		return authz.PhishingResistant | authz.FactorOTP
+	default:
+		log.Warn("quicsql: unknown auth.accounts.assurance value — using the secure default", "field", field, "value", v)
+		return 0
+	}
+}
 
 const (
 	warmTimeout             = 30 * time.Second
@@ -226,7 +275,7 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 		}
 		prov := provision.New(reg, store, pf, metrics, sec, cfg.Server.DataDir, log)
 		adminH.SetProvisioner(prov)
-		if cfg.Auth.Enroll.Enabled {
+		if cfg.Auth.Enroll.Enabled && !cfg.Auth.Accounts.Enabled {
 			// Config validation guarantees the prerequisites here: explicit auth
 			// (never open mode) and the control plane (so store is non-nil).
 			enr, err := enroll.New(cfg.Auth.Enroll, store, authn, policy, sec, log)
@@ -260,6 +309,49 @@ func Run(cfg *config.Config, log *slog.Logger) (*Instance, error) {
 				log.Info("quicsql: enrollment idle GC on", "idle_ttl", cfg.Auth.Enroll.IdleTTL)
 			}
 			log.Info("quicsql: enrollment enabled at /_auth/enroll", "policy", cfg.Auth.Enroll.Policy, "enrolled", n, "max", cfg.Auth.Enroll.MaxPrincipals)
+		}
+		if cfg.Auth.Accounts.Enabled {
+			ac := cfg.Auth.Accounts
+			if ac.Provision.Enabled && cfg.Limits.IdleHandleTimeout == 0 {
+				log.Warn("quicsql: auth.accounts.provision is on but limits.idle_handle_timeout is unset — per-account databases stay open once first used; set idle_handle_timeout so the open-handle set tracks ACTIVE accounts, not the total")
+			}
+			var pwPepper []byte
+			if ac.Password.Enabled {
+				pwPepper, err = sec.Bytes(ac.Password.Pepper)
+				if err != nil {
+					stopReaper()
+					sessions.CloseAll()
+					_ = reg.Close()
+					closeStore(store, log)
+					return nil, fmt.Errorf("resolve auth.accounts.password.pepper: %w", err)
+				}
+			}
+			acctSvc := account.New(account.Config{
+				Provision: ac.Provision, CodeTTL: ac.CodeTTL, RecoveryHold: ac.RecoveryHold,
+				IdleTTL: ac.IdleTTL, MaxCredentials: ac.MaxCredentials, MaxAttachCodes: ac.MaxAttachCodes,
+				Password: account.PasswordPolicy{Enabled: ac.Password.Enabled, Pepper: pwPepper, MinLength: ac.Password.MinLength},
+			}, store, authn, policy, prov, notify.Noop{}, log)
+			n, err := acctSvc.LoadExisting()
+			if err != nil {
+				stopReaper()
+				sessions.CloseAll()
+				_ = reg.Close()
+				closeStore(store, log)
+				return nil, fmt.Errorf("load accounts: %w", err)
+			}
+			acctH := account.NewHandler(acctSvc, authn, assurancePolicy(ac.Assurance, log), ac.RatePerIP, log)
+			authn.SetAccountHandler(acctH, acctH.Paths())
+			adminH.SetEnrollments(acctEnrollments{acctSvc}) // /_admin/principals list + delete for accounts
+			authn.SetSessionStore(store)                    // durable session registry (device list + account-wide revoke)
+			if err := store.ClearSessions(); err != nil {   // stale pre-restart rows (their tokens are already dead)
+				log.Warn("quicsql: clear stale session registry", "err", err)
+			}
+			if ac.IdleTTL > 0 {
+				authn.SetSeenHook(acctSvc.Touch)
+				acctSvc.StartIdleReaper(reaperCtx, reapInterval)
+				log.Info("quicsql: account idle GC on", "idle_ttl", ac.IdleTTL)
+			}
+			log.Info("quicsql: accounts enabled at /_auth/enroll (register/attach), /_auth/{recovery,credentials,sessions}", "accounts", n)
 		}
 		handlerOpts = append(handlerOpts, httpapi.WithAdmin(adminH))
 		log.Info("quicsql: control plane enabled at /_admin", "admins", len(cfg.ControlPlane.Admins))

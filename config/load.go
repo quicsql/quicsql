@@ -440,6 +440,9 @@ func (c *Config) validateAuth() error {
 	if err := c.validateEnroll(); err != nil {
 		return err
 	}
+	if err := c.validateAccounts(); err != nil {
+		return err
+	}
 
 	principals := map[string]bool{}
 	for _, p := range c.Auth.Principals {
@@ -481,6 +484,68 @@ func (c *Config) validateAuth() error {
 	for _, a := range c.ControlPlane.Admins {
 		if !principals[a] {
 			return fmt.Errorf("config: control_plane admin %q is not a configured principal", a)
+		}
+	}
+	return nil
+}
+
+// validateAccounts checks the auth.accounts block. Like enroll, the account model
+// is refused without explicit auth or the control plane (the meta store holds the
+// accounts, /_admin/principals is the oversight surface), and — since every account
+// OWNS a database — the provisioning template must contain {principal} so accounts
+// don't collide on one database.
+func (c *Config) validateAccounts() error {
+	a := c.Auth.Accounts
+	if !a.Enabled {
+		return nil
+	}
+	if !c.AuthConfigured() {
+		return fmt.Errorf("config: auth.accounts.enabled requires explicit auth — accounts must not flip an open-mode server")
+	}
+	if !c.ControlPlane.Enabled {
+		return fmt.Errorf("config: auth.accounts.enabled requires control_plane.enabled (the meta store holds accounts; /_admin/principals manages them)")
+	}
+	if a.CodeTTL < 0 || a.RecoveryHold < 0 || a.IdleTTL < 0 || a.RatePerIP < 0 || a.MaxCredentials < 0 || a.MaxAttachCodes < 0 {
+		return fmt.Errorf("config: auth.accounts quotas/timers must not be negative")
+	}
+	switch a.Session.Transport {
+	case "", "header":
+	case "cookie", "both":
+		c.warnings = append(c.warnings, "config: auth.accounts.session.transport "+a.Session.Transport+" is not implemented yet (Phase 2) — only 'header' is active; sessions remain Authorization-header bearer")
+	default:
+		return fmt.Errorf("config: auth.accounts.session.transport %q invalid (want header|cookie|both)", a.Session.Transport)
+	}
+	// Accounts ALWAYS provision (each account owns a database), so validate the
+	// template even when Provision.Enabled is unset.
+	p := a.Provision
+	tmpl := p.NameTemplate
+	if tmpl == "" {
+		tmpl = "{principal}"
+	}
+	if !strings.Contains(tmpl, "{principal}") {
+		return fmt.Errorf("config: auth.accounts.provision.name_template %q must contain {principal} so per-account databases don't collide", tmpl)
+	}
+	if p.Backend != "" && !KnownBackends[p.Backend] {
+		return fmt.Errorf("config: auth.accounts.provision.backend %q unknown", p.Backend)
+	}
+	if p.Level != "" && p.Level != "read-only" && p.Level != "read-write" {
+		return fmt.Errorf("config: auth.accounts.provision.level %q invalid (want read-only|read-write)", p.Level)
+	}
+	if p.OnRevoke != "" && p.OnRevoke != "keep" && p.OnRevoke != "drop" {
+		return fmt.Errorf("config: auth.accounts.provision.on_revoke %q invalid (want keep|drop)", p.OnRevoke)
+	}
+	if p.MaxBytes < 0 {
+		return fmt.Errorf("config: auth.accounts.provision.max_bytes must not be negative")
+	}
+	if a.Password.Enabled {
+		if a.Password.Pepper == "" {
+			return fmt.Errorf("config: auth.accounts.password.enabled requires auth.accounts.password.pepper (a secret reference — the key outside the store that makes a stolen .sqlite uncrackable)")
+		}
+		if a.Password.MinLength != 0 && a.Password.MinLength < 8 {
+			return fmt.Errorf("config: auth.accounts.password.min_length %d is below the NIST floor of 8", a.Password.MinLength)
+		}
+		if a.Password.MinLength != 0 && a.Password.MinLength < 15 {
+			c.warnings = append(c.warnings, "config: auth.accounts.password.min_length below 15 weakens a sole-factor password (NIST 800-63B-4 recommends ≥15 when password is the only factor)")
 		}
 	}
 	return nil

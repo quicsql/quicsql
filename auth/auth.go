@@ -45,8 +45,10 @@ import (
 // concurrent use.
 type Authenticator struct {
 	challenger *challenger
-	sessions   *sessionMinter // nil unless auth.session.enabled
-	enroll     http.Handler   // nil unless auth.enroll.enabled (set by serverd wiring)
+	sessions   *sessionMinter  // nil unless auth.session.enabled
+	enroll     http.Handler    // nil unless auth.enroll.enabled (set by serverd wiring)
+	account    http.Handler    // nil unless auth.accounts.enabled (replaces enroll)
+	acctPaths  map[string]bool // account handler's owned paths
 	log        *slog.Logger
 
 	bearer   map[string]string       // hex(sha256(token)) → principal name
@@ -272,6 +274,14 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			// actually accepts the tokens it issues.
 			m.serveSession(w, r)
 			return
+		case m.a.account != nil && m.a.acctPaths[r.URL.Path]:
+			// The account model owns a set of /_auth/* paths (register-or-attach,
+			// recover, credential/session management). It replaces enroll and does its
+			// own per-endpoint auth (possession proof for join/recover, or a session
+			// token + assurance for management), so it needs no listener method gate —
+			// management endpoints work on session-only listeners too.
+			m.a.account.ServeHTTP(w, r)
+			return
 		case r.URL.Path == "/_auth/enroll" && m.accepted["keyring"] && m.a.enroll != nil:
 			// Enrollment lives where keyring auth does: an enrolled key will
 			// authenticate via the keyring method, so only keyring listeners
@@ -399,7 +409,7 @@ func (a *Authenticator) trySession(r *http.Request) (*authz.Principal, bool, err
 	if !strings.HasPrefix(tok, sessionPrefix) {
 		return nil, false, nil
 	}
-	name, err := a.sessions.verify(tok)
+	name, _, claims, err := a.sessions.verify(tok)
 	if err != nil {
 		return nil, true, errInvalidCredential
 	}
@@ -409,7 +419,9 @@ func (a *Authenticator) trySession(r *http.Request) (*authz.Principal, bool, err
 		// intended flow is enroll (keyring once) then use a session token.
 		a.seenHook(name)
 	}
-	return &authz.Principal{Name: name, Method: "session"}, true, nil
+	// The token carries the session's assurance (tier/factors/recency) so account-
+	// management handlers can gate sensitive actions; data-plane authz ignores it.
+	return &authz.Principal{Name: name, Method: "session", Assurance: claims.assurance()}, true, nil
 }
 
 func (a *Authenticator) tryPassword(r *http.Request) (*authz.Principal, bool, error) {
@@ -473,7 +485,8 @@ func (a *Authenticator) AddKeyring(canon string, pub ed25519.PublicKey, name str
 	a.dynMu.Unlock()
 }
 
-// RemoveKeyringName revokes every runtime-enrolled key bound to name.
+// RemoveKeyringName revokes every runtime-enrolled key bound to name (whole-account
+// removal — deleting a principal).
 func (a *Authenticator) RemoveKeyringName(name string) {
 	a.dynMu.Lock()
 	for canon, cred := range a.dynKeyring {
@@ -482,6 +495,96 @@ func (a *Authenticator) RemoveKeyringName(name string) {
 		}
 	}
 	a.dynMu.Unlock()
+}
+
+// SetSessionStore wires a durable session registry (device list + account-wide
+// revocation) into the session minter. No-op when session auth is disabled.
+func (a *Authenticator) SetSessionStore(st SessionStore) {
+	if a.sessions != nil {
+		a.sessions.setStore(st)
+	}
+}
+
+// RevokeAccountSessions revokes every session for account except exceptHexSID (the
+// acting session, so a credential change doesn't self-logout). No-op without a
+// session store.
+func (a *Authenticator) RevokeAccountSessions(account, exceptHexSID string) error {
+	if a.sessions == nil {
+		return nil
+	}
+	return a.sessions.revokeAccount(account, exceptHexSID)
+}
+
+// RevokeCredentialSessions revokes every session minted by credID — used when that
+// credential (device/passkey) is detached.
+func (a *Authenticator) RevokeCredentialSessions(credID string) error {
+	if a.sessions == nil {
+		return nil
+	}
+	return a.sessions.revokeByCredential(credID)
+}
+
+// RevokeSessionID revokes a single session by its hex id — one entry from the
+// device/session list. No-op without session auth.
+func (a *Authenticator) RevokeSessionID(sidHex string) {
+	if a.sessions != nil {
+		a.sessions.revokeOne(sidHex)
+	}
+}
+
+// MintSessionAs mints a session token for an account principal with explicit
+// assurance claims — used by the account service to issue a recovery-redeem session
+// (a recovery key ⇒ owner/full; a recovery code ⇒ owner/reduced with a destructive
+// hold via notBefore). credIDHex is the authenticating credential (32-hex ⇒ 16
+// bytes). Errors when session auth is disabled.
+func (a *Authenticator) MintSessionAs(principal string, tier authz.Tier, factors authz.Factor, scope authz.Scope, credIDHex string, notBefore time.Time) (token string, exp, hardExp time.Time, err error) {
+	if a.sessions == nil {
+		return "", time.Time{}, time.Time{}, errors.New("auth: session tokens are not enabled (auth.session)")
+	}
+	var cid []byte
+	if b, e := hex.DecodeString(credIDHex); e == nil && len(b) == credLen {
+		cid = b
+	}
+	return a.sessions.mint(principal, sessClaims{
+		tier: tier, factors: factors, scope: scope, credID: cid, notBefore: notBefore,
+	})
+}
+
+// SessionPrincipal resolves a request's session token (a qs_ bearer) to its account
+// principal (with assurance) and hex session id — for the account-management
+// endpoints, which authenticate the caller themselves rather than going through the
+// listener's method chain. ok=false when there is no valid session token.
+func (a *Authenticator) SessionPrincipal(r *http.Request) (p *authz.Principal, sidHex string, ok bool) {
+	if a.sessions == nil {
+		return nil, "", false
+	}
+	tok, has := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !has {
+		return nil, "", false
+	}
+	tok = strings.TrimSpace(tok)
+	if !strings.HasPrefix(tok, sessionPrefix) {
+		return nil, "", false
+	}
+	name, sid, claims, err := a.sessions.verify(tok)
+	if err != nil {
+		return nil, "", false
+	}
+	return &authz.Principal{Name: name, Method: "session", Assurance: claims.assurance()}, sid, true
+}
+
+// RemoveKeyringKey revokes exactly ONE runtime-enrolled key (one device credential)
+// without touching the account's other keys — the "detach this device" primitive
+// (accounts §21-B5). Reports whether a key was removed. A statically-configured key
+// is never removed (config wins).
+func (a *Authenticator) RemoveKeyringKey(canon string) bool {
+	a.dynMu.Lock()
+	defer a.dynMu.Unlock()
+	if _, ok := a.dynKeyring[canon]; !ok {
+		return false
+	}
+	delete(a.dynKeyring, canon)
+	return true
 }
 
 // VerifyPresented checks the keyring header triple against the key PRESENTED in
@@ -512,6 +615,17 @@ func (a *Authenticator) VerifyPresented(r *http.Request) (canon string, pub ed25
 // SetEnrollHandler mounts the enrollment endpoint (nil leaves it absent). Set
 // once during serverd assembly, before any listener serves.
 func (a *Authenticator) SetEnrollHandler(h http.Handler) { a.enroll = h }
+
+// SetAccountHandler wires the multi-credential account handler (accounts model),
+// which owns the given /_auth/* paths. It replaces the enroll handler; both are
+// served on keyring-accepting listeners and do their own auth per endpoint.
+func (a *Authenticator) SetAccountHandler(h http.Handler, paths []string) {
+	a.account = h
+	a.acctPaths = map[string]bool{}
+	for _, p := range paths {
+		a.acctPaths[p] = true
+	}
+}
 
 func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, error) {
 	sig := r.Header.Get("X-Quicsql-Signature")
@@ -584,6 +698,21 @@ func (m *Middleware) serveChallenge(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]string{"challenge": c})
 }
 
+// amrForMethod maps the authenticating method to the assurance factor(s) a minted
+// session records (OIDC amr). Phase-0 mapping — a keyring/mtls credential is a
+// possession factor (device key), a password/bearer secret is a knowledge factor;
+// accounts refine this per-credential (adding webauthn/otp/recovery).
+func amrForMethod(method string) authz.Factor {
+	switch method {
+	case "keyring", "mtls":
+		return authz.FactorDeviceKey
+	case "password", "bearer":
+		return authz.FactorPassword
+	default:
+		return 0
+	}
+}
+
 // serveSession mints (POST), renews (PUT), or revokes (DELETE) a session token.
 //
 // Minting exchanges a NON-session credential — the request authenticates with
@@ -610,7 +739,17 @@ func (m *Middleware) serveSession(w http.ResponseWriter, r *http.Request) {
 			m.deny(w, errUnauthenticated)
 			return
 		}
-		tok, exp, hardExp, err := m.a.sessions.mint(p.Name)
+		// Only account principals (u_…) carry owner tier — their session may manage
+		// the account's credentials. Static operators / other principals default to
+		// data-only, so a future tier check can't over-authorize them.
+		tier := authz.TierDataOnly
+		if strings.HasPrefix(p.Name, "u_") {
+			tier = authz.TierOwner
+		}
+		tok, exp, hardExp, err := m.a.sessions.mint(p.Name, sessClaims{
+			tier:    tier,
+			factors: amrForMethod(p.Method),
+		})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 			return

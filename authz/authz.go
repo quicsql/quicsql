@@ -66,6 +66,10 @@ func (l Level) CanAdmin() bool { return l >= Admin }
 type Principal struct {
 	Name   string
 	Method string
+	// Assurance is the authentication context of a session-token principal (tier,
+	// factors, recency) — nil for every other method. Account-management handlers
+	// pass it to RequireAssurance; data-plane authz (Level) ignores it.
+	Assurance *Assurance
 }
 
 // Anonymous is the identity of an unauthenticated request on a listener that
