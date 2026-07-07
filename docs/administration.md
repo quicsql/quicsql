@@ -136,9 +136,10 @@ granularity-15s.
 
 ## Enrolled principals: list, delete
 
-When [device enrollment](auth-and-authz.md) is enabled, the runtime-enrolled
-principals are managed here (server-admin only — per-database `admin` grants do
-not extend to identity management; both routes 404 when enrollment is off):
+When [device enrollment](auth-and-authz.md) is enabled, the runtime-registered
+principals — enrolled keys, the `u_…` identities — are listed and deleted here
+(server-admin only — per-database `admin` grants do not extend to identity
+management; both routes 404 when enrollment is off):
 
 ```sh
 curl -s -H "Authorization: Bearer $OPS" http://127.0.0.1:7775/_admin/principals
@@ -357,15 +358,15 @@ any authenticated principal can read database names. The intended pattern is a
 loopback listener with `auth: [none]` for the scraper. The complete surface:
 
 ```
-# TYPE quicsql_requests_total counter
-quicsql_requests_total{db="appdb"} 2
-# TYPE quicsql_request_duration_seconds summary
-quicsql_request_duration_seconds_sum{db="appdb"} 0.00038975
-quicsql_request_duration_seconds_count{db="appdb"} 2
-# TYPE quicsql_active_sessions gauge
-quicsql_active_sessions 0
-# TYPE quicsql_databases gauge
-quicsql_databases 4
+# TYPE requests_total counter
+requests_total{db="appdb"} 2
+# TYPE request_duration_seconds summary
+request_duration_seconds_sum{db="appdb"} 0.00038975
+request_duration_seconds_count{db="appdb"} 2
+# TYPE active_sessions gauge
+active_sessions 0
+# TYPE databases gauge
+databases 4
 ```
 
 Labels carry the database only (principals are deliberately excluded — label

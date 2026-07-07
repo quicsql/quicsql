@@ -6,7 +6,7 @@
 // enrolled set persists in the meta store and is reloaded at startup; the
 // grants template — never the store — is the authorization truth.
 //
-// Abuse controls (see the security design in the plans): a hard cap on the
+// Abuse controls: a hard cap on the
 // enrolled set, a per-IP token bucket, an optional enrollment-token gate, and
 // server-assigned names (u_<key-hash prefix>) so an enrollee can never choose —
 // or shadow — an identity. Enrollment is only wired on servers with explicit
@@ -35,7 +35,7 @@ import (
 	"quicsql.net/auth"
 	"quicsql.net/authz"
 	"quicsql.net/config"
-	"quicsql.net/internal/httpjson"
+	"quicsql.net/httpjson"
 	"quicsql.net/meta"
 	"quicsql.net/provision"
 	"quicsql.net/registry"
@@ -120,7 +120,7 @@ func (s *Service) LoadExisting() (int, error) {
 	for _, e := range list {
 		pub, err := auth.ParseEd25519PublicKey(e.Key)
 		if err != nil {
-			s.log.Warn("quicsql/enroll: skipping undecodable enrolled key", "principal", e.Name, "err", err)
+			s.log.Warn("enroll: skipping undecodable enrolled key", "principal", e.Name, "err", err)
 			continue
 		}
 		s.authn.AddKeyring(e.Key, pub, e.Name)
@@ -239,7 +239,7 @@ func (s *Service) flushSeen() {
 	s.seen = make(map[string]int64, len(batch))
 	s.seenMu.Unlock()
 	if err := s.store.TouchEnrolled(batch); err != nil {
-		s.log.Error("quicsql/enroll: flush last-seen", "err", err)
+		s.log.Error("enroll: flush last-seen", "err", err)
 		s.seenMu.Lock()
 		for name, at := range batch {
 			if cur, ok := s.seen[name]; !ok || at > cur {
@@ -260,17 +260,17 @@ func (s *Service) reap(now int64) int {
 	s.flushSeen()
 	idle, err := s.store.IdleEnrolled(now - int64(s.cfg.IdleTTL.Seconds()))
 	if err != nil {
-		s.log.Error("quicsql/enroll: idle scan", "err", err)
+		s.log.Error("enroll: idle scan", "err", err)
 		return 0
 	}
 	n := 0
 	for _, name := range idle {
 		switch ok, derr := s.Delete(name); {
 		case derr != nil:
-			s.log.Error("quicsql/enroll: idle GC delete", "principal", name, "err", derr)
+			s.log.Error("enroll: idle GC delete", "principal", name, "err", derr)
 		case ok:
 			s.store.Audit(name, "enroll.idle_gc", "", "")
-			s.log.Info("quicsql/enroll: idle principal removed", "principal", name)
+			s.log.Info("enroll: idle principal removed", "principal", name)
 			n++
 		}
 	}
@@ -415,7 +415,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.rollbackEnroll(name, codeHash)
 			unlock()
 			s.store.Audit(name, "enroll.failed", "", "revoked or unconfirmed before provisioning")
-			s.log.Warn("quicsql/enroll: principal not confirmed before provisioning, rolled back", "principal", name)
+			s.log.Warn("enroll: principal not confirmed before provisioning, rolled back", "principal", name)
 			httpjson.Error(w, http.StatusConflict, "enrollment was revoked; please retry")
 			return
 		}
@@ -423,7 +423,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.rollbackEnroll(name, codeHash)
 			unlock()
 			s.store.Audit(name, "enroll.failed", "", "provision: "+err.Error())
-			s.log.Error("quicsql/enroll: provisioning failed, enrollment rolled back", "principal", name, "err", err)
+			s.log.Error("enroll: provisioning failed, enrollment rolled back", "principal", name, "err", err)
 			httpjson.Error(w, http.StatusInternalServerError, "enrollment could not provision a database")
 			return
 		}
@@ -431,7 +431,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.store.Audit(name, "enroll.created", "", "ip="+ip)
-	s.log.Info("quicsql/enroll: principal enrolled", "principal", name, "ip", ip)
+	s.log.Info("enroll: principal enrolled", "principal", name, "ip", ip)
 	httpjson.Write(w, http.StatusOK, map[string]any{"principal": name, "created": true})
 }
 
@@ -541,7 +541,7 @@ func (s *Service) validateToken(token string) (ok bool, codeHash string) {
 	if s.cfg.Codes.Enabled {
 		valid, err := s.store.EnrollCodeValid(hexsum, time.Now().Unix())
 		if err != nil {
-			s.log.Error("quicsql/enroll: check code", "err", err)
+			s.log.Error("enroll: check code", "err", err)
 			return false, ""
 		}
 		if valid {

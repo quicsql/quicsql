@@ -2,39 +2,101 @@
 
 All notable changes to quicSQL are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
-[Semantic Versioning](https://semver.org/) — with the pre-1.0 caveat that a minor
-(0.x.0) bump may carry breaking changes, which are always called out under
-**Upgrade notes**.
+[Semantic Versioning](https://semver.org/). quicSQL is **alpha**: a 0.x.0 bump may
+carry breaking changes without further ceremony.
+
+## [Unreleased]
+
+The client-facing wave: browser and device clients become first-class (CORS,
+session tokens, self-service enrollment, a change feed), operations grow real
+backup/restore and vault key lifecycle, and the server becomes an embeddable
+core that product binaries extend with compiled-in feature modules.
+
+### Added
+
+- **Feature modules (plugin architecture).** Optional server modules compile into
+  a *product* binary — the Caddy/CoreDNS model — while the core `quicsql` binary
+  stays lean: `serverd.RegisterFeature` (a `Feature` is set up against a `Host`
+  after the core is built, torn down at shutdown), `config.RegisterSection` (a
+  feature owns its own config key), and `meta.RegisterMigration` + `meta.Store.DB`
+  (a feature keeps its own tables in the meta store, vault-safe on the shared
+  handle). The new `cli` package exports the daemon entrypoint, so a product
+  binary is a blank import of its features plus `cli.Main` — `cmd/quicsql` is now
+  a thin shim over it.
+- **Session tokens** (`auth.session`) — exchange any real credential at
+  `POST /_auth/session` for a short-lived, HMAC-signed `st_` bearer token
+  (renew with `PUT`, revoke with `DELETE`); optionally sliding (`idle_ttl` /
+  `max_ttl`) with transparent renewal via the `X-Session-Token` response header.
+  A token cannot mint its successor, and a restart invalidates all outstanding
+  tokens. Optional **cookie transport**: the token can also travel as a
+  `__Host-`-prefixed HttpOnly cookie, which auto-enables the CSRF defenses
+  (SameSite=Strict, Secure, and a Sec-Fetch-Site check on state-changing requests).
+- **Assurance levels (step-up authorization).** A session token carries how it
+  was authenticated (factor tier, auth time, credential id); an operator-tunable
+  `AssurancePolicy` gates sensitive action classes (credential management,
+  destructive ops) on factor strength and step-up recency, with secure defaults.
+- **Device enrollment** (`auth.enroll`) — a public client generates an ed25519
+  keypair and self-registers its public key at `POST /_auth/enroll` (possession
+  proven by signing a challenge, like keyring auth). Principals get
+  server-assigned names (`u_<key-hash>`) and exactly the configured grants
+  template. Gate with static tokens or **single-use enrollment codes**; quotas
+  (`max_principals`, per-IP rate) bound abuse; stale enrollees are GC'd after
+  `idle_ttl`; and `provision:` optionally gives each enrollee their **own
+  database** (database-per-user, with a `max_bytes` size cap and revoke policy).
+  Managed at `/_admin/principals` (list, delete — key and grants revoked together).
+- **CORS** (`cors:` block) — serve browser apps cross-origin: preflights are
+  answered before authentication, approvals stamped on real responses. Validation
+  refuses the `*` origin on a server with no auth configured.
+- **Change feed** — `GET /<db>/changes` streams committed changes over SSE
+  (table, operation, rowid — never column values; nothing is published for a
+  rolled-back write). Per-database replay ring for reconnect-and-resume, a
+  subscriber cap, and control-plane create/detach keep the feed in step.
+- **Online backup and in-place restore** — `GET /<db>/backup` streams a
+  standalone SQLite file via the online-backup API (bounded memory, no size cap,
+  writers not blocked), complementing the in-RAM `/export`. `POST
+  /_admin/restore?database=<db>` swaps a validated image into a file database
+  atomically (magic + open + integrity check first, 409 if busy). Go client:
+  `BackupTo` + `AdminRestore` — a clone in two calls.
+- **Vault key lifecycle** — maintenance ops to list key **members**, **rewrap**
+  (rotate the wrapping of the data key), and **rekey** (rotate the data key
+  itself) a live vault, plus **`snapshot_encrypted`** (an encrypted-at-rest
+  snapshot artifact, unlike the decrypted logical image).
+- **Vault space ops** — `compact_logical` (online rewrite down to the logical
+  footprint, O(live data) after big deletes), `reclaimable` (read-only probe of
+  what it would free), and `checkpoint` (WAL checkpoint on any WAL database,
+  `passive|full|restart|truncate`).
+- **Changeset apply controls** — an `on_conflict` policy and a table filter on
+  `POST /<db>/changeset/apply`.
+- **`kms` secret source** — resolves `kms:<name>` references by exec'ing an
+  operator-provided command that wraps the real KMS (previously reserved and
+  unimplemented).
+- **Docs & skills** — a JavaScript/browser clients guide and skill, the change-feed
+  guide, and refreshed auth/administration/operations docs covering all of the above.
+
+### Changed
+
+- **White-label wire surface.** Everything on the wire is brand-neutral and
+  defined once in `internal/wire`: header names (`X-Session-Token`,
+  `X-Keyring-Key/Challenge/Signature`), the `st_` session-token prefix, a generic
+  `WWW-Authenticate` realm, the `__Host-session` cookie, and **unprefixed metric
+  names** (`databases`, `active_sessions` — previously `quicsql_*`).
+- **Lazy warming.** `registry.Warm(ctx, names)` now eagerly opens only the
+  config-declared seeds; meta-store databases (runtime-created and per-user
+  provisioned) open lazily on first request, so startup is no longer O(total
+  provisioned databases). (Signature change from `Warm(ctx)`; the server passes
+  seed names.)
+- `internal/httpjson` is exported as `httpjson` so feature modules can use it;
+  admin create/detach share one provisioning path.
+
+### Fixed
+
+- Enrollment-lifecycle contradictions and assorted security/perf hardening from
+  the post-feature audit wave, including audit coverage for every control-plane
+  denial and failure path.
 
 ## [0.6.0] - 2026-07-04
 
 A wire-protocol unification plus a security-hardening pass.
-
-### ⚠️ Upgrade notes (breaking / behavior changes)
-
-- **Keyring auth is not wire-compatible across the upgrade.** The ed25519
-  challenge/response now signs the request's method, path, **and raw query
-  string** (previously method + path only). A v0.5.x client talking to a v0.6.0
-  server — or the reverse — will **fail keyring authentication**, even for
-  requests with no query string, because the signed byte string differs.
-  **Upgrade the client and server together.** Bearer, HTTP-basic, and mTLS are
-  unaffected.
-- **Raw `quicsql.net/client` result cells changed Go type.** `Result.Rows` cells
-  are now `int64`/`float64` instead of `json.Number` (both the native and Hrana
-  paths decode through one shared codec now). **`database/sql` / the `quicsql`
-  driver are UNAFFECTED** — the driver already normalized both to `int64`/`float64`.
-  Only code that type-asserts `json.Number` on a raw `*client.Client` result needs
-  to change.
-- **`obs.Registry.WriteOpenMetrics` was renamed to `WritePrometheus`** (and the
-  `obs.Exposer` interface method with it). Recompile if you import `quicsql.net/obs`
-  and call the method or implement `Exposer`. The `/_metrics` HTTP output is
-  unchanged (`text/plain; version=0.0.4`).
-- **A DSN with URL userinfo is now rejected.** `quicsql://user:pw@host/db` returns
-  a clear error (it previously sent *no* credential, silently). Put credentials in
-  query params: `?token=` or `?user=&password=`.
-- **Native wire: an integral REAL now serializes as `100.0`, not `100`.** Parses to
-  the same numeric value; it fixes an int-vs-float drift between the autocommit and
-  transaction paths. Only non-Go clients inspecting the raw JSON number could notice.
 
 ### Added
 - **`auth.sql_policy.allow_attach`** — a **development-only** switch that permits
@@ -68,9 +130,12 @@ A wire-protocol unification plus a security-hardening pass.
 - `docs/administration.md` — an operator / control-plane guide.
 
 ### Changed
-- Result cells now decode through the shared `wire` codec on both paths (see Upgrade
-  notes for the raw-client type change).
-- `obs.WriteOpenMetrics` → `WritePrometheus` (see Upgrade notes).
+- Result cells decode through the shared `wire` codec on both paths: raw
+  `*client.Client` cells are now `int64`/`float64` instead of `json.Number`
+  (`database/sql` / the driver already normalized, so they are unaffected), and
+  an integral REAL serializes as `100.0` on the native wire (was `100`).
+- `obs.WriteOpenMetrics` → `WritePrometheus` (the `/_metrics` output itself is
+  unchanged: `text/plain; version=0.0.4`).
 - `engine.Value` / `engine.Kind` are now transparent type aliases of `wire.Value` /
   `wire.Kind` (identical fields — no consumer break).
 - The daemon defaults the transaction idle/lifetime timeouts in one place
@@ -85,7 +150,7 @@ A wire-protocol unification plus a security-hardening pass.
   mid-transition failure can't return a connection to the pool carrying the
   authorizer without `query_only` — which had spuriously denied a later
   write-capable borrower with `SQLITE_AUTH`.
-- **Metrics gauge race:** `quicsql_databases` is now sampled under the registry
+- **Metrics gauge race:** `databases` is now sampled under the registry
   mutex instead of an unlocked `len()` that raced control-plane create/detach.
 - **Unbounded metric series:** requests are metered only for databases the registry
   knows, so a caller can no longer mint phantom, never-reclaimable per-database series.
@@ -99,10 +164,13 @@ A wire-protocol unification plus a security-hardening pass.
   a `WithMaxResponse` set near `MaxInt64` no longer overflows.
 
 ### Security
-- Keyring signing input binds the raw query string (see Upgrade notes) — a captured
-  ed25519 signature can no longer be replayed onto a different operation target
-  (`?id=`, `?store=`) within the challenge TTL.
-- DSN userinfo is rejected (see Upgrade notes).
+- Keyring signing input binds the raw query string — a captured ed25519 signature
+  can no longer be replayed onto a different operation target (`?id=`, `?store=`)
+  within the challenge TTL. The signed bytes changed, so upgrade a keyring client
+  and server together.
+- A DSN with URL userinfo (`quicsql://user:pw@host/db`) is rejected with a clear
+  error (it previously sent *no* credential, silently); use `?token=` or
+  `?user=&password=`.
 - The server logs a startup **warning** when a bearer/password/keyring listener runs
   over a cleartext transport (h1/h2c); keyring is flagged specially (its signature is
   exposed and replayable over cleartext). The raw client warns when built with a
@@ -114,7 +182,7 @@ A wire-protocol unification plus a security-hardening pass.
   under it.
 
 ### Removed
-- The exported name `obs.*.WriteOpenMetrics` (renamed — see Upgrade notes). The
+- The exported name `obs.*.WriteOpenMetrics` (renamed to `WritePrometheus`). The
   internal `httpapi/codec.go` was deleted (folded into `internal/wire`).
 
 ## [0.5.3] - 2026-07-04
@@ -145,6 +213,7 @@ A wire-protocol unification plus a security-hardening pass.
 - First runnable multi-transport server (h1/h2c/h2/h3/unix) over the CGo-free
   gosqlite engine, with interactive Hrana sessions.
 
+[Unreleased]: https://github.com/quicsql/quicsql/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/quicsql/quicsql/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/quicsql/quicsql/compare/v0.5.0...v0.5.3
 [0.5.0]: https://github.com/quicsql/quicsql/compare/v0.4.0...v0.5.0

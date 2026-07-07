@@ -30,11 +30,14 @@ registry/       one shared *sqlite.DB handle per database, ref-counted; Get(ctx,
 engine/         Queryer/TxBeginner adapters + IsReadOnly SQL classification
 httpapi/        the HTTP handler: native.go (/query), hrana.go (/v3/pipeline), hrana_cursor.go (/v3/cursor), export/changeset/blob, routing, limits gate
 transport/      serve.go / tls.go — start the handler on h1 / h2c / h2-TLS / h3-QUIC / unix; buildTLS (mTLS)
-auth/           auth.go (authenticate → Principal), methods, challenge.go (ed25519 challenge/response), peercred_*
-authz/          Level (none<ro<rw<admin) + Policy (per-db grants, wildcard, open mode); transport-neutral
+auth/           auth.go (authenticate → Principal), methods, challenge.go (ed25519 challenge/response), peercred_*, session.go (st_ session tokens), cookie.go
+authz/          Level (none<ro<rw<admin) + Policy (per-db grants); transport-neutral
 session/        Store of baton-pinned sessions; read-only pinning; the reaper; SESSION capture handle
+enroll/         self-service dynamic principals (auth.enroll): /_auth/enroll register + one-time codes + idle GC
+provision/      materializes/tears down a per-principal database from a template (shared by enroll and the control plane)
+feed/           the change-feed broker: connection hook → per-table ring → SSE at /<db>/changes
 admin/          /_admin control plane: create/detach/list, sessions/kill, vault maintenance (admin-gated)
-meta/           the runtime registry + audit + idempotency store (vault-backed by default)
+meta/           the runtime database registry + enrolled principals + enroll codes + audit log (vault-backed by default)
 secret/         "source:name" resolver (env / file / kms) for keys, tokens, identities
 limits/         per-principal rate limit + per-db concurrency cap + statement/tx timeouts
 obs/            /_metrics (Prometheus text), slow-query log
@@ -44,7 +47,7 @@ extensions/     the curated, network-safe extension bundle (regexp, fts5, vec0, 
 cmd/quicsql/    the standalone daemon (`quicsql --config quicsql.yaml`)
 internal/       httpjson/ (response envelope), raceskip/ (checkptr skip; local — can't import gosqlite's)
 examples/       in-module runnable examples: demo (transports + bench), auth (auth matrix), charged-server (deployable)
-docs/           human guides: getting-started, auth-and-authz, mtls-production, hrana, databases, change-feed, administration, clients/ (incl. the @quicsql/client JS SDK, http-api)
+docs/           human guides: getting-started, auth-and-authz (static principals, session tokens, device enrollment), mtls-production, hrana, databases, change-feed, administration, clients/ (incl. the @quicsql/client JS SDK, http-api)
 ```
 
 ---
@@ -54,7 +57,7 @@ docs/           human guides: getting-started, auth-and-authz, mtls-production, 
 1. **Single owner per database.** The registry holds exactly one open handle per database and fans all clients into it (in-process advisory locks only, no cross-process sharing). This is the reason the daemon exists — a vault container is only safely shareable under a single owner. Don't add a code path that opens a second handle to the same file.
 2. **A Hrana baton is bound to (database, principal).** `session.Resume` validates both before consuming the baton, so a wrong-principal request can't ride or invalidate the owner's session (`ErrPrincipalMismatch` → 403; bad/expired baton → 400). Don't loosen the binding.
 3. **Read-only is enforced in depth, not by trusting SQL.** A read-only principal runs on a borrowed connection put in `query_only` + a write-denying authorizer (native path in `httpapi/native.go`; the whole stream for a Hrana session in `session.Open(readOnly)`). Never gate writes by parsing the statement.
-4. **Auth "hard vs soft".** A present-but-invalid credential is a `401` — never silently downgraded to anonymous (`auth.hardMethods` = mtls→keyring→bearer→password, first present decides). `peercred` is the only soft method (unmapped uid falls through); `none` is the terminal anonymous fallback. Keep this ordering and the "present ⇒ decisive" rule.
+4. **Auth "hard vs soft".** A present-but-invalid credential is a `401` — never silently downgraded to anonymous (`auth.hardMethods` = mtls→keyring→session→bearer→password, first present decides; session precedes bearer because both read `Authorization: Bearer` — the `st_` prefix routes a token to exactly one). `peercred` is the only soft method (unmapped uid falls through); `none` is the terminal anonymous fallback. Keep this ordering and the "present ⇒ decisive" rule.
 5. **Open mode is fail-open only when nothing is configured.** `authz.NewPolicy(open)` is open (every principal read-write everywhere) **only** when there are zero principals AND zero grants (`serverd.buildPolicy`). The moment one appears, it's grants-decide-default-none. Don't widen this.
 6. **SESSION handle is taken atomically.** `session.TakeCapture` hands the capture off exactly once so teardown can't double-free the native SESSION handle. Preserve the atomic take on close/shutdown.
 7. **A vtab ctor must run on the executing connection.** `vtab` trampolines resolve the connection from the db handle SQLite passed in (`connForDB`), not a connection captured at registration — otherwise `declare_vtab` targets the wrong handle and returns `SQLITE_MISUSE`. This lives in gosqlite, but the server's per-connection extension registration is what exercises it.

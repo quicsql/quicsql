@@ -153,9 +153,9 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 		srv.TLSConfig = tc
 		s.http = append(s.http, srv)
 		go func() {
-			log.Info("quicsql: serving", "listener", lc.Name, "transport", "h2", "addr", ln.Addr().String())
+			log.Info("serving", "listener", lc.Name, "transport", "h2", "addr", ln.Addr().String())
 			if err := srv.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("quicsql: serve h2", "listener", lc.Name, "err", err)
+				log.Error("serve h2", "listener", lc.Name, "err", err)
 			}
 		}()
 		return nil
@@ -175,15 +175,15 @@ func (s *Set) start(log *slog.Logger, cfg *config.Config, lc config.Listener, ha
 		h3 := &http3.Server{Handler: handler, TLSConfig: tc}
 		s.h3 = append(s.h3, h3Listener{srv: h3, conn: conn})
 		go func() {
-			log.Info("quicsql: serving", "listener", lc.Name, "transport", "h3(QUIC)", "addr", lc.Address)
+			log.Info("serving", "listener", lc.Name, "transport", "h3(QUIC)", "addr", lc.Address)
 			if err := h3.Serve(conn); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-				log.Error("quicsql: serve h3", "listener", lc.Name, "err", err)
+				log.Error("serve h3", "listener", lc.Name, "err", err)
 			}
 		}()
 		return nil
 
 	default:
-		log.Warn("quicsql: unknown transport ignored", "listener", lc.Name, "transport", lc.Transport)
+		log.Warn("unknown transport ignored", "listener", lc.Name, "transport", lc.Transport)
 		return nil
 	}
 }
@@ -239,7 +239,7 @@ func withAltSvc(next http.Handler, value string) http.Handler {
 
 func warnSelfSigned(log *slog.Logger, name string, p config.TLSProfile) {
 	if p.Mode == "self_signed" {
-		log.Warn("quicsql: serving a self-signed (dev-only) TLS certificate — do not use in production", "listener", name)
+		log.Warn("serving a self-signed (dev-only) TLS certificate — do not use in production", "listener", name)
 	}
 }
 
@@ -258,10 +258,10 @@ func warnCleartextAuth(log *slog.Logger, lc config.Listener) {
 	for _, m := range lc.Auth {
 		switch m {
 		case "bearer", "password", "session":
-			log.Warn("quicsql: listener accepts a credential over a cleartext transport — the token/password is exposed on the wire; prefer TLS or a unix socket",
+			log.Warn("listener accepts a credential over a cleartext transport — the token/password is exposed on the wire; prefer TLS or a unix socket",
 				"listener", lc.Name, "transport", lc.Transport, "method", m)
 		case "keyring":
-			log.Warn("quicsql: listener accepts keyring auth over a cleartext transport — the ed25519 signature is exposed AND replayable within the challenge TTL; use TLS or a unix socket in production",
+			log.Warn("listener accepts keyring auth over a cleartext transport — the ed25519 signature is exposed AND replayable within the challenge TTL; use TLS or a unix socket in production",
 				"listener", lc.Name, "transport", lc.Transport)
 		}
 	}
@@ -270,9 +270,9 @@ func warnCleartextAuth(log *slog.Logger, lc config.Listener) {
 func (s *Set) serveHTTP(log *slog.Logger, name, transport string, ln net.Listener, srv *http.Server) {
 	s.http = append(s.http, srv)
 	go func() {
-		log.Info("quicsql: serving", "listener", name, "transport", transport, "addr", ln.Addr().String())
+		log.Info("serving", "listener", name, "transport", transport, "addr", ln.Addr().String())
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("quicsql: serve", "listener", name, "err", err)
+			log.Error("serve", "listener", name, "err", err)
 		}
 	}()
 }

@@ -9,7 +9,7 @@ import (
 
 // The versioned token must round-trip every assurance claim, and renewal must
 // FREEZE the assurance (authTime/factors/tier) — only a fresh factor may advance
-// recency, else a one-time step-up would become permanent sudo (accounts §21-B3).
+// recency, else a one-time step-up would become permanent sudo.
 func TestTokenClaimsRoundTripAndRenewFreezesAssurance(t *testing.T) {
 	m, err := newSessionMinter(time.Hour, 24*time.Hour) // renewable
 	if err != nil {
@@ -58,11 +58,11 @@ func TestTokenClaimsRoundTripAndRenewFreezesAssurance(t *testing.T) {
 	}
 }
 
-// Malformed or wrong-prefix tokens are rejected (a non-qs_ value isn't ours; a
-// qs_ value that's too short / not the current version fails to parse).
+// Malformed or wrong-prefix tokens are rejected (a non-st_ value isn't ours; a
+// st_ value that's too short / not the current version fails to parse).
 func TestTokenRejectsBadInput(t *testing.T) {
 	m, _ := newSessionMinter(time.Hour, 0)
-	for _, tok := range []string{"", "qs_", "qs_short", "notasession", "Bearer x"} {
+	for _, tok := range []string{"", "st_", "st_short", "notasession", "Bearer x"} {
 		if _, _, _, err := m.verify(tok); err == nil {
 			t.Errorf("expected rejection for %q", tok)
 		}

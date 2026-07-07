@@ -26,7 +26,7 @@ type Column struct {
 
 // Result is the transport-agnostic outcome of a statement: rows for a query,
 // affected/last-insert for a mutation. Truncated + Cursor support the streaming
-// / keyset-pagination story (Phase 1/2).
+// / keyset-pagination story.
 type Result struct {
 	Columns      []Column
 	Rows         [][]Value

@@ -12,11 +12,11 @@ import (
 	"quicsql.net/secret"
 )
 
-// TestPhase0_MultiplexAcrossBackends is the Phase 0 exit criterion: open plain,
+// TestMultiplexAcrossBackends exercises the multiplexer core: open plain,
 // shared-in-memory, and vault databases through the registry and run
 // statements / a batched transaction / a query against each — the transport-free
 // core of the multiplexer.
-func TestPhase0_MultiplexAcrossBackends(t *testing.T) {
+func TestMultiplexAcrossBackends(t *testing.T) {
 	dir := t.TempDir()
 	sec, err := secret.New(nil)
 	if err != nil {
@@ -72,9 +72,9 @@ func TestPhase0_MultiplexAcrossBackends(t *testing.T) {
 	}
 }
 
-// TestPhase0_ReserveBlocksOpen checks the offline-op reservation path used by
+// TestReserveBlocksOpen checks the offline-op reservation path used by
 // the control plane for Rekey/Rewrap/Compact.
-func TestPhase0_ReserveBlocksOpen(t *testing.T) {
+func TestReserveBlocksOpen(t *testing.T) {
 	dir := t.TempDir()
 	sec, _ := secret.New(nil)
 	be, err := backend.For(config.Database{Name: "d", Backend: "file", Path: filepath.Join(dir, "d.db")}, sec, dir)

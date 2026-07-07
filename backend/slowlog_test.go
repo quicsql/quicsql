@@ -38,7 +38,7 @@ func TestSlowLogCapturesAndRedacts(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "quicsql/slow") {
+	if !strings.Contains(out, "slow") {
 		t.Fatalf("slow log produced no entries:\n%s", out)
 	}
 	if !strings.Contains(out, "INSERT INTO t VALUES(?)") {

@@ -186,4 +186,4 @@ Two quicSQL extensions to the wire are worth knowing. First, an `execute` result
 
 ## Observability
 
-Open sessions are visible operationally: the `quicsql_active_sessions` gauge on `/_metrics` tracks how many are live, and `/_admin` (admin only) lists sessions per database and can kill one. If that gauge climbs and does not fall, something is opening streams without closing them — check for a missing `defer st.Close(ctx)`.
+Open sessions are visible operationally: the `active_sessions` gauge on `/_metrics` tracks how many are live, and `/_admin` (admin only) lists sessions per database and can kill one. If that gauge climbs and does not fall, something is opening streams without closing them — check for a missing `defer st.Close(ctx)`.

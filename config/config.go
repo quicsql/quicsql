@@ -1,11 +1,15 @@
 // Package config is the typed, YAML-backed configuration surface for the
 // quicSQL server. It is declarative desired-state: it seeds the database
 // registry and expresses defaults. Secret references are plain "source:name"
-// strings resolved eagerly at load (the `!secret` YAML tag sugar is a Phase 5
+// strings resolved eagerly at load (the `!secret` YAML tag sugar is a later
 // refinement over these fields).
 package config
 
-import "time"
+import (
+	"time"
+
+	"go.yaml.in/yaml/v3"
+)
 
 // Config is the whole server configuration. Every section is wired to behavior
 // (see load.go's knownTopLevel) except `wire_compression` and `observability`,
@@ -25,6 +29,10 @@ type Config struct {
 	ChangeFeed   ChangeFeed            `yaml:"changefeed" json:"changefeed"`
 
 	warnings []string // config sections present but not yet consumed (logged at startup)
+	// sections holds the raw YAML nodes of top-level keys registered by optional feature
+	// modules via RegisterSection (e.g. a feature's own top-level block). A feature
+	// decodes its own section with DecodeSection during setup — core never types them.
+	sections map[string]yaml.Node
 }
 
 // ControlPlane enables the runtime admin API under /_admin: create/detach
@@ -104,7 +112,7 @@ type TLSProfile struct {
 	Mode       string        `yaml:"mode" json:"mode"`               // files | self_signed | qip
 	Cert       string        `yaml:"cert" json:"cert"`               // files
 	Key        string        `yaml:"key" json:"key"`                 // files
-	ClientCA   string        `yaml:"client_ca" json:"client_ca"`     // mTLS (Phase 4)
+	ClientCA   string        `yaml:"client_ca" json:"client_ca"`     // mTLS
 	MinVersion string        `yaml:"min_version" json:"min_version"` // "1.2" | "1.3"
 	Hosts      []string      `yaml:"hosts" json:"hosts"`             // self_signed SANs
 	Subdomain  string        `yaml:"subdomain" json:"subdomain"`     // qip
@@ -120,50 +128,6 @@ type Auth struct {
 	SQLPolicy      SQLPolicy     `yaml:"sql_policy" json:"sql_policy"`
 	Session        SessionTokens `yaml:"session" json:"session"`
 	Enroll         Enroll        `yaml:"enroll" json:"enroll"`
-	Accounts       Accounts      `yaml:"accounts" json:"accounts"`
-}
-
-// Accounts enables the multi-credential account model (accounts design): device
-// keys, an attach flow, and recovery replace single-key enrollment. Like Enroll it
-// requires the control plane + explicit auth, and provisions a per-account database.
-type Accounts struct {
-	Enabled        bool            `yaml:"enabled" json:"enabled"`
-	Provision      Provision       `yaml:"provision" json:"provision"`
-	CodeTTL        time.Duration   `yaml:"code_ttl" json:"code_ttl"`           // attach/recovery code lifetime (default 24h)
-	RecoveryHold   time.Duration   `yaml:"recovery_hold" json:"recovery_hold"` // reduced-scope destructive hold after a recovery-code redeem
-	IdleTTL        time.Duration   `yaml:"idle_ttl" json:"idle_ttl"`           // 0 ⇒ keep forever
-	RatePerIP      float64         `yaml:"rate_per_ip" json:"rate_per_ip"`     // per-IP join/recover rate
-	MaxCredentials int             `yaml:"max_credentials" json:"max_credentials"`
-	MaxAttachCodes int             `yaml:"max_attach_codes" json:"max_attach_codes"`
-	Session        AccountSession  `yaml:"session" json:"session"`
-	Assurance      AssuranceCfg    `yaml:"assurance" json:"assurance"`
-	Password       AccountPassword `yaml:"password" json:"password"`
-}
-
-// AccountPassword enables password login (accounts design Phase 2.1). A password is a
-// DATA-ONLY credential — a phished password can read/write the database but never
-// manages other credentials or reaches root. Pepper is REQUIRED when enabled: it keys
-// every Argon2id hash with material held OUTSIDE the SQLite file (a secret reference),
-// so a stolen store is not crackable.
-type AccountPassword struct {
-	Enabled   bool   `yaml:"enabled" json:"enabled"`
-	Pepper    string `yaml:"pepper" json:"pepper"`         // secret ref (source:name); required when enabled
-	MinLength int    `yaml:"min_length" json:"min_length"` // sole-factor floor (default 15; NIST 800-63B-4)
-}
-
-// AccountSession selects how session tokens travel. Secure default: header-bearer
-// (CSRF-moot). cookie/both auto-enable CSRF defenses (accounts design §21-G1).
-type AccountSession struct {
-	Transport string `yaml:"transport" json:"transport"` // header (default) | cookie | both
-}
-
-// AssuranceCfg is the operator-tunable step-up policy. Defaults are the secure
-// phishing-resistant gate; loosening credential_mgmt/destructive to "strong" (accept
-// TOTP) warns at startup (accounts design §21-A1/G2).
-type AssuranceCfg struct {
-	CredentialMgmt string        `yaml:"credential_mgmt" json:"credential_mgmt"` // phishing_resistant (default) | strong
-	Destructive    string        `yaml:"destructive" json:"destructive"`
-	StepUpWindow   time.Duration `yaml:"step_up_window" json:"step_up_window"` // default 10m
 }
 
 // Enroll enables self-service device enrollment at POST /_auth/enroll (served
@@ -273,7 +237,7 @@ type Provision struct {
 // token is valid this long. When MaxTTL is 0 (the default) tokens are strictly
 // non-renewable — they die at IdleTTL, and a leaked one can't outlive it. When
 // MaxTTL > 0 tokens become renewable ("extend on use"): an active session slides
-// forward — transparently, via an `X-Quicsql-Session` response header the client
+// forward — transparently, via an `X-Session-Token` response header the client
 // adopts, or explicitly via PUT /_auth/session — but never past MaxTTL from the
 // first mint, so a renewable token's whole chain is still bounded. Pick MaxTTL to
 // bound a leaked token's blast radius; revocation (DELETE) still cuts it instantly.
@@ -299,7 +263,7 @@ type CORS struct {
 	Enabled bool     `yaml:"enabled" json:"enabled"`
 	Origins []string `yaml:"origins" json:"origins"` // page origins, or "*" (default when empty)
 	// AllowHeaders extends the built-in allowed request headers (Authorization,
-	// Content-Type, and the X-Quicsql-* keyring trio) for custom proxies/clients.
+	// Content-Type, and the X-Keyring-* trio) for custom proxies/clients.
 	AllowHeaders []string `yaml:"allow_headers" json:"allow_headers"`
 	// ExposeHeaders names response headers browser scripts may read beyond the
 	// CORS-safelisted set.

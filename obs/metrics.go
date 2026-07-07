@@ -89,14 +89,14 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 
 	// Build into a byte slice (fmt.Appendf has no error return) and write once.
 	var b []byte
-	b = append(b, "# TYPE quicsql_requests_total counter\n"...)
+	b = append(b, "# TYPE requests_total counter\n"...)
 	for _, db := range sortedKeys(reqs) {
-		b = fmt.Appendf(b, "quicsql_requests_total{db=%q} %d\n", db, reqs[db])
+		b = fmt.Appendf(b, "requests_total{db=%q} %d\n", db, reqs[db])
 	}
-	b = append(b, "# TYPE quicsql_request_duration_seconds summary\n"...)
+	b = append(b, "# TYPE request_duration_seconds summary\n"...)
 	for _, db := range sortedKeys(latCount) {
-		b = fmt.Appendf(b, "quicsql_request_duration_seconds_sum{db=%q} %g\n", db, latSum[db].Seconds())
-		b = fmt.Appendf(b, "quicsql_request_duration_seconds_count{db=%q} %d\n", db, latCount[db])
+		b = fmt.Appendf(b, "request_duration_seconds_sum{db=%q} %g\n", db, latSum[db].Seconds())
+		b = fmt.Appendf(b, "request_duration_seconds_count{db=%q} %d\n", db, latCount[db])
 	}
 	names := make([]string, 0, len(samplers))
 	for name := range samplers {

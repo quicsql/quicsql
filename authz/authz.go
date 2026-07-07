@@ -19,7 +19,7 @@ const (
 	None      Level = iota // no access
 	ReadOnly               // may read (SELECT and friends)
 	ReadWrite              // may read and write
-	Admin                  // read/write plus control-plane admin (Phase 6)
+	Admin                  // read/write plus control-plane admin
 )
 
 // ParseLevel maps a config level string to a Level.

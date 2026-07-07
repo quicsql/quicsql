@@ -68,7 +68,7 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// live database.
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".restore-*.tmp")
 	if err != nil {
-		h.log.Error("quicsql/admin: restore temp", "db", db, "err", err)
+		h.log.Error("admin: restore temp", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "restore: cannot create temp file")
 		return
 	}
@@ -122,7 +122,7 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// belonging to the old database.
 	removeSidecars(target)
 	if err := os.Rename(tmpPath, target); err != nil {
-		h.log.Error("quicsql/admin: restore rename", "db", db, "err", err)
+		h.log.Error("admin: restore rename", "db", db, "err", err)
 		h.auditFail(r, "restore", db, "swap failed")
 		writeErr(w, http.StatusInternalServerError, "restore: could not replace the database file")
 		return

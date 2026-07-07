@@ -25,7 +25,7 @@ var securityOnce sync.Once
 // every connection the driver opens. Unlike a leading-keyword check it fires at
 // statement-compile time, so it also catches ATTACH buried inside a
 // multi-statement `sequence`/script — closing the filesystem-escape the keyword
-// guard alone misses. Interim default-deny ahead of the Phase-4 per-principal
+// guard alone misses. Interim default-deny ahead of a future per-principal
 // authorizer; ATTACH/DETACH are never needed by the server itself.
 func installSecurity() {
 	securityOnce.Do(func() {

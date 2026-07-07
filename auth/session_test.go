@@ -12,6 +12,7 @@ import (
 
 	"quicsql.net/authz"
 	"quicsql.net/config"
+	"quicsql.net/internal/wire"
 	"quicsql.net/secret"
 )
 
@@ -158,7 +159,7 @@ func TestSessionTamperedTokenRejected(t *testing.T) {
 	}
 }
 
-// A non-qs_ bearer value on a session-enabled listener must still reach the
+// A non-st_ bearer value on a session-enabled listener must still reach the
 // static bearer method — the prefix routes, it doesn't monopolize the header.
 func TestSessionCoexistsWithStaticBearer(t *testing.T) {
 	m := buildSession(t, time.Minute)
@@ -293,12 +294,12 @@ func TestSessionTransparentRefreshHeader(t *testing.T) {
 	if !seen || w.Code != http.StatusOK {
 		t.Fatalf("request should succeed: seen=%v code=%d", seen, w.Code)
 	}
-	refreshed := w.Header().Get("X-Quicsql-Session")
+	refreshed := w.Header().Get(wire.HeaderSessionToken)
 	if refreshed == "" || refreshed == tok {
 		t.Fatalf("expected a refreshed session header distinct from the presented token, got %q", refreshed)
 	}
-	if w.Header().Get("X-Quicsql-Session-Expires") == "" {
-		t.Fatal("refresh should also carry X-Quicsql-Session-Expires")
+	if w.Header().Get(wire.HeaderSessionExpires) == "" {
+		t.Fatal("refresh should also carry X-Session-Expires")
 	}
 }
 
@@ -311,7 +312,7 @@ func TestSessionNoRefreshHeaderWhenNonRenewable(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Header().Get("X-Quicsql-Session") != "" {
+	if w.Header().Get(wire.HeaderSessionToken) != "" {
 		t.Fatal("a non-renewable session must never emit a refresh header")
 	}
 }

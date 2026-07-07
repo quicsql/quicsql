@@ -35,7 +35,7 @@ import (
 	"gosqlite.org/crypto/keyring"
 	"quicsql.net/authz"
 	"quicsql.net/config"
-	"quicsql.net/internal/httpjson"
+	"quicsql.net/httpjson"
 	"quicsql.net/internal/wire"
 	"quicsql.net/secret"
 )
@@ -47,8 +47,10 @@ type Authenticator struct {
 	challenger *challenger
 	sessions   *sessionMinter  // nil unless auth.session.enabled
 	enroll     http.Handler    // nil unless auth.enroll.enabled (set by serverd wiring)
-	account    http.Handler    // nil unless auth.accounts.enabled (replaces enroll)
+	account    http.Handler    // nil unless a feature registers an account handler (supersedes enroll)
 	acctPaths  map[string]bool // account handler's owned paths
+	cookieMode bool            // session token also travels as an HttpOnly cookie
+	cookieName string          // session cookie name (brand-neutral default; settable)
 	log        *slog.Logger
 
 	bearer   map[string]string       // hex(sha256(token)) → principal name
@@ -70,6 +72,12 @@ type Authenticator struct {
 	// before serving; nil otherwise.
 	seenHook func(name string)
 
+	// credSeenHook, if set, fires with the canonical KEY line on every successful
+	// keyring auth — a registered feature may use it to stamp that specific device
+	// credential's last_used (name-only seenHook can't, since many keys share a name).
+	// Set once before serving; nil otherwise.
+	credSeenHook func(canon string)
+
 	dummyHash []byte // a throwaway bcrypt hash, compared on unknown users to level password timing
 }
 
@@ -87,7 +95,7 @@ func New(cfg *config.Config, sec secret.Resolver, log *slog.Logger) (*Authentica
 	// Cost must match a real password hash's, not bcrypt.MinCost — otherwise the
 	// unknown-user path (comparing this dummy) is ~64-256× faster than the
 	// known-user path, leaking username existence by response timing.
-	dummy, err := bcrypt.GenerateFromPassword([]byte("quicsql-timing-equalizer"), bcrypt.DefaultCost)
+	dummy, err := bcrypt.GenerateFromPassword([]byte("auth-timing-equalizer"), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
@@ -101,12 +109,16 @@ func New(cfg *config.Config, sec secret.Resolver, log *slog.Logger) (*Authentica
 		peercred:   map[uint32]string{},
 		dynKeyring: map[string]keyringCred{},
 		dummyHash:  dummy,
+		cookieName: defaultSessionCookie,
 	}
 	if cfg.Auth.Session.Enabled {
 		if a.sessions, err = newSessionMinter(cfg.Auth.Session.IdleTTL, cfg.Auth.Session.MaxTTL); err != nil {
 			return nil, err
 		}
 	}
+	// Cookie transport is activated by a feature via SetCookieMode
+	// during setup (core auth implements the cookie + CSRF gate but doesn't own the
+	// policy); the header transport always works regardless.
 	for _, pc := range cfg.Auth.Principals {
 		for _, mm := range pc.Methods {
 			for name, raw := range mm {
@@ -224,7 +236,7 @@ func (a *Authenticator) loadRoster(path string) error {
 			return err
 		}
 		if comment == "" {
-			a.log.Warn("quicsql/auth: authorized_keys entry has no comment; skipping (no principal name)", "key", canon)
+			a.log.Warn("auth: authorized_keys entry has no comment; skipping (no principal name)", "key", canon)
 			continue
 		}
 		a.keyring[canon] = keyringCred{pub: pub, name: comment}
@@ -303,10 +315,16 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		// response header. The client adopts it, so an active session slides
 		// forward without re-authenticating; an idle one still lapses at idle_ttl.
 		if p.Method == "session" && m.a.sessions != nil && m.a.sessions.renewable() {
-			if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-				if nt, ne, ok := m.a.sessions.maybeRefresh(strings.TrimSpace(tok)); ok {
-					w.Header().Set("X-Quicsql-Session", nt)
-					w.Header().Set("X-Quicsql-Session-Expires", ne.UTC().Format(time.RFC3339))
+			if tok, fromCookie, ok := m.a.sessionTokenFrom(r); ok {
+				if nt, ne, ok := m.a.sessions.maybeRefresh(tok); ok {
+					// Refresh over the transport it arrived on: cookie-borne sessions
+					// slide via Set-Cookie, header ones via the response header pair.
+					if fromCookie {
+						m.a.WriteSessionTransport(w, r, nt, ne)
+					} else {
+						w.Header().Set(wire.HeaderSessionToken, nt)
+						w.Header().Set(wire.HeaderSessionExpires, ne.UTC().Format(time.RFC3339))
+					}
 				}
 			}
 		}
@@ -317,7 +335,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 // hardMethods are tried in priority order; each, when a credential is present,
 // either authenticates or fails the request (a present-but-invalid credential is
 // never silently downgraded to anonymous). session precedes bearer because both
-// read `Authorization: Bearer` — the qs_ prefix routes a token to exactly one of
+// read `Authorization: Bearer` — the st_ prefix routes a token to exactly one of
 // them. peercred is "soft" — an unmapped uid simply falls through — and `none`
 // is the terminal anonymous fallback.
 var hardMethods = []string{"mtls", "keyring", "session", "bearer", "password"}
@@ -393,21 +411,22 @@ func (a *Authenticator) tryBearer(r *http.Request) (*authz.Principal, bool, erro
 	return &authz.Principal{Name: name, Method: "bearer"}, true, nil
 }
 
-// trySession claims qs_-prefixed Authorization bearer values; anything else is
-// "not present" so a static bearer token on the same listener still reaches
-// tryBearer. A present-but-invalid session token is decisive (401), like every
-// hard method.
+// trySession claims st_-prefixed Authorization bearer values (and, with cookie
+// transport on, the session cookie); anything else is "not present" so a static bearer
+// token on the same listener still reaches tryBearer. A present-but-invalid session
+// token is decisive (401), like every hard method — and so is a cookie-borne session on
+// a state-changing request that fails the CSRF gate (an ambient credential must never
+// silently authorize a forged cross-site write).
 func (a *Authenticator) trySession(r *http.Request) (*authz.Principal, bool, error) {
 	if a.sessions == nil {
 		return nil, false, nil
 	}
-	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok, fromCookie, ok := a.sessionTokenFrom(r)
 	if !ok {
 		return nil, false, nil
 	}
-	tok = strings.TrimSpace(tok)
-	if !strings.HasPrefix(tok, sessionPrefix) {
-		return nil, false, nil
+	if fromCookie && !csrfSafe(r) {
+		return nil, true, errInvalidCredential
 	}
 	name, _, claims, err := a.sessions.verify(tok)
 	if err != nil {
@@ -516,7 +535,7 @@ func (a *Authenticator) RevokeAccountSessions(account, exceptHexSID string) erro
 }
 
 // RevokeCredentialSessions revokes every session minted by credID — used when that
-// credential (device/passkey) is detached.
+// credential is removed.
 func (a *Authenticator) RevokeCredentialSessions(credID string) error {
 	if a.sessions == nil {
 		return nil
@@ -550,7 +569,29 @@ func (a *Authenticator) MintSessionAs(principal string, tier authz.Tier, factors
 	})
 }
 
-// SessionPrincipal resolves a request's session token (a qs_ bearer) to its account
+// MintStepUp rotates an existing session to ADD a factor WITHOUT advancing its recency
+// clock (auth_time). This is the step-up primitive for a NON-phishing-resistant factor
+// such as TOTP: it records that the factor was presented — raising "strong" for data
+// actions — but must NOT refresh the auth_time the phishing-resistant credential-mgmt /
+// destructive gate reads. Refreshing it would let a phishable code re-validate the
+// recency of a stale WebAuthn/device-key factor bit that is merely carried forward,
+// reopening the takeover. Tier/scope/notBeforeDestructive AND the prior
+// auth_time are carried through unchanged; only the factor set gains `add`.
+func (a *Authenticator) MintStepUp(principal string, prev authz.Assurance, add authz.Factor, credIDHex string) (token string, exp, hardExp time.Time, err error) {
+	if a.sessions == nil {
+		return "", time.Time{}, time.Time{}, errors.New("auth: session tokens are not enabled (auth.session)")
+	}
+	var cid []byte
+	if b, e := hex.DecodeString(credIDHex); e == nil && len(b) == credLen {
+		cid = b
+	}
+	return a.sessions.mint(principal, sessClaims{
+		tier: prev.Tier, factors: prev.Factors | add, scope: prev.Scope,
+		credID: cid, authTime: prev.AuthTime, notBefore: prev.NotBeforeDestructive,
+	})
+}
+
+// SessionPrincipal resolves a request's session token (a st_ bearer) to its account
 // principal (with assurance) and hex session id — for the account-management
 // endpoints, which authenticate the caller themselves rather than going through the
 // listener's method chain. ok=false when there is no valid session token.
@@ -558,13 +599,12 @@ func (a *Authenticator) SessionPrincipal(r *http.Request) (p *authz.Principal, s
 	if a.sessions == nil {
 		return nil, "", false
 	}
-	tok, has := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok, fromCookie, has := a.sessionTokenFrom(r)
 	if !has {
 		return nil, "", false
 	}
-	tok = strings.TrimSpace(tok)
-	if !strings.HasPrefix(tok, sessionPrefix) {
-		return nil, "", false
+	if fromCookie && !csrfSafe(r) {
+		return nil, "", false // ambient credential on a forged cross-site write
 	}
 	name, sid, claims, err := a.sessions.verify(tok)
 	if err != nil {
@@ -575,7 +615,7 @@ func (a *Authenticator) SessionPrincipal(r *http.Request) (p *authz.Principal, s
 
 // RemoveKeyringKey revokes exactly ONE runtime-enrolled key (one device credential)
 // without touching the account's other keys — the "detach this device" primitive
-// (accounts §21-B5). Reports whether a key was removed. A statically-configured key
+// for accounts. Reports whether a key was removed. A statically-configured key
 // is never removed (config wins).
 func (a *Authenticator) RemoveKeyringKey(canon string) bool {
 	a.dynMu.Lock()
@@ -593,8 +633,8 @@ func (a *Authenticator) RemoveKeyringKey(canon string) bool {
 // possession-proof primitive the enrollment endpoint uses — the caller proves
 // it holds the private half of the key it is asking to register.
 func (a *Authenticator) VerifyPresented(r *http.Request) (canon string, pub ed25519.PublicKey, err error) {
-	sig := r.Header.Get("X-Quicsql-Signature")
-	keyLine, chal := r.Header.Get("X-Quicsql-Key"), r.Header.Get("X-Quicsql-Challenge")
+	sig := r.Header.Get(wire.HeaderKeyringSignature)
+	keyLine, chal := r.Header.Get(wire.HeaderKeyringKey), r.Header.Get(wire.HeaderKeyringChallenge)
 	if sig == "" || keyLine == "" || chal == "" || !a.challenger.valid(chal) {
 		return "", nil, errInvalidCredential
 	}
@@ -616,7 +656,7 @@ func (a *Authenticator) VerifyPresented(r *http.Request) (canon string, pub ed25
 // once during serverd assembly, before any listener serves.
 func (a *Authenticator) SetEnrollHandler(h http.Handler) { a.enroll = h }
 
-// SetAccountHandler wires the multi-credential account handler (accounts model),
+// SetAccountHandler wires an optional account-identity handler,
 // which owns the given /_auth/* paths. It replaces the enroll handler; both are
 // served on keyring-accepting listeners and do their own auth per endpoint.
 func (a *Authenticator) SetAccountHandler(h http.Handler, paths []string) {
@@ -628,11 +668,11 @@ func (a *Authenticator) SetAccountHandler(h http.Handler, paths []string) {
 }
 
 func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, error) {
-	sig := r.Header.Get("X-Quicsql-Signature")
+	sig := r.Header.Get(wire.HeaderKeyringSignature)
 	if sig == "" {
 		return nil, false, nil
 	}
-	keyLine, chal := r.Header.Get("X-Quicsql-Key"), r.Header.Get("X-Quicsql-Challenge")
+	keyLine, chal := r.Header.Get(wire.HeaderKeyringKey), r.Header.Get(wire.HeaderKeyringChallenge)
 	if keyLine == "" || chal == "" || !a.challenger.valid(chal) {
 		return nil, true, errInvalidCredential
 	}
@@ -659,6 +699,9 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 	if a.seenHook != nil {
 		a.seenHook(cred.name) // last-seen for enrollment idle GC (enrolled names only take effect)
 	}
+	if a.credSeenHook != nil {
+		a.credSeenHook(canon) // per-credential last_used (this exact device key)
+	}
 	return &authz.Principal{Name: cred.name, Method: "keyring"}, true, nil
 }
 
@@ -666,6 +709,11 @@ func (a *Authenticator) tryKeyring(r *http.Request) (*authz.Principal, bool, err
 // successful keyring or session auth (the enrollment service's idle-GC last-seen
 // tracker — so a session-riding enrollee stays "active"). Set once before serving.
 func (a *Authenticator) SetSeenHook(fn func(name string)) { a.seenHook = fn }
+
+// SetCredSeenHook registers a callback fired with the canonical key line on every
+// successful keyring auth (a registered feature stamps that device credential's
+// last_used). Set once before serving.
+func (a *Authenticator) SetCredSeenHook(fn func(canon string)) { a.credSeenHook = fn }
 
 func (a *Authenticator) tryPeercred(r *http.Request) (*authz.Principal, bool) {
 	c := connFrom(r.Context())
@@ -699,7 +747,7 @@ func (m *Middleware) serveChallenge(w http.ResponseWriter, r *http.Request) {
 }
 
 // amrForMethod maps the authenticating method to the assurance factor(s) a minted
-// session records (OIDC amr). Phase-0 mapping — a keyring/mtls credential is a
+// session records (OIDC amr). Core mapping — a keyring/mtls credential is a
 // possession factor (device key), a password/bearer secret is a knowledge factor;
 // accounts refine this per-credential (adding webauthn/otp/recovery).
 func amrForMethod(method string) authz.Factor {
@@ -754,10 +802,11 @@ func (m *Middleware) serveSession(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		m.log.Debug("quicsql/auth: session token minted", "listener", m.listener, "principal", p.Name, "via", p.Method)
+		m.log.Debug("auth: session token minted", "listener", m.listener, "principal", p.Name, "via", p.Method)
+		m.a.WriteSessionTransport(w, r, tok, exp)
 		writeSessionToken(w, tok, p.Name, exp, hardExp)
 	case http.MethodPut:
-		tok, ok := m.sessionTokenFromHeader(r)
+		tok, ok := m.sessionTokenFromRequest(r)
 		if !ok {
 			m.deny(w, errUnauthenticated)
 			return
@@ -771,9 +820,10 @@ func (m *Middleware) serveSession(w http.ResponseWriter, r *http.Request) {
 			m.deny(w, err)
 			return
 		}
+		m.a.WriteSessionTransport(w, r, nt, exp)
 		writeSessionToken(w, nt, "", exp, hardExp)
 	case http.MethodDelete:
-		tok, ok := m.sessionTokenFromHeader(r)
+		tok, ok := m.sessionTokenFromRequest(r)
 		if !ok {
 			m.deny(w, errUnauthenticated)
 			return
@@ -782,21 +832,19 @@ func (m *Middleware) serveSession(w http.ResponseWriter, r *http.Request) {
 			m.deny(w, err)
 			return
 		}
+		m.a.ClearSessionTransport(w, r)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "use POST (mint), PUT (renew), or DELETE (revoke)")
 	}
 }
 
-// sessionTokenFromHeader extracts a qs_-prefixed session token from the
-// Authorization header, or reports ok=false.
-func (m *Middleware) sessionTokenFromHeader(r *http.Request) (string, bool) {
-	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return "", false
-	}
-	tok = strings.TrimSpace(tok)
-	if !strings.HasPrefix(tok, sessionPrefix) {
+// sessionTokenFromRequest extracts a st_-prefixed session token from the Authorization
+// header or (with cookie transport) the session cookie, gating cookie-borne
+// state-changing renew/revoke behind the CSRF check.
+func (m *Middleware) sessionTokenFromRequest(r *http.Request) (string, bool) {
+	tok, fromCookie, ok := m.a.sessionTokenFrom(r)
+	if !ok || (fromCookie && !csrfSafe(r)) {
 		return "", false
 	}
 	return tok, true
@@ -819,8 +867,8 @@ func writeSessionToken(w http.ResponseWriter, tok, principal string, exp, hardEx
 }
 
 func (m *Middleware) deny(w http.ResponseWriter, err error) {
-	m.log.Debug("quicsql/auth: request denied", "listener", m.listener, "err", err)
-	w.Header().Set("WWW-Authenticate", `Bearer, Basic realm="quicsql"`)
+	m.log.Debug("auth: request denied", "listener", m.listener, "err", err)
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer, Basic realm=%q`, wire.AuthRealm))
 	writeJSONError(w, http.StatusUnauthorized, "authentication required")
 }
 

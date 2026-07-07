@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"quicsql.net/config"
+	"quicsql.net/internal/wire"
 )
 
 func corsCfg(origins ...string) config.CORS {
@@ -40,7 +41,7 @@ func TestCORSPreflightBypassesAuth(t *testing.T) {
 		t.Fatalf("Allow-Origin = %q, want *", got)
 	}
 	allow := w.Header().Get("Access-Control-Allow-Headers")
-	for _, want := range []string{"Authorization", "Content-Type", "X-Quicsql-Signature"} {
+	for _, want := range []string{"Authorization", "Content-Type", wire.HeaderKeyringSignature} {
 		if !strings.Contains(allow, want) {
 			t.Errorf("Allow-Headers %q missing %q", allow, want)
 		}
@@ -118,7 +119,7 @@ func TestCORSActualRequestGetsOriginAndExposeHeaders(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("Allow-Origin = %q, want *", got)
 	}
-	if got := w.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Custom") || !strings.Contains(got, "X-Quicsql-Session") {
+	if got := w.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Custom") || !strings.Contains(got, wire.HeaderSessionToken) {
 		t.Fatalf("Expose-Headers = %q, want the base session headers plus X-Custom", got)
 	}
 }

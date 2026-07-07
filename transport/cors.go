@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"quicsql.net/config"
+	"quicsql.net/internal/wire"
 )
 
 // corsBaseHeaders are the request headers every quicSQL client may legitimately
@@ -18,9 +19,9 @@ import (
 var corsBaseHeaders = []string{
 	"Authorization",
 	"Content-Type",
-	"X-Quicsql-Key",
-	"X-Quicsql-Challenge",
-	"X-Quicsql-Signature",
+	wire.HeaderKeyringKey,
+	wire.HeaderKeyringChallenge,
+	wire.HeaderKeyringSignature,
 	"X-Libsql-Client-Version",
 }
 
@@ -31,7 +32,7 @@ const corsAllowMethods = "GET, POST, PUT, DELETE, OPTIONS"
 // corsBaseExpose are response headers a browser script must be able to read
 // without the operator listing them: the sliding-session renewal headers, which
 // the SDK adopts to extend a session on use.
-var corsBaseExpose = []string{"X-Quicsql-Session", "X-Quicsql-Session-Expires"}
+var corsBaseExpose = []string{wire.HeaderSessionToken, wire.HeaderSessionExpires}
 
 // withCORS wraps next with cross-origin approval for browser callers. It is
 // applied OUTSIDE the auth middleware: a preflight (OPTIONS +

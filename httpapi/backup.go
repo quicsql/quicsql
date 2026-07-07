@@ -50,9 +50,9 @@ func (h *Handler) handleBackup(w http.ResponseWriter, r *http.Request, db string
 	}
 	defer release()
 
-	tmp, err := os.CreateTemp("", "quicsql-backup-*.sqlite")
+	tmp, err := os.CreateTemp("", "backup-*.sqlite")
 	if err != nil {
-		h.log.Error("quicsql: backup temp file", "db", db, "err", err)
+		h.log.Error("backup temp file", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "backup: cannot create temp file")
 		return
 	}
@@ -61,14 +61,14 @@ func (h *Handler) handleBackup(w http.ResponseWriter, r *http.Request, db string
 	defer os.Remove(tmpPath)
 
 	if err := backupTo(r.Context(), src.Handle, tmpPath); err != nil {
-		h.log.Error("quicsql: backup", "db", db, "err", err)
+		h.log.Error("backup", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "backup failed")
 		return
 	}
 
 	f, err := os.Open(tmpPath)
 	if err != nil {
-		h.log.Error("quicsql: backup read", "db", db, "err", err)
+		h.log.Error("backup read", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "backup: cannot read image")
 		return
 	}

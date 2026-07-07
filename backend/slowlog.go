@@ -38,7 +38,7 @@ func InstallSlowLog(threshold time.Duration, redactParams bool, log *slog.Logger
 					if !redactParams && info.ExpandedSQL != "" {
 						sql = info.ExpandedSQL
 					}
-					log.Info("quicsql/slow",
+					log.Info("slow",
 						"duration_ms", info.Duration.Milliseconds(),
 						"sql", sql)
 					return 0

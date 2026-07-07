@@ -152,7 +152,7 @@ func TestBatonBoundToPrincipal(t *testing.T) {
 	}
 }
 
-// TestSharedMemoryAcrossSessions exercises the plan's exit criterion: rows written
+// TestSharedMemoryAcrossSessions exercises the shared-memory guarantee: rows written
 // by one client session are visible to another, over a shared in-memory backend.
 func TestSharedMemoryAcrossSessions(t *testing.T) {
 	sec, _ := secret.New(nil)

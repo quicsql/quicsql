@@ -34,12 +34,12 @@ const db = createClient({
   url, auth: { username: "analyst", password },
   onSessionRenewed: ({ token }) => sessionStorage.setItem("qs", token),  // persist slides across reloads
 });
-await db.mintSession();   // db now uses the qs_… token; expires_at (+ max_expires_at if renewable) returned
+await db.mintSession();   // db now uses the st_… token; expires_at (+ max_expires_at if renewable) returned
 // … logout:
 await db.revokeSession();
 ```
 
-Expiry surfaces as `HttpError` with `status === 401` — re-mint and retry (a token can't mint its own successor). For a renewable session (`max_ttl` set) the SDK adopts the server's transparent `X-Quicsql-Session` refresh and fires `onSessionRenewed`; `renewSession()` forces an early extension.
+Expiry surfaces as `HttpError` with `status === 401` — re-mint and retry (a token can't mint its own successor). For a renewable session (`max_ttl` set) the SDK adopts the server's transparent `X-Session-Token` refresh and fires `onSessionRenewed`; `renewSession()` forces an early extension.
 
 ## Keyring auth & enrollment (no backend at all)
 
@@ -52,6 +52,8 @@ const { principal } = await db.enroll({ token: "ec_…" }); // policy: token —
 ```
 
 `enroll()` is idempotent per key. Pass `enroll({ token })` under `policy: token` — the browser's only path for a **single-use enrollment code** (`ec_…`, minted by an admin at `POST /_admin/enroll/codes`). Bring your own crypto with `auth: { signer }` (`{ publicKey, sign(msg) }`); `sshPublicKeyLine(rawBytes)` builds the `ssh-ed25519 …` line. `db.backup()` downloads the database as a `Uint8Array`. Server side: the `auth-and-tls` skill and the [auth guide](../../docs/auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps). Note: admin ops — minting codes, vault key lifecycle, provisioning management — are **Go-client / HTTP only**; `@quicsql/client` covers the data + self-service-auth plane.
+
+Full user accounts and sign-in — one identity across many devices and factors — are a separate product built on this engine, not part of quicSQL core; this SDK covers the core data plane plus device-key enrollment and session tokens above.
 
 ## Live change feed
 

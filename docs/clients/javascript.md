@@ -75,12 +75,12 @@ const db = createClient({
   onSessionRenewed: ({ token }) => sessionStorage.setItem("qs", token),
 });
 
-const { token, expiresAt } = await db.mintSession();   // db now authenticates with the qs_… token
+const { token, expiresAt } = await db.mintSession();   // db now authenticates with the st_… token
 // … on logout:
 await db.revokeSession();
 ```
 
-When the token expires you get an `HttpError` with `status === 401` — re-mint and retry (a token deliberately cannot mint its own successor). For a **renewable** session (`max_ttl` set) the SDK adopts the server's transparent `X-Quicsql-Session` refresh automatically and fires `onSessionRenewed`; `renewSession()` forces an early extension if you need one. See the [session-token guide](../auth-and-authz.md#session-tokens-short-lived-revocable-credentials) for the full model.
+When the token expires you get an `HttpError` with `status === 401` — re-mint and retry (a token deliberately cannot mint its own successor). For a **renewable** session (`max_ttl` set) the SDK adopts the server's transparent `X-Session-Token` refresh automatically and fires `onSessionRenewed`; `renewSession()` forces an early extension if you need one. See the [session-token guide](../auth-and-authz.md#session-tokens-short-lived-revocable-credentials) for the full model.
 
 > **Why an SDK and not a `fetch` wrapper?** In a browser, `fetch` must be called with `this === window` — a naïvely method-bound or object-wrapped fetch throws *"'fetch' called on an object that does not implement interface Window."* `@quicsql/client` binds fetch to `globalThis` internally so it works everywhere; that binding pitfall is the main reason to prefer it over hand-rolled requests in the browser.
 
@@ -124,6 +124,8 @@ const { principal } = await db.enroll({ token: "ec_…" }); // redeem a single-u
 ```
 
 The server assigns the principal a name and a templated grant set; enrollment is idempotent per key, so a reinstalled app keeps its identity. When the server runs `policy: token`, pass the invite in `enroll({ token })` — that's how a browser redeems a **single-use enrollment code** an admin minted at `POST /_admin/enroll/codes` (a one-time `ec_…` string). See [device enrollment](../auth-and-authz.md#device-enrollment-self-service-principals-for-public-apps) for the server side.
+
+> User accounts and sign-in — one person behind many devices and factors, with recovery and credential management — are a separate product built on this engine, not part of quicSQL core.
 
 ## Downloading a backup
 

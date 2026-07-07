@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// This file adds the ACCOUNT-MANAGEMENT authorization dimension (accounts design
-// §21-B2). It is orthogonal to Level: Level governs per-database data access
+// This file adds the ACCOUNT-MANAGEMENT authorization dimension used by an identity feature.
+// It is orthogonal to Level: Level governs per-database data access
 // (unchanged), while the assurance model below governs sensitive actions on an
 // account's own credentials/recovery/sessions. The vocabulary lives here (not in
 // package auth) so it can travel on the Principal and be gated by handlers without
@@ -41,11 +41,13 @@ const (
 	FactorRecovery  Factor = 1 << 4
 )
 
-// PhishingResistant is the set of factors that resist verifier-impersonation
-// phishing (WebAuthn, an origin/challenge-bound device keypair, the recovery key).
-// TOTP and passwords are NOT phishing-resistant — hence they can't, by default,
-// authorize a destructive credential change (accounts design §21-A1/A3).
-const PhishingResistant = FactorWebAuthn | FactorDeviceKey | FactorRecovery
+// StrictFactors is the factor set the STRICT assurance rung requires: WebAuthn, an
+// origin/challenge-bound device keypair, and the recovery key. It is the default bar for
+// credential management / destructive actions. The name states the POLICY ROLE, not a
+// security claim — the *reason* we currently trust these (they resist verifier-
+// impersonation phishing, unlike a re-enterable password or TOTP code) lives in
+// prose that can be revised without renaming code or the wire.
+const StrictFactors = FactorWebAuthn | FactorDeviceKey | FactorRecovery
 
 // Scope narrows a session below its tier. A reduced-scope session (from a single
 // recovery code or email recovery) may not perform destructive actions until
@@ -56,6 +58,61 @@ const (
 	ScopeFull    Scope = 0
 	ScopeReduced Scope = 1
 )
+
+// Canonical wire/display names for the assurance enums — the SINGLE source of truth for
+// their string form. The session-assurance readout and the tier config value
+// both use these (via String() and the exported Tier* names), so they cannot drift. A UI
+// may relabel them; the machine values live here, next to the types they name.
+const (
+	TierNameDataOnly = "data-only"
+	TierNameOwner    = "owner"
+
+	scopeNameFull    = "full"
+	scopeNameReduced = "reduced"
+
+	factorNameWebAuthn  = "webauthn"
+	factorNameDeviceKey = "device_key"
+	factorNameRecovery  = "recovery"
+	factorNamePassword  = "password"
+	factorNameOTP       = "otp"
+)
+
+// String is the canonical wire name of the tier ("data-only" | "owner").
+func (t Tier) String() string {
+	if t >= TierOwner {
+		return TierNameOwner
+	}
+	return TierNameDataOnly
+}
+
+// String is the canonical wire name of the scope ("full" | "reduced").
+func (s Scope) String() string {
+	if s == ScopeReduced {
+		return scopeNameReduced
+	}
+	return scopeNameFull
+}
+
+// Names returns the amr factor names present in the bitset, in a stable order — the
+// whitelabel-neutral machine names in the session-assurance readout (never a brand).
+func (f Factor) Names() []string {
+	out := make([]string, 0, 5)
+	for _, m := range []struct {
+		bit  Factor
+		name string
+	}{
+		{FactorWebAuthn, factorNameWebAuthn},
+		{FactorDeviceKey, factorNameDeviceKey},
+		{FactorRecovery, factorNameRecovery},
+		{FactorPassword, factorNamePassword},
+		{FactorOTP, factorNameOTP},
+	} {
+		if f&m.bit != 0 {
+			out = append(out, m.name)
+		}
+	}
+	return out
+}
 
 // Assurance is a session's authentication context, carried in the server-signed
 // session token and surfaced on the Principal so account-management handlers can
@@ -96,10 +153,10 @@ type AssurancePolicy struct {
 
 func (p AssurancePolicy) withDefaults() AssurancePolicy {
 	if p.CredentialMgmt == 0 {
-		p.CredentialMgmt = PhishingResistant
+		p.CredentialMgmt = StrictFactors
 	}
 	if p.Destructive == 0 {
-		p.Destructive = PhishingResistant
+		p.Destructive = StrictFactors
 	}
 	if p.StepUpWindow == 0 {
 		p.StepUpWindow = 10 * time.Minute
@@ -134,7 +191,7 @@ func RequireAssurance(a *Assurance, action ActionClass, pol AssurancePolicy, now
 		// not MANAGE credentials OR perform destructive actions until the hold passes.
 		// Gating only Destructive is insufficient: otherwise one recovery code could
 		// mint an attach code / add a fresh full-power owner credential and reach root
-		// through it, defeating the hold (accounts §21-A2). It keeps DataWrite access.
+		// through it, defeating the hold. It keeps DataWrite access.
 		if a.Scope == ScopeReduced && now.Before(a.NotBeforeDestructive) {
 			return ErrScopeReduced
 		}

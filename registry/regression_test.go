@@ -85,19 +85,42 @@ func TestRetryAfterFailedOpen(t *testing.T) {
 	}
 }
 
-// TestWarm regresses the eager fail-fast contract: Warm errors if any seed
-// can't open, and succeeds when all open.
+// TestWarm regresses the eager fail-fast contract: Warm errors if any named
+// seed can't open, and succeeds when all open.
 func TestWarm(t *testing.T) {
 	bad := registry.New(map[string]backend.Backend{"good": &fakeBackend{}, "bad": &fakeBackend{failN: 100}}, nil)
 	t.Cleanup(func() { _ = bad.Close() })
-	if err := bad.Warm(context.Background()); err == nil {
+	if err := bad.Warm(context.Background(), []string{"good", "bad"}); err == nil {
 		t.Fatal("Warm: want error for a failing seed, got nil")
 	}
 
 	ok := registry.New(map[string]backend.Backend{"a": &fakeBackend{}, "b": &fakeBackend{}}, nil)
 	t.Cleanup(func() { _ = ok.Close() })
-	if err := ok.Warm(context.Background()); err != nil {
+	if err := ok.Warm(context.Background(), []string{"a", "b"}); err != nil {
 		t.Fatalf("Warm: %v", err)
+	}
+}
+
+// TestWarmOnlyNamed regresses the boot-time open sweep: Warm must open ONLY the
+// databases it is asked to (config seeds), leaving the rest — e.g. a fleet of
+// meta-restored per-account databases — closed until first use.
+func TestWarmOnlyNamed(t *testing.T) {
+	seed, restored := &fakeBackend{}, &fakeBackend{}
+	reg := registry.New(map[string]backend.Backend{"seed": seed, "u_restored": restored}, nil)
+	t.Cleanup(func() { _ = reg.Close() })
+	if err := reg.Warm(context.Background(), []string{"seed"}); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	if got := seed.opens.Load(); got != 1 {
+		t.Fatalf("seed: want 1 open, got %d", got)
+	}
+	if got := restored.opens.Load(); got != 0 {
+		t.Fatalf("unnamed database opened during Warm: want 0 opens, got %d", got)
+	}
+	for _, info := range reg.List() {
+		if info.Name == "u_restored" && info.Open {
+			t.Fatal("unnamed database reported open after Warm")
+		}
 	}
 }
 

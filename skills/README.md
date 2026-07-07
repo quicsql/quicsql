@@ -8,7 +8,7 @@ These are [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-
 | [`deploying-a-server`](deploying-a-server/SKILL.md) | standing up or configuring a quicSQL server — config, the daemon, listeners, transports |
 | [`databases-and-backends`](databases-and-backends/SKILL.md) | choosing/configuring a database — file, in-memory, or **vault (encryption + compression)** |
 | [`auth-and-tls`](auth-and-tls/SKILL.md) | securing a server or presenting credentials — principals, grants, bearer/password/**mTLS**/keyring, **session tokens**, **device enrollment**, and **CORS** for browser apps |
-| [`javascript-and-browser-clients`](javascript-and-browser-clients/SKILL.md) | building a **JavaScript/TypeScript or browser** app on quicSQL — the `@quicsql/client` SDK, session tokens, keyring auth, enrollment, and the live change feed |
+| [`javascript-and-browser-clients`](javascript-and-browser-clients/SKILL.md) | building a **JavaScript/TypeScript or browser** app on quicSQL — the `@quicsql/client` SDK, session tokens, keyring auth, device enrollment, and the live change feed |
 | [`transactions-and-hrana`](transactions-and-hrana/SKILL.md) | interactive transactions or batching many statements over Hrana |
 | [`liteorm-over-quicsql`](liteorm-over-quicsql/SKILL.md) | using an ORM (LiteORM) against a remote quicSQL database |
 | [`operating-a-server`](operating-a-server/SKILL.md) | administering a running server — control plane, metrics, limits, sessions, **online backup / in-place restore**, WAL checkpoint, **vault key lifecycle** (members/rewrap/rekey), and **enrolled-principal management + single-use code minting** |

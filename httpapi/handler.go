@@ -1,6 +1,6 @@
-// Package httpapi is the transport-neutral HTTP surface for quicSQL. Phase 1
+// Package httpapi is the transport-neutral HTTP surface for quicSQL. It
 // serves the thin native-JSON endpoint (POST /<db>/query) over an ordinary
-// http.Handler, so it runs identically on every transport a later phase adds
+// http.Handler, so it runs identically on every transport a later revision adds
 // (HTTP/1.1, h2/h2c, HTTP/3, WebSocket, UDS). Routing resolves the target
 // database from the URL path (default) or the Host subdomain, with server-scoped
 // reserved paths (`/_health`, and `/_*` reserved) resolved first.
@@ -20,7 +20,7 @@ import (
 	"quicsql.net/config"
 	"quicsql.net/engine"
 	"quicsql.net/feed"
-	"quicsql.net/internal/httpjson"
+	"quicsql.net/httpjson"
 	"quicsql.net/limits"
 	"quicsql.net/obs"
 	"quicsql.net/registry"
@@ -212,7 +212,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter) {
 // meter applies the admission limiter and, for an admitted request, counts it and
 // times it. It returns a release func (always deferred by the caller) and
 // ok=false after writing a rejection (429 rate / 503 concurrency). A rejected
-// request is NOT counted or timed — quicsql_requests_total is served requests,
+// request is NOT counted or timed — requests_total is served requests,
 // not arrivals. It runs after authorize, so only admitted-by-capability requests
 // are metered.
 func (h *Handler) meter(w http.ResponseWriter, r *http.Request, db string) (func(), bool) {
@@ -479,7 +479,7 @@ func (h *Handler) writeGetError(w http.ResponseWriter, db string, err error) {
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		writeErr(w, http.StatusGatewayTimeout, "request timed out")
 	default:
-		h.log.Error("quicsql/http: open database", "db", db, "err", err)
+		h.log.Error("http: open database", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 	}
 }

@@ -185,17 +185,14 @@ func (r *Registry) releaseFunc(e *entry) func() {
 	}
 }
 
-// Warm eagerly opens every configured database so a bad seed (missing file,
-// wrong key) fails at STARTUP rather than on a client's first request. Each
-// handle is released immediately (it stays open at ref 0). Returns the first
-// open error, honoring ctx.
-func (r *Registry) Warm(ctx context.Context) error {
-	r.mu.Lock()
-	names := make([]string, 0, len(r.backends))
-	for name := range r.backends {
-		names = append(names, name)
-	}
-	r.mu.Unlock()
+// Warm eagerly opens the named databases so a bad seed (missing file, wrong
+// key) fails at STARTUP rather than on a client's first request. Callers pass
+// the config-declared seeds ONLY — never the meta-restored runtime-created set,
+// which must open lazily on first Get (a fleet of per-account databases would
+// otherwise all open on every boot). Each handle is released immediately (it
+// stays open at ref 0). Returns the first open error, honoring ctx.
+func (r *Registry) Warm(ctx context.Context, names []string) error {
+	names = append([]string(nil), names...)
 	sort.Strings(names)
 	for _, name := range names {
 		_, release, err := r.Get(ctx, name)
@@ -361,7 +358,7 @@ func (r *Registry) List() []DBInfo {
 
 // Close drains and closes every open handle, waiting for any in-flight open to
 // publish first so nothing leaks. Callers must have stopped accepting new work
-// (listeners down) before calling; Phase 7 adds session-draining and WAL
+// (listeners down) before calling; a future revision adds session-draining and WAL
 // checkpointing.
 func (r *Registry) Close() error {
 	r.mu.Lock()

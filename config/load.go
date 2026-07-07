@@ -138,7 +138,7 @@ func WithinDir(dir, p string) (string, bool) {
 }
 
 // knownTopLevel are the config sections wired into behavior. inertTopLevel are
-// sections the plan defines but nothing consumes yet — their presence warns.
+// sections reserved for future use but nothing consumes yet — their presence warns.
 var knownTopLevel = map[string]bool{
 	"server": true, "secrets": true, "routing": true, "tls": true, "listeners": true,
 	"auth": true, "databases": true, "control_plane": true, "limits": true, "logging": true,
@@ -146,8 +146,8 @@ var knownTopLevel = map[string]bool{
 }
 
 var inertTopLevel = map[string]string{
-	"wire_compression": "over-the-wire compression (Phase 3.5)",
-	"observability":    "metrics / introspection (Phase 7)",
+	"wire_compression": "over-the-wire compression",
+	"observability":    "metrics / introspection",
 }
 
 // Load reads, parses, defaults, and validates a YAML config file.
@@ -173,11 +173,16 @@ func Load(path string) (*Config, error) {
 			switch {
 			case inertTopLevel[k] != "":
 				c.warnings = append(c.warnings, fmt.Sprintf("config: %q is present but not active yet — %s", k, inertTopLevel[k]))
-			case !knownTopLevel[k]:
+			case knownTopLevel[k] || sectionRegistered(k):
+				// a core section, or a section owned by a compiled-in feature module
+			default:
 				c.warnings = append(c.warnings, fmt.Sprintf("config: unknown top-level key %q (ignored)", k))
 			}
 		}
 	}
+	// Capture the raw YAML of any feature-registered sections so a feature can decode
+	// its own block during setup (core never types it).
+	c.captureSections(b)
 	c.applyDefaults()
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -246,7 +251,7 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Validate catches the invariants Phase 0 depends on: unique, non-reserved
+// Validate catches the core invariants: unique, non-reserved
 // database names with a known backend.
 func (c *Config) Validate() error {
 	switch c.Server.MetaStore.Backend {
@@ -440,14 +445,17 @@ func (c *Config) validateAuth() error {
 	if err := c.validateEnroll(); err != nil {
 		return err
 	}
-	if err := c.validateAccounts(); err != nil {
-		return err
-	}
 
 	principals := map[string]bool{}
 	for _, p := range c.Auth.Principals {
 		if p.Name == "" {
 			return fmt.Errorf("config: auth principal with empty name")
+		}
+		// Reserve the u_ namespace for accounts: a static principal named u_…
+		// would be granted owner tier by serveSession and collide with the account
+		// namespace. Keep the two orthogonal.
+		if strings.HasPrefix(p.Name, "u_") {
+			return fmt.Errorf("config: auth principal %q uses the reserved u_ prefix (that namespace is reserved for server-assigned dynamic principals)", p.Name)
 		}
 		if principals[p.Name] {
 			return fmt.Errorf("config: duplicate auth principal %q", p.Name)
@@ -484,68 +492,6 @@ func (c *Config) validateAuth() error {
 	for _, a := range c.ControlPlane.Admins {
 		if !principals[a] {
 			return fmt.Errorf("config: control_plane admin %q is not a configured principal", a)
-		}
-	}
-	return nil
-}
-
-// validateAccounts checks the auth.accounts block. Like enroll, the account model
-// is refused without explicit auth or the control plane (the meta store holds the
-// accounts, /_admin/principals is the oversight surface), and — since every account
-// OWNS a database — the provisioning template must contain {principal} so accounts
-// don't collide on one database.
-func (c *Config) validateAccounts() error {
-	a := c.Auth.Accounts
-	if !a.Enabled {
-		return nil
-	}
-	if !c.AuthConfigured() {
-		return fmt.Errorf("config: auth.accounts.enabled requires explicit auth — accounts must not flip an open-mode server")
-	}
-	if !c.ControlPlane.Enabled {
-		return fmt.Errorf("config: auth.accounts.enabled requires control_plane.enabled (the meta store holds accounts; /_admin/principals manages them)")
-	}
-	if a.CodeTTL < 0 || a.RecoveryHold < 0 || a.IdleTTL < 0 || a.RatePerIP < 0 || a.MaxCredentials < 0 || a.MaxAttachCodes < 0 {
-		return fmt.Errorf("config: auth.accounts quotas/timers must not be negative")
-	}
-	switch a.Session.Transport {
-	case "", "header":
-	case "cookie", "both":
-		c.warnings = append(c.warnings, "config: auth.accounts.session.transport "+a.Session.Transport+" is not implemented yet (Phase 2) — only 'header' is active; sessions remain Authorization-header bearer")
-	default:
-		return fmt.Errorf("config: auth.accounts.session.transport %q invalid (want header|cookie|both)", a.Session.Transport)
-	}
-	// Accounts ALWAYS provision (each account owns a database), so validate the
-	// template even when Provision.Enabled is unset.
-	p := a.Provision
-	tmpl := p.NameTemplate
-	if tmpl == "" {
-		tmpl = "{principal}"
-	}
-	if !strings.Contains(tmpl, "{principal}") {
-		return fmt.Errorf("config: auth.accounts.provision.name_template %q must contain {principal} so per-account databases don't collide", tmpl)
-	}
-	if p.Backend != "" && !KnownBackends[p.Backend] {
-		return fmt.Errorf("config: auth.accounts.provision.backend %q unknown", p.Backend)
-	}
-	if p.Level != "" && p.Level != "read-only" && p.Level != "read-write" {
-		return fmt.Errorf("config: auth.accounts.provision.level %q invalid (want read-only|read-write)", p.Level)
-	}
-	if p.OnRevoke != "" && p.OnRevoke != "keep" && p.OnRevoke != "drop" {
-		return fmt.Errorf("config: auth.accounts.provision.on_revoke %q invalid (want keep|drop)", p.OnRevoke)
-	}
-	if p.MaxBytes < 0 {
-		return fmt.Errorf("config: auth.accounts.provision.max_bytes must not be negative")
-	}
-	if a.Password.Enabled {
-		if a.Password.Pepper == "" {
-			return fmt.Errorf("config: auth.accounts.password.enabled requires auth.accounts.password.pepper (a secret reference — the key outside the store that makes a stolen .sqlite uncrackable)")
-		}
-		if a.Password.MinLength != 0 && a.Password.MinLength < 8 {
-			return fmt.Errorf("config: auth.accounts.password.min_length %d is below the NIST floor of 8", a.Password.MinLength)
-		}
-		if a.Password.MinLength != 0 && a.Password.MinLength < 15 {
-			c.warnings = append(c.warnings, "config: auth.accounts.password.min_length below 15 weakens a sole-factor password (NIST 800-63B-4 recommends ≥15 when password is the only factor)")
 		}
 	}
 	return nil
@@ -590,34 +536,54 @@ func (c *Config) validateEnroll() error {
 		}
 	}
 	if p := e.Provision; p.Enabled {
-		if !strings.Contains(p.NameTemplate, "{principal}") {
-			return fmt.Errorf("config: auth.enroll.provision.name_template %q must contain {principal} so per-user databases don't collide", p.NameTemplate)
+		if err := c.ValidateProvision("auth.enroll.provision", p); err != nil {
+			return err
 		}
-		if !KnownBackends[p.Backend] {
-			return fmt.Errorf("config: auth.enroll.provision.backend %q unknown", p.Backend)
-		}
-		if p.Level != "read-only" && p.Level != "read-write" {
-			return fmt.Errorf("config: auth.enroll.provision.level %q invalid (want read-only|read-write — never admin)", p.Level)
-		}
-		if p.OnRevoke != "keep" && p.OnRevoke != "drop" {
-			return fmt.Errorf("config: auth.enroll.provision.on_revoke %q invalid (want keep|drop)", p.OnRevoke)
-		}
-		if p.MaxBytes < 0 {
-			return fmt.Errorf("config: auth.enroll.provision.max_bytes must not be negative")
-		}
-		// A cap below one page would integer-divide to max_page_count=0, which SQLite
-		// reads as "unlimited" — the opposite of intended. Require at least one page.
-		if p.MaxBytes > 0 && p.MaxBytes < ProvisionPageSize {
-			return fmt.Errorf("config: auth.enroll.provision.max_bytes must be 0 (no cap) or at least %d (one page)", ProvisionPageSize)
-		}
-		if p.Vault != nil && p.Backend != "vault" {
-			return fmt.Errorf("config: auth.enroll.provision has a vault block but backend is %q", p.Backend)
-		}
-		// The default backend is "vault" ("encrypted at rest"), but a vault with no
-		// key or recipients is a plain container — warn rather than silently ship
-		// plaintext per-user databases (mirrors the keyless meta-store warning).
-		if p.Backend == "vault" && !provisionVaultEncrypted(p.Vault) {
-			c.warnings = append(c.warnings, "config: auth.enroll.provision.backend is vault but no vault.key/recipients are set — per-user databases will NOT be encrypted at rest")
+	}
+	return nil
+}
+
+// ValidateProvision checks a provisioning template shared by the enroll and accounts
+// models, so the two paths can't drift. An empty backend/level/on_revoke is tolerated
+// (the owning model defaults it later — enroll in applyDefaults, accounts in the
+// account service); the checks that DO run — the {principal} template, the one-page
+// max_bytes floor, the vault/backend-mismatch error, and the keyless-vault plaintext
+// warning — are identical for both. prefix is the config path for messages.
+func (c *Config) ValidateProvision(prefix string, p Provision) error {
+	tmpl := p.NameTemplate
+	if tmpl == "" {
+		tmpl = "{principal}"
+	}
+	if !strings.Contains(tmpl, "{principal}") {
+		return fmt.Errorf("config: %s.name_template %q must contain {principal} so per-account databases don't collide", prefix, tmpl)
+	}
+	if p.Backend != "" && !KnownBackends[p.Backend] {
+		return fmt.Errorf("config: %s.backend %q unknown", prefix, p.Backend)
+	}
+	if p.Level != "" && p.Level != "read-only" && p.Level != "read-write" {
+		return fmt.Errorf("config: %s.level %q invalid (want read-only|read-write — never admin)", prefix, p.Level)
+	}
+	if p.OnRevoke != "" && p.OnRevoke != "keep" && p.OnRevoke != "drop" {
+		return fmt.Errorf("config: %s.on_revoke %q invalid (want keep|drop)", prefix, p.OnRevoke)
+	}
+	if p.MaxBytes < 0 {
+		return fmt.Errorf("config: %s.max_bytes must not be negative", prefix)
+	}
+	// A cap below one page would integer-divide to max_page_count=0, which SQLite
+	// reads as "unlimited" — the opposite of intended. Require at least one page.
+	if p.MaxBytes > 0 && p.MaxBytes < ProvisionPageSize {
+		return fmt.Errorf("config: %s.max_bytes must be 0 (no cap) or at least %d (one page)", prefix, ProvisionPageSize)
+	}
+	if p.Vault != nil && p.Backend != "" && p.Backend != "vault" {
+		return fmt.Errorf("config: %s has a vault block but backend is %q", prefix, p.Backend)
+	}
+	// The default backend is "vault" ("encrypted at rest"), but a vault with no key
+	// or recipients is a plain container — warn rather than silently ship plaintext
+	// per-account databases (mirrors the keyless meta-store warning). An empty backend
+	// defaults to vault.
+	if backend := p.Backend; backend == "" || backend == "vault" {
+		if !provisionVaultEncrypted(p.Vault) {
+			c.warnings = append(c.warnings, fmt.Sprintf("config: %s.backend is vault but no vault.key/recipients are set — provisioned databases will NOT be encrypted at rest", prefix))
 		}
 	}
 	return nil

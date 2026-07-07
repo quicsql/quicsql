@@ -108,9 +108,9 @@ func (h *harness) signedRequest(t *testing.T, method, path, body string, priv ed
 	} else {
 		r = httptest.NewRequest(method, path, nil)
 	}
-	r.Header.Set("X-Quicsql-Key", keyLine)
-	r.Header.Set("X-Quicsql-Challenge", chal)
-	r.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
+	r.Header.Set(wire.HeaderKeyringKey, keyLine)
+	r.Header.Set(wire.HeaderKeyringChallenge, chal)
+	r.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(sig))
 	return r
 }
 
@@ -309,9 +309,9 @@ func TestLoadExistingRestoresAcrossRestart(t *testing.T) {
 	_ = json.Unmarshal(cw.Body.Bytes(), &out)
 	sig := ed25519.Sign(priv, wire.KeyringSigningInput(out.Challenge, "POST", "/appdb/query", ""))
 	r := httptest.NewRequest(http.MethodPost, "/appdb/query", nil)
-	r.Header.Set("X-Quicsql-Key", line)
-	r.Header.Set("X-Quicsql-Challenge", out.Challenge)
-	r.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
+	r.Header.Set(wire.HeaderKeyringKey, line)
+	r.Header.Set(wire.HeaderKeyringChallenge, out.Challenge)
+	r.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(sig))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || seen == nil || seen.Name != name {

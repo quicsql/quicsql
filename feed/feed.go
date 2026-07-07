@@ -84,7 +84,7 @@ func New(buffer, maxSubs int, log *slog.Logger) *Broker {
 // are hooked, which at create time is all of them.
 func (b *Broker) Register(name, path string) {
 	if path == "" {
-		b.log.Warn("quicsql/feed: database has no stable path — change feed unavailable", "db", name)
+		b.log.Warn("feed: database has no stable path — change feed unavailable", "db", name)
 		return
 	}
 	f := &dbFeed{name: name, ring: make([]Event, b.buffer), cap: b.buffer, subs: map[*Subscriber]struct{}{}}

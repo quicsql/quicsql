@@ -7,7 +7,7 @@
 // CGo-free SQLite engine it embeds. During co-development it resolves gosqlite
 // from the sibling checkout via the replaces in go.mod.
 //
-// Live today (Phases 0-7): the config/backend/registry/engine core, the
+// Live today: the config/backend/registry/engine core, the
 // native-JSON and libSQL Hrana protocols (execute/batch/interactive
 // transactions over baton sessions), the full transport matrix — HTTP/1.1,
 // cleartext h2c, h2 over TLS, HTTP/3 over QUIC, and Unix sockets, all serving

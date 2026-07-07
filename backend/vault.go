@@ -164,7 +164,7 @@ func (b *vaultBackend) Rekey() error {
 }
 
 // newVault resolves the vault.Options for a database. The option surface splits
-// by role (see the plan): raw key, compression, cipher, authenticate, and anchor
+// by role: raw key, compression, cipher, authenticate, and anchor
 // apply to both create and open; the rest is chosen by whether the container
 // file already exists. An existing file is OPENED with the runtime credentials
 // (identities to unwrap, masters to trust, write_as to sign commits — omit it

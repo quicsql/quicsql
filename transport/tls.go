@@ -123,7 +123,7 @@ func selfSignedCert(hosts []string) (tls.Certificate, error) {
 	}
 	tmpl := x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "quicsql dev"},
+		Subject:               pkix.Name{CommonName: "localhost"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(devCertValidity),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

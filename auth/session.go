@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"quicsql.net/authz"
+	"quicsql.net/internal/wire"
 )
 
 // sessionPrefix shape-discriminates a minted session token from a static bearer
 // token, so both can share the Authorization header on one listener: the session
-// method claims qs_-prefixed values and leaves everything else to bearer.
-const sessionPrefix = "qs_"
+// method claims st_-prefixed values and leaves everything else to bearer.
+const sessionPrefix = wire.SessionTokenPrefix
 
 // tokenVer is the wire-format version byte (payload[0]) — this is the FIRST
 // explicitly-versioned format (the earlier unversioned layout had no version byte
@@ -40,7 +41,7 @@ const tokenVer = 1
 // sid is the SESSION id, minted once and carried UNCHANGED through every renewal,
 // so all tokens descended from one mint share it — a single DELETE revokes the
 // whole chain (revocation is keyed by sid). authTime/factors/tier/credID are the
-// assurance claims (accounts design §21): they are FROZEN across renewal/refresh
+// assurance claims: they are FROZEN across renewal/refresh
 // (only a fresh factor presentation changes them) so a one-time step-up can't
 // become permanent sudo.
 const (
@@ -107,8 +108,8 @@ func allZero(b []byte) bool {
 // self-contained (like a challenge), so no per-token state is kept except the
 // revocation set. The HMAC key is random per process (matching the challenge and
 // baton keys): a restart invalidates every outstanding token AND clears the
-// revocation set together, so the two can never disagree. (Phase 0.2 replaces this
-// with a persisted, versioned key + a durable revocation registry.)
+// revocation set together, so the two can never disagree. (A future revision
+// replaces this with a persisted, versioned key + a durable revocation registry.)
 //
 // idleTTL is each issued token's validity (the sliding window). maxTTL, when
 // > 0, makes tokens renewable up to maxTTL from the FIRST mint; 0 keeps them
@@ -126,7 +127,7 @@ type sessionMinter struct {
 
 // SessionStore durably records live sessions so they can be listed (the device
 // list) and revoked account- or credential-wide. Implemented by the meta store
-// (wired in Phase 1). When nil, revocation is per-process only — which is still
+// (wired by the meta store). When nil, revocation is per-process only — which is still
 // sound, since a restart mints a fresh signing key that invalidates every
 // outstanding token at once.
 type SessionStore interface {

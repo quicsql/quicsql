@@ -16,7 +16,7 @@ var ErrDenied = errors.New("statement not permitted by server policy")
 // `... RETURNING ...`) and affected/last-insert for plain writes. It first
 // denies ATTACH/DETACH — those reach the host filesystem and bypass the registry
 // / single-owner vault invariant. This is the interim default-deny ahead of the
-// full per-principal authorizer (Phase 4).
+// full per-principal authorizer.
 //
 // The read/write split is a heuristic — the leading keyword plus a RETURNING
 // probe — used on BOTH the native and Hrana execution paths. (Hrana `describe`
@@ -41,7 +41,7 @@ func (e *Engine) Run(ctx context.Context, q Queryer, s Statement) (*Result, erro
 }
 
 // IsReadOnly reports whether a statement only reads (SELECT and friends, and not
-// a writing RETURNING). Phase-1-grade heuristic.
+// a writing RETURNING). Best-effort heuristic.
 func IsReadOnly(sql string) bool { return isReadOnly(sql) && !hasReturning(sql) }
 
 // IsExplain reports whether the statement is an EXPLAIN / EXPLAIN QUERY PLAN,

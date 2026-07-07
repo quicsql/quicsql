@@ -102,7 +102,7 @@ func TestHranaExecuteIntegerAsString(t *testing.T) {
 	}
 }
 
-// TestHranaInteractiveTransaction is the core Phase 2 exit: BEGIN…INSERT…COMMIT
+// TestHranaInteractiveTransaction exercises interactive transactions: BEGIN…INSERT…COMMIT
 // spanning multiple pipeline requests on one baton, with isolation before commit.
 func TestHranaInteractiveTransaction(t *testing.T) {
 	h := newHranaHandler(t, walDB("app"))

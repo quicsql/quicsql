@@ -52,7 +52,7 @@ func Open(cfg config.MetaStore, sec secret.Resolver, dataDir string, log *slog.L
 		if cfg.Key != "" {
 			spec.Vault = &config.VaultConfig{Key: cfg.Key}
 		} else {
-			log.Warn("quicsql/meta: meta store has no key (server.meta_store.key) — it is NOT encrypted at rest")
+			log.Warn("meta: meta store has no key (server.meta_store.key) — it is NOT encrypted at rest")
 		}
 	}
 	be, err := backend.For(spec, sec, dataDir)
@@ -87,6 +87,14 @@ func Open(cfg config.MetaStore, sec secret.Resolver, dataDir string, log *slog.L
 			return nil, fmt.Errorf("meta: migrate enrolled.last_seen: %w", err)
 		}
 	}
+	// Apply feature-registered migrations (e.g. a feature module's tables) on the
+	// SAME vault-backed connection, so they are encrypted/compressed transparently.
+	for i, ddl := range registeredMigrations() {
+		if _, err := db.Exec(ddl); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("meta: feature migration %d: %w", i, err)
+		}
+	}
 	return &Store{db: db, log: log}, nil
 }
 
@@ -110,7 +118,7 @@ func (s *Store) Databases() ([]config.Database, error) {
 		}
 		var db config.Database
 		if err := json.Unmarshal([]byte(spec), &db); err != nil || db.Name != name {
-			s.log.Warn("quicsql/meta: skipping undecodable database entry", "name", name, "err", err)
+			s.log.Warn("meta: skipping undecodable database entry", "name", name, "err", err)
 			continue
 		}
 		out = append(out, db)
@@ -287,14 +295,14 @@ func (s *Store) ConsumeEnrollCode(hash string, now int64) (bool, error) {
 // failure never burns a user's one-time code. Best-effort.
 func (s *Store) ReleaseEnrollCode(hash string) {
 	if _, err := s.db.Exec(`UPDATE enroll_codes SET used_at = NULL WHERE hash = ?`, hash); err != nil {
-		s.log.Error("quicsql/meta: release enroll code", "err", err)
+		s.log.Error("meta: release enroll code", "err", err)
 	}
 }
 
 // GCEnrollCodes deletes used or expired codes, bounding the table. Best-effort.
 func (s *Store) GCEnrollCodes(now int64) {
 	if _, err := s.db.Exec(`DELETE FROM enroll_codes WHERE used_at IS NOT NULL OR expires_at <= ?`, now); err != nil {
-		s.log.Error("quicsql/meta: gc enroll codes", "err", err)
+		s.log.Error("meta: gc enroll codes", "err", err)
 	}
 }
 
@@ -309,7 +317,7 @@ func (s *Store) Audit(principal, action, db, detail string) {
 	_, err := s.db.Exec(`INSERT INTO audit(at, principal, action, db, detail) VALUES(?,?,?,?,?)`,
 		time.Now().Unix(), principal, action, db, detail)
 	if err != nil {
-		s.log.Error("quicsql/meta: audit write failed", "action", action, "db", db, "err", err)
+		s.log.Error("meta: audit write failed", "action", action, "db", db, "err", err)
 	}
 }
 
@@ -334,6 +342,40 @@ func (s *Store) AuditEntries(limit int) ([]AuditEntry, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(`SELECT at, principal, action, db, detail FROM audit ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.At, &e.Principal, &e.Action, &e.DB, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AccountActivityEntries returns one account's most recent SECURITY events, newest
+// first (up to limit) — the audit rows whose action is a canonical `account.*` event,
+// excluding the internal `account.idle_gc` housekeeping and the duplicate `notify.*`
+// mirrors. Filtering in SQL (not after an over-read) keeps it one bounded index range
+// over audit_by_principal. It backs the account-scoped "recent security activity" feed
+// (an account may read its own timeline; the full log stays admin-only). Nil-safe: a
+// stateless deployment has no audit log, so it returns nil.
+func (s *Store) AccountActivityEntries(principal string, limit int) ([]AuditEntry, error) {
+	if s == nil || principal == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT at, principal, action, db, detail FROM audit
+		 WHERE principal = ? AND action LIKE 'account.%' AND action <> 'account.idle_gc'
+		 ORDER BY id DESC LIMIT ?`,
+		principal, limit)
 	if err != nil {
 		return nil, err
 	}

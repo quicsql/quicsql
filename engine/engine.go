@@ -43,7 +43,7 @@ type TxBeginner interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
 
-// Engine holds the result caps. Phase 7 adds the slow-log (driver TraceProfile)
+// Engine holds the result caps. A future revision adds the slow-log (driver TraceProfile)
 // and the richer limits/cancellation wiring around these calls.
 type Engine struct {
 	maxRows  int
@@ -144,7 +144,7 @@ func (e *Engine) Exec(ctx context.Context, q Queryer, s Statement) (*Result, err
 // all-or-nothing. Each statement dispatches via Run, so reads return rows and
 // writes return affected/last-insert. A failure rolls the whole batch back and
 // returns a *BatchError carrying the failing index. Hrana batch step-conditions
-// and the interactive (pinned-conn) transactions arrive in Phase 2.
+// and the interactive (pinned-conn) transactions are handled separately.
 func (e *Engine) Batch(ctx context.Context, db TxBeginner, stmts []Statement) ([]*Result, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

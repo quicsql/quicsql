@@ -18,7 +18,7 @@ import (
 
 	"quicsql.net/authz"
 	"quicsql.net/config"
-	"quicsql.net/internal/httpjson"
+	"quicsql.net/httpjson"
 	"quicsql.net/meta"
 	"quicsql.net/obs"
 	"quicsql.net/provision"
@@ -338,7 +338,7 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 			h.auditFail(r, "create", db.Name, "invalid spec: "+err.Error())
 			writeErr(w, http.StatusBadRequest, "database could not be created (invalid or unopenable spec)")
 		default:
-			h.log.Error("quicsql/admin: create database", "db", db.Name, "err", err)
+			h.log.Error("admin: create database", "db", db.Name, "err", err)
 			h.auditFail(r, "create", db.Name, "create failed")
 			writeErr(w, http.StatusInternalServerError, "database could not be created")
 		}
@@ -388,7 +388,7 @@ func (h *Handler) handleDetach(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "database busy (has active users); retry when idle")
 		return
 	case err != nil:
-		h.log.Error("quicsql/admin: detach database", "db", req.Database, "err", err)
+		h.log.Error("admin: detach database", "db", req.Database, "err", err)
 		h.auditFail(r, "detach", req.Database, "remove failed")
 		writeErr(w, http.StatusInternalServerError, "cannot detach database")
 		return

@@ -42,7 +42,7 @@ func TestMetricsEndpoint(t *testing.T) {
 		t.Fatalf("/_metrics: status %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `quicsql_requests_total{db="app"} 2`) {
+	if !strings.Contains(body, `requests_total{db="app"} 2`) {
 		t.Fatalf("request counter missing/wrong: %s", body)
 	}
 }

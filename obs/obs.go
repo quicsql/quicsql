@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// Channels holds one logger per structured channel. Phase 0 points them all at
-// the default logger; Phase 7 gives each an independent sink and format.
+// Channels holds one logger per structured channel. Currently they all point at
+// the default logger; a future revision can give each an independent sink and format.
 type Channels struct {
 	Server   *slog.Logger // lifecycle / errors
 	Conn     *slog.Logger // connect / disconnect / auth outcome
@@ -30,8 +30,8 @@ func Default() *Channels {
 	return &Channels{Server: l, Conn: l, SQLExec: l, SQLSlow: l, SQLAudit: l, SQLError: l}
 }
 
-// Metrics is the counter/latency sink. Phase 7 backs it with a Prometheus-text
-// exporter; Nop is the Phase 0 default.
+// Metrics is the counter/latency sink. A future revision can back it with a
+// Prometheus-text exporter; Nop is the current default.
 type Metrics interface {
 	IncRequests(db, principal string)
 	ObserveLatency(db string, d time.Duration)

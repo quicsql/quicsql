@@ -109,7 +109,8 @@ and `/changes` (a live Server-Sent-Events change feed) — specified
 [below](#beyond-query). Server-scoped endpoints live elsewhere: `/_health`
 (unauthenticated liveness), `/_auth/challenge` (the keyring nonce), and
 `/_auth/session` (mint/renew/revoke a short-lived session token) are in the
-[auth guide](../auth-and-authz.md), and `/_metrics` (Prometheus) and `/_admin/*`
+[auth guide](../auth-and-authz.md) — as is `/_auth/enroll` (self-service device
+enrollment) when it is enabled — and `/_metrics` (Prometheus) and `/_admin/*`
 (the control plane, including in-place `restore`) are in
 [administration](../administration.md). Browser callers additionally need the
 server's `cors:` block enabled — also covered in the auth guide; note a `*`

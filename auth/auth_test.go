@@ -138,9 +138,9 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	sig := ed25519.Sign(priv, wire.KeyringSigningInput(chal, http.MethodPost, "/x/query", ""))
 
 	r := httptest.NewRequest(http.MethodPost, "/x/query", nil)
-	r.Header.Set("X-Quicsql-Key", keyLine)
-	r.Header.Set("X-Quicsql-Challenge", chal)
-	r.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
+	r.Header.Set(wire.HeaderKeyringKey, keyLine)
+	r.Header.Set(wire.HeaderKeyringChallenge, chal)
+	r.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(sig))
 	p, err := m.authenticate(r)
 	if err != nil || p.Name != "signer" || p.Method != "keyring" {
 		t.Fatalf("valid keyring: p=%+v err=%v", p, err)
@@ -149,27 +149,27 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	// The signature is bound to the request's method+path: replaying it onto a
 	// different path must be rejected (anti-replay binding).
 	replayed := httptest.NewRequest(http.MethodPost, "/y/query", nil)
-	replayed.Header.Set("X-Quicsql-Key", keyLine)
-	replayed.Header.Set("X-Quicsql-Challenge", chal)
-	replayed.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig)) // bound to /x/query
+	replayed.Header.Set(wire.HeaderKeyringKey, keyLine)
+	replayed.Header.Set(wire.HeaderKeyringChallenge, chal)
+	replayed.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(sig)) // bound to /x/query
 	if _, err := m.authenticate(replayed); err == nil {
 		t.Fatal("a signature bound to a different request path must be rejected")
 	}
 
 	// A signature over a different challenge (or a forged one) is rejected.
 	forged := httptest.NewRequest(http.MethodPost, "/x/query", nil)
-	forged.Header.Set("X-Quicsql-Key", keyLine)
-	forged.Header.Set("X-Quicsql-Challenge", chal)
-	forged.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte("other"))))
+	forged.Header.Set(wire.HeaderKeyringKey, keyLine)
+	forged.Header.Set(wire.HeaderKeyringChallenge, chal)
+	forged.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte("other"))))
 	if _, err := m.authenticate(forged); err == nil {
 		t.Fatal("signature over the wrong message must be rejected")
 	}
 
 	// An unmintable (forged) challenge is rejected even with a valid signature.
 	badChal := httptest.NewRequest(http.MethodPost, "/x/query", nil)
-	badChal.Header.Set("X-Quicsql-Key", keyLine)
-	badChal.Header.Set("X-Quicsql-Challenge", "AAAAAAAAAAAAAAAAAAAAAA")
-	badChal.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte("AAAAAAAAAAAAAAAAAAAAAA"))))
+	badChal.Header.Set(wire.HeaderKeyringKey, keyLine)
+	badChal.Header.Set(wire.HeaderKeyringChallenge, "AAAAAAAAAAAAAAAAAAAAAA")
+	badChal.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte("AAAAAAAAAAAAAAAAAAAAAA"))))
 	if _, err := m.authenticate(badChal); err == nil {
 		t.Fatal("a challenge we did not mint must be rejected")
 	}
@@ -179,9 +179,9 @@ func TestKeyringChallengeResponse(t *testing.T) {
 	strangerPub := ed25519.PublicKey(strangerPriv.Public().(ed25519.PublicKey))
 	strangerLine := authorizedKeyLine(t, strangerPub)
 	unknown := httptest.NewRequest(http.MethodPost, "/x/query", nil)
-	unknown.Header.Set("X-Quicsql-Key", strangerLine)
-	unknown.Header.Set("X-Quicsql-Challenge", chal)
-	unknown.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(strangerPriv, []byte(chal))))
+	unknown.Header.Set(wire.HeaderKeyringKey, strangerLine)
+	unknown.Header.Set(wire.HeaderKeyringChallenge, chal)
+	unknown.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(ed25519.Sign(strangerPriv, []byte(chal))))
 	if _, err := m.authenticate(unknown); err == nil {
 		t.Fatal("a key outside the roster must be rejected")
 	}

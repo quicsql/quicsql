@@ -107,7 +107,7 @@ func (q *qipCert) renew(ctx context.Context, interval time.Duration, log *slog.L
 				continue
 			}
 			if err := q.fetch(); err != nil {
-				log.Warn("quicsql: qip.sh certificate renewal failed (keeping current)", "err", err)
+				log.Warn("qip.sh certificate renewal failed (keeping current)", "err", err)
 			}
 		}
 	}
@@ -160,7 +160,7 @@ func warnQIPExposed(log *slog.Logger, name string, p config.TLSProfile, addr str
 	if zone == "" {
 		zone = qipDefaultZone
 	}
-	log.Warn("quicsql: serving a qip.sh certificate on a non-loopback address — its private key is published publicly, so this padlock is NOT server authentication (a MITM on this network can impersonate); use tls mode files for anything untrusted parties can reach",
+	log.Warn("serving a qip.sh certificate on a non-loopback address — its private key is published publicly, so this padlock is NOT server authentication (a MITM on this network can impersonate); use tls mode files for anything untrusted parties can reach",
 		"listener", name, "zone", zone, "address", addr)
 }
 

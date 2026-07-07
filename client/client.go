@@ -573,9 +573,9 @@ func (c *Client) authenticate(ctx context.Context, req *http.Request) error {
 			return err
 		}
 		sig := ed25519.Sign(c.edPriv, wire.KeyringSigningInput(chal, req.Method, req.URL.Path, req.URL.RawQuery))
-		req.Header.Set("X-Quicsql-Key", c.edPubLine)
-		req.Header.Set("X-Quicsql-Challenge", chal)
-		req.Header.Set("X-Quicsql-Signature", base64.StdEncoding.EncodeToString(sig))
+		req.Header.Set(wire.HeaderKeyringKey, c.edPubLine)
+		req.Header.Set(wire.HeaderKeyringChallenge, chal)
+		req.Header.Set(wire.HeaderKeyringSignature, base64.StdEncoding.EncodeToString(sig))
 	case c.user != "":
 		req.SetBasicAuth(c.user, c.pw)
 	case c.token != "":

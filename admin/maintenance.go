@@ -126,7 +126,7 @@ func (h *Handler) logicalReclaim(w http.ResponseWriter, r *http.Request, req mai
 	if req.Op == "reclaimable" {
 		n, err := reclaimer.ReclaimableBytes()
 		if err != nil {
-			h.log.Error("quicsql/admin: reclaimable probe", "db", req.Database, "err", err)
+			h.log.Error("admin: reclaimable probe", "db", req.Database, "err", err)
 			h.auditFail(r, req.Op, req.Database, "probe failed")
 			writeErr(w, http.StatusInternalServerError, "reclaimable probe failed")
 			return
@@ -137,7 +137,7 @@ func (h *Handler) logicalReclaim(w http.ResponseWriter, r *http.Request, req mai
 	}
 	n, err := reclaimer.CompactLogicalOnline()
 	if err != nil {
-		h.log.Error("quicsql/admin: logical compact", "db", req.Database, "err", err)
+		h.log.Error("admin: logical compact", "db", req.Database, "err", err)
 		h.auditFail(r, req.Op, req.Database, "reclaim failed")
 		writeErr(w, http.StatusInternalServerError, "logical reclaim failed")
 		return
@@ -189,7 +189,7 @@ func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request, req mainten
 		return err
 	})
 	if rawErr != nil {
-		h.log.Error("quicsql/admin: checkpoint", "db", req.Database, "err", rawErr)
+		h.log.Error("admin: checkpoint", "db", req.Database, "err", rawErr)
 		h.auditFail(r, "checkpoint", req.Database, "checkpoint failed")
 		writeErr(w, http.StatusInternalServerError, "checkpoint failed (is the database in WAL mode?)")
 		return
@@ -222,7 +222,7 @@ func (h *Handler) offlineCompact(w http.ResponseWriter, r *http.Request, req mai
 	}
 	defer release()
 	if err := compacter.CompactOffline(); err != nil {
-		h.log.Error("quicsql/admin: offline compact", "db", req.Database, "err", err)
+		h.log.Error("admin: offline compact", "db", req.Database, "err", err)
 		h.auditFail(r, "compact", req.Database, "compact failed")
 		writeErr(w, http.StatusInternalServerError, "compact failed")
 		return
@@ -255,7 +255,7 @@ func (h *Handler) onlineReclaim(w http.ResponseWriter, r *http.Request, req main
 		reclaimed, err = reclaimer.CompactOnline(req.MaxBytes)
 	}
 	if err != nil {
-		h.log.Error("quicsql/admin: online reclaim", "db", req.Database, "op", req.Op, "err", err)
+		h.log.Error("admin: online reclaim", "db", req.Database, "op", req.Op, "err", err)
 		h.auditFail(r, req.Op, req.Database, "reclaim failed")
 		writeErr(w, http.StatusInternalServerError, "reclaim failed")
 		return
@@ -291,7 +291,7 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenan
 	defer releaseRef()
 	data, err := sqlite.Serialize(r.Context(), dbh.Handle.DB)
 	if err != nil {
-		h.log.Error("quicsql/admin: serialize snapshot", "db", req.Database, "err", err)
+		h.log.Error("admin: serialize snapshot", "db", req.Database, "err", err)
 		h.auditFail(r, "snapshot", req.Database, "serialize failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot failed")
 		return
@@ -305,13 +305,13 @@ func (h *Handler) snapshot(w http.ResponseWriter, r *http.Request, req maintenan
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
-		h.log.Error("quicsql/admin: write snapshot", "db", req.Database, "err", err)
+		h.log.Error("admin: write snapshot", "db", req.Database, "err", err)
 		h.auditFail(r, "snapshot", req.Database, "write failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot write failed")
 		return
 	}
 	if err := f.Close(); err != nil {
-		h.log.Error("quicsql/admin: close snapshot", "db", req.Database, "err", err)
+		h.log.Error("admin: close snapshot", "db", req.Database, "err", err)
 		h.auditFail(r, "snapshot", req.Database, "write failed")
 		writeErr(w, http.StatusInternalServerError, "snapshot write failed")
 		return
@@ -367,7 +367,7 @@ func (h *Handler) snapshotEncrypted(w http.ResponseWriter, r *http.Request, req 
 	}
 	defer release()
 	if err := snap.SnapshotEncrypted(dest); err != nil {
-		h.log.Error("quicsql/admin: encrypted snapshot", "db", req.Database, "err", err)
+		h.log.Error("admin: encrypted snapshot", "db", req.Database, "err", err)
 		h.auditFail(r, "snapshot_encrypted", req.Database, "snapshot failed: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, "encrypted snapshot failed (a recipient-mode vault cannot be re-sealed in-band)")
 		return
@@ -422,7 +422,7 @@ func (h *Handler) vaultKeyMgmt(w http.ResponseWriter, r *http.Request, req maint
 		writeJSON(w, http.StatusOK, map[string]any{"database": req.Database, "members": members})
 	case "rewrap":
 		if err := km.Rewrap(); err != nil {
-			h.log.Error("quicsql/admin: vault rewrap", "db", req.Database, "err", err)
+			h.log.Error("admin: vault rewrap", "db", req.Database, "err", err)
 			h.auditFail(r, "rewrap", req.Database, "rewrap failed: "+err.Error())
 			writeErr(w, http.StatusBadRequest, "rewrap failed: "+err.Error())
 			return
@@ -431,7 +431,7 @@ func (h *Handler) vaultKeyMgmt(w http.ResponseWriter, r *http.Request, req maint
 		writeJSON(w, http.StatusOK, map[string]any{"status": "rewrapped", "database": req.Database})
 	case "rekey":
 		if err := km.Rekey(); err != nil {
-			h.log.Error("quicsql/admin: vault rekey", "db", req.Database, "err", err)
+			h.log.Error("admin: vault rekey", "db", req.Database, "err", err)
 			h.auditFail(r, "rekey", req.Database, "rekey failed: "+err.Error())
 			writeErr(w, http.StatusBadRequest, "rekey failed: "+err.Error())
 			return
@@ -452,7 +452,7 @@ func (h *Handler) writeGetErr(w http.ResponseWriter, db string, err error) {
 	case errors.Is(err, registry.ErrReserved), errors.Is(err, registry.ErrBusy):
 		writeErr(w, http.StatusServiceUnavailable, "database temporarily unavailable")
 	default:
-		h.log.Error("quicsql/admin: open database", "db", db, "err", err)
+		h.log.Error("admin: open database", "db", db, "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 	}
 }
