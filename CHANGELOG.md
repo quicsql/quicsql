@@ -5,12 +5,14 @@ All notable changes to quicSQL are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). quicSQL is **alpha**: a 0.x.0 bump may
 carry breaking changes without further ceremony.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-07
 
-The client-facing wave: browser and device clients become first-class (CORS,
-session tokens, self-service enrollment, a change feed), operations grow real
-backup/restore and vault key lifecycle, and the server becomes an embeddable
-core that product binaries extend with compiled-in feature modules.
+The biggest release yet: a wire-protocol unification and security-hardening
+pass, then the client-facing wave — browser and device clients become
+first-class (CORS, session tokens, self-service enrollment, a change feed),
+operations grow real backup/restore and vault key lifecycle, and the server
+becomes an embeddable core that product binaries extend with compiled-in
+feature modules.
 
 ### Added
 
@@ -73,32 +75,6 @@ core that product binaries extend with compiled-in feature modules.
 - **Docs & skills** — a JavaScript/browser clients guide and skill, the change-feed
   guide, and refreshed auth/administration/operations docs covering all of the above.
 
-### Changed
-
-- **White-label wire surface.** Everything on the wire is brand-neutral and
-  defined once in `internal/wire`: header names (`X-Session-Token`,
-  `X-Keyring-Key/Challenge/Signature`), the `st_` session-token prefix, a generic
-  `WWW-Authenticate` realm, the `__Host-session` cookie, and **unprefixed metric
-  names** (`databases`, `active_sessions` — previously `quicsql_*`).
-- **Lazy warming.** `registry.Warm(ctx, names)` now eagerly opens only the
-  config-declared seeds; meta-store databases (runtime-created and per-user
-  provisioned) open lazily on first request, so startup is no longer O(total
-  provisioned databases). (Signature change from `Warm(ctx)`; the server passes
-  seed names.)
-- `internal/httpjson` is exported as `httpjson` so feature modules can use it;
-  admin create/detach share one provisioning path.
-
-### Fixed
-
-- Enrollment-lifecycle contradictions and assorted security/perf hardening from
-  the post-feature audit wave, including audit coverage for every control-plane
-  denial and failure path.
-
-## [0.6.0] - 2026-07-04
-
-A wire-protocol unification plus a security-hardening pass.
-
-### Added
 - **`auth.sql_policy.allow_attach`** — a **development-only** switch that permits
   `ATTACH`/`DETACH`, and even then only for a **server-admin** on a **pinned Hrana
   session** (never the autocommit path); the attachment is torn down on session close.
@@ -130,6 +106,18 @@ A wire-protocol unification plus a security-hardening pass.
 - `docs/administration.md` — an operator / control-plane guide.
 
 ### Changed
+- **White-label wire surface.** Everything on the wire is brand-neutral and
+  defined once in `internal/wire`: header names (`X-Session-Token`,
+  `X-Keyring-Key/Challenge/Signature`), the `st_` session-token prefix, a generic
+  `WWW-Authenticate` realm, the `__Host-session` cookie, and **unprefixed metric
+  names** (`databases`, `active_sessions` — previously `quicsql_*`).
+- **Lazy warming.** `registry.Warm(ctx, names)` now eagerly opens only the
+  config-declared seeds; meta-store databases (runtime-created and per-user
+  provisioned) open lazily on first request, so startup is no longer O(total
+  provisioned databases). (Signature change from `Warm(ctx)`; the server passes
+  seed names.)
+- `internal/httpjson` is exported as `httpjson` so feature modules can use it;
+  admin create/detach share one provisioning path.
 - Result cells decode through the shared `wire` codec on both paths: raw
   `*client.Client` cells are now `int64`/`float64` instead of `json.Number`
   (`database/sql` / the driver already normalized, so they are unaffected), and
@@ -145,6 +133,9 @@ A wire-protocol unification plus a security-hardening pass.
   recompile if you drive `quicsql.net/session` directly).
 
 ### Fixed
+- Enrollment-lifecycle contradictions and assorted security/perf hardening from
+  the post-feature audit wave, including audit coverage for every control-plane
+  denial and failure path.
 - **Read-only pool poisoning:** `SetConnMode` now tightens `query_only=ON` before
   swapping in the write-denying authorizer (and reverses the order on restore), so a
   mid-transition failure can't return a connection to the pool carrying the
@@ -213,7 +204,6 @@ A wire-protocol unification plus a security-hardening pass.
 - First runnable multi-transport server (h1/h2c/h2/h3/unix) over the CGo-free
   gosqlite engine, with interactive Hrana sessions.
 
-[Unreleased]: https://github.com/quicsql/quicsql/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/quicsql/quicsql/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/quicsql/quicsql/compare/v0.5.0...v0.5.3
 [0.5.0]: https://github.com/quicsql/quicsql/compare/v0.4.0...v0.5.0
